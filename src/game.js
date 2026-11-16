@@ -657,38 +657,150 @@ function straightenOpen(pts) {
   return clean;
 }
 
-function circleFit(pts) {
-  if (!pts || pts.length < 6) return null;
+// Kreiserkennung. Mit Geodreieck: eine geschlossene Form ohne rechten Winkel
+// wird zum Kreis. Ohne Geodreieck nur bei echter Rundheit, sonst Vieleck.
+const CIRCLE_MAX_CORNER = 35 * Math.PI / 180; // rad, scharfe Ecke
+const CIRCLE_MAX_RAD_DEV = 0.15;              // Radius-Schwankung / Mittel
+const CIRCLE_MIN_ASPECT = 0.75;               // kürzere / längere Bounding-Box-Seite
+const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
+const CIRCLE_RIGHT_TOL = 10 * Math.PI / 180;  // Geodreieck: Toleranz für 90°
+const CIRCLE_MIN_R = 0.16;
+const CIRCLE_MAX_R = 4;
+
+function closedRing(pts) {
+  if (!pts || pts.length < 2) return pts;
+  if (dist(pts[0], pts[pts.length - 1]) <= 0.02) return pts.slice(0, -1);
+  return pts;
+}
+
+function ringLen(pts) {
+  let len = 0;
+  for (let i = 0; i < pts.length; i++) len += dist(pts[i], pts[(i + 1) % pts.length]);
+  return len;
+}
+
+function pointAlongRing(pts, s) {
+  const n = pts.length;
+  const segs = [];
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const L = dist(pts[i], pts[(i + 1) % n]);
+    segs.push(L);
+    total += L;
+  }
+  if (total < 1e-9) return { x: pts[0].x, y: pts[0].y };
+  s = ((s % total) + total) % total;
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const L = segs[i];
+    if (acc + L >= s - 1e-12) {
+      const t = L < 1e-12 ? 0 : (s - acc) / L;
+      const a = pts[i];
+      const b = pts[(i + 1) % n];
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    acc += L;
+  }
+  return { x: pts[0].x, y: pts[0].y };
+}
+
+function headingOf(a, b) {
+  return Math.atan2(b.y - a.y, b.x - a.x);
+}
+
+function angleDelta(a, b) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+function maxNetTurn(pts, windowLen) {
+  const total = ringLen(pts);
+  const W = Math.min(windowLen, total / 4);
+  if (W < 1e-6) return 0;
+  const samples = Math.max(24, pts.length * 2);
+  let best = 0;
+  for (let k = 0; k < samples; k++) {
+    const s = total * k / samples;
+    const p = pointAlongRing(pts, s);
+    const pb = pointAlongRing(pts, s - W);
+    const pf = pointAlongRing(pts, s + W);
+    best = Math.max(best, Math.abs(angleDelta(headingOf(pb, p), headingOf(p, pf))));
+  }
+  return best;
+}
+
+function ringCenter(pts) {
   let cx = 0;
   let cy = 0;
   for (const p of pts) {
     cx += p.x;
     cy += p.y;
   }
-  cx /= pts.length;
-  cy /= pts.length;
-  const radii = [];
+  return { x: cx / pts.length, y: cy / pts.length };
+}
+
+function circleFromPoints(pts) {
+  const ring = closedRing(pts);
+  if (!ring || ring.length < 3) return null;
+  const c = ringCenter(ring);
   let mean = 0;
-  for (const p of pts) {
-    const r = Math.hypot(p.x - cx, p.y - cy);
-    radii.push(r);
-    mean += r;
+  for (const p of ring) mean += Math.hypot(p.x - c.x, p.y - c.y);
+  mean /= ring.length;
+  if (mean < CIRCLE_MIN_R || mean > CIRCLE_MAX_R) return null;
+  return { x: c.x, y: c.y, r: mean };
+}
+
+function hasRightAngle(pts, tol) {
+  const ring = closedRing(pts);
+  if (!ring || ring.length < 3) return false;
+  const limit = tol == null ? CIRCLE_RIGHT_TOL : tol;
+  const angs = interiorAngles(ring);
+  for (const a of angs) {
+    if (Math.abs(a - Math.PI / 2) <= limit || Math.abs(a - Math.PI * 3 / 2) <= limit) return true;
   }
-  mean /= radii.length;
-  if (mean < 0.16 || mean > 4) return null;
+  return false;
+}
+
+function circleFit(pts) {
+  const ring = closedRing(pts);
+  if (!ring || ring.length < 6) return null;
+  const fit = circleFromPoints(ring);
+  if (!fit) return null;
+  const mean = fit.r;
   let dev = 0;
-  for (const r of radii) dev = Math.max(dev, Math.abs(r - mean));
-  if (dev > Math.max(0.07, mean * 0.16)) return null;
-  let len = 0;
-  for (let i = 1; i < pts.length; i++) len += dist(pts[i - 1], pts[i]);
-  len += dist(pts[0], pts[pts.length - 1]);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of ring) {
+    dev = Math.max(dev, Math.abs(Math.hypot(p.x - fit.x, p.y - fit.y) - mean));
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  }
+  if (dev > Math.max(0.06, mean * CIRCLE_MAX_RAD_DEV)) return null;
+  const bw = maxX - minX;
+  const bh = maxY - minY;
+  if (Math.min(bw, bh) < CIRCLE_MIN_ASPECT * Math.max(bw, bh)) return null;
+  const len = ringLen(ring);
   const circ = Math.PI * 2 * mean;
   if (len < circ * 0.72 || len > circ * 1.28) return null;
-  const angs = pts.map((p) => Math.atan2(p.y - cy, p.x - cx)).sort((a, b) => a - b);
+  const angs = ring.map((p) => Math.atan2(p.y - fit.y, p.x - fit.x)).sort((a, b) => a - b);
   let gap = angs[0] + Math.PI * 2 - angs[angs.length - 1];
   for (let i = 1; i < angs.length; i++) gap = Math.max(gap, angs[i] - angs[i - 1]);
   if (gap > Math.PI * 0.7) return null;
-  return { x: cx, y: cy, r: mean };
+  if (maxNetTurn(ring, mean * CIRCLE_TURN_WIN) > CIRCLE_MAX_CORNER) return null;
+  return fit;
+}
+
+function tryMakeCircle(pts) {
+  if (strokeSnaps()) {
+    const ring = closedRing(pts);
+    if (!ring || ring.length < 3 || Math.abs(signedArea(ring)) < 0.05) return null;
+    if (hasRightAngle(ring)) return null;
+    return circleFromPoints(ring);
+  }
+  return circleFit(pts);
 }
 
 function tidyTerrain(rawPts) {
@@ -1305,8 +1417,10 @@ function commitStroke(rawPts, color) {
     const r = clamp(Math.max(bw, bh) * 0.5, 0.12, 0.34);
     return spawnBlob(cx, cy, r, used);
   }
-  if (pts.length >= 6 && (closed || dist(pts[0], pts[pts.length - 1]) < 0.4)) {
-    const fit = circleFit(pts);
+  // Rundheit am Originalzug prüfen: simplify() macht aus einem Kreis
+  // sonst ein grobes Vieleck und würde echte Kreise verwerfen.
+  if (closed || dist(pts[0], pts[pts.length - 1]) < 0.4) {
+    const fit = tryMakeCircle(dedupe(rawPts));
     if (fit) return spawnRoller(fit.x, fit.y, fit.r, used);
   }
   if (!closed) {
