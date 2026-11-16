@@ -821,21 +821,83 @@ function track(body, meta) {
   return meta;
 }
 
-function addTriFixture(body, tri, opt) {
-  const area = Math.abs(signedArea(tri));
-  if (area < 0.0015) return false;
-  let verts = tri.map((p) => V(p.x, p.y));
-  if (signedArea(tri) < 0) verts.reverse();
-  const e1 = Math.hypot(tri[0].x - tri[1].x, tri[0].y - tri[1].y);
-  const e2 = Math.hypot(tri[1].x - tri[2].x, tri[1].y - tri[2].y);
-  const e3 = Math.hypot(tri[2].x - tri[0].x, tri[2].y - tri[0].y);
-  if (Math.min(e1, e2, e3) < 0.03) return false;
+// Fixtures dünner als das rechnen sich schlecht: zwei Kontaktpunkte liegen
+// dicht beieinander und Normalen kippen. Solche Stücke werden verworfen.
+const MIN_FIX_H = 0.06;
+
+function polyMinWidth(pts) {
+  let best = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 1e-9) return 0;
+    let far = 0;
+    for (const c of pts) {
+      far = Math.max(far, Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) / len);
+    }
+    best = Math.min(best, far);
+  }
+  return best;
+}
+
+// planck.Polygon macht aus entarteten Punkten still eine 2-m-Kiste (_setAsBox(1,1)).
+// Für Spielerformen wird so ein Ersatz abgelehnt statt eingebaut.
+function makePolygonFixture(body, pts, opt) {
+  let shape;
   try {
-    body.createFixture(new planck.Polygon(verts), opt);
+    shape = new planck.Polygon(pts.map((p) => V(p.x, p.y)));
+  } catch (err) {
+    return false;
+  }
+  if (!shape.m_vertices || shape.m_count !== pts.length) return false;
+  for (let i = 0; i < shape.m_count; i++) {
+    const v = shape.m_vertices[i];
+    if (!pts.some((p) => Math.abs(p.x - v.x) < 1e-6 && Math.abs(p.y - v.y) < 1e-6)) return false;
+  }
+  try {
+    body.createFixture(shape, opt);
     return true;
   } catch (err) {
     return false;
   }
+}
+
+function addTriFixture(body, tri, opt) {
+  const area = Math.abs(signedArea(tri));
+  if (area < 0.0015) return false;
+  const verts = signedArea(tri) < 0 ? tri.slice().reverse() : tri.slice();
+  const e1 = Math.hypot(tri[0].x - tri[1].x, tri[0].y - tri[1].y);
+  const e2 = Math.hypot(tri[1].x - tri[2].x, tri[1].y - tri[2].y);
+  const e3 = Math.hypot(tri[2].x - tri[0].x, tri[2].y - tri[0].y);
+  if (Math.min(e1, e2, e3) < 0.03) return false;
+  if (polyMinWidth(tri) < MIN_FIX_H) return false;
+  return makePolygonFixture(body, verts, opt);
+}
+
+// Legt kurze Kanten zusammen, bevor die Form in Dreiecke zerlegt wird.
+// Entfernt wird jeweils die Ecke, deren Wegfall die Fläche am wenigsten ändert.
+function mergeShortEdges(pts, minLen) {
+  const out = pts.map((p) => ({ x: p.x, y: p.y }));
+  while (out.length > 3) {
+    let shortest = -1;
+    let shortLen = minLen;
+    for (let i = 0; i < out.length; i++) {
+      const d = dist(out[i], out[(i + 1) % out.length]);
+      if (d < shortLen) { shortLen = d; shortest = i; }
+    }
+    if (shortest < 0) break;
+    const n = out.length;
+    const cost = (k) => {
+      const a = out[(k + n - 1) % n];
+      const b = out[k];
+      const c = out[(k + 1) % n];
+      return Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+    };
+    const j = (shortest + 1) % n;
+    out.splice(cost(shortest) <= cost(j) ? shortest : j, 1);
+  }
+  return out;
 }
 
 function fixtureOpt(extra) {
@@ -851,12 +913,8 @@ function addConvexFixture(body, pts, opt) {
   const maxV = (planck.Settings && planck.Settings.maxPolygonVertices) || 8;
   if (pts.length < 3 || pts.length > maxV || !isConvex(pts)) return false;
   if (Math.abs(signedArea(pts)) < 0.04) return false;
-  try {
-    body.createFixture(new planck.Polygon(pts.map((p) => V(p.x, p.y))), opt);
-    return true;
-  } catch (err) {
-    return false;
-  }
+  if (polyMinWidth(pts) < MIN_FIX_H) return false;
+  return makePolygonFixture(body, pts, opt);
 }
 
 function mountOutline(body, worldPts, closed, color, width) {
@@ -968,9 +1026,10 @@ function spawnSolid(pts, opt) {
   const fopt = fixtureOpt({ density: opt.density || 1.5, friction: 0.72, restitution: 0 });
   let made = addConvexFixture(body, local, fopt) ? 1 : 0;
   if (!made) {
-    let tris = triangulate(local);
+    const merged = ensureCCW(mergeShortEdges(local, MIN_FIX_H));
+    let tris = triangulate(merged);
     if (!tris.length) {
-      const hull = convexHull(local);
+      const hull = convexHull(merged);
       tris = [];
       for (let i = 1; i < hull.length - 1; i++) tris.push([hull[0], hull[i], hull[i + 1]]);
     }
@@ -1254,7 +1313,9 @@ function commitStroke(rawPts, color) {
     if (a && b && a !== b) return spawnRope(a, b, pts, used);
   }
   if (closed && !selfIntersects(pts, true) && Math.abs(signedArea(pts)) >= 0.05) {
-    return spawnSolid(regularizeClosed(pts), { color: used });
+    const solid = spawnSolid(regularizeClosed(pts), { color: used });
+    if (solid) return solid;
+    return spawnWire(pts.concat([{ x: pts[0].x, y: pts[0].y }]), { color: used });
   }
   if (!closed) return spawnWire(straightenOpen(pts), { color: used });
   return spawnWire(pts, { color: used });
@@ -3061,6 +3122,33 @@ function runTests() {
         lines.push("INFO impact " + jumpName + " vHit " + vHit.toFixed(2) + " vAfter " + vAfter.toFixed(2) + " endY " + jumpEndY.toFixed(2));
       }
       check("frame rest waits for the next fixed step", advanceFixed({ acc: 0 }, 0.0172, () => {}) === 1 && advanceFixed({ acc: 0 }, 0.0005, () => {}) === 0);
+      buildLevel(LEVELS["ein-klotz"]);
+      const spiky = [];
+      for (let k = 0; k < 16; k++) {
+        const ang = k * Math.PI / 8;
+        const rr = k % 2 ? 0.55 : 2.1;
+        const da = k % 2 ? 0 : 0.015;
+        spiky.push({ x: 16 + rr * Math.cos(ang - da), y: 9 + rr * Math.sin(ang - da) });
+        if (!(k % 2)) spiky.push({ x: 16 + rr * Math.cos(ang + da), y: 9 + rr * Math.sin(ang + da) });
+      }
+      spiky.push({ x: spiky[0].x, y: spiky[0].y });
+      const spikyDraw = commitStroke(spiky, "#7a4fbf");
+      let thinFix = 0;
+      let boxFix = 0;
+      let polyFix = 0;
+      for (let f = spikyDraw && spikyDraw.body ? spikyDraw.body.getFixtureList() : null; f; f = f.getNext()) {
+        const sh = f.getShape();
+        if (!sh.m_vertices || sh.m_type !== "polygon") continue;
+        polyFix++;
+        const vs = [];
+        for (let k = 0; k < sh.m_count; k++) vs.push(sh.m_vertices[k]);
+        if (polyMinWidth(vs) < MIN_FIX_H - 1e-9) thinFix++;
+        if (vs.some((v) => Math.hypot(v.x, v.y) > 2.4)) boxFix++;
+      }
+      check("thin spikes give no sliver fixtures", !!spikyDraw && spikyDraw.kind === "solid" && polyFix > 0 && thinFix === 0 && boxFix === 0);
+      const flatBody = world.createDynamicBody({ position: V(5, 9) });
+      check("degenerate polygon is rejected, not a 2 m box", !makePolygonFixture(flatBody, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }], fixtureOpt()) && !flatBody.getFixtureList());
+      world.destroyBody(flatBody);
     }
 
     buildLevel(LEVELS["die-luecke"]);
