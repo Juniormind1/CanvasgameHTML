@@ -1291,6 +1291,10 @@ function eraseAt(x, y) {
   return false;
 }
 
+function nudgeDirFromClick(ballX, clickX) {
+  return clickX >= ballX ? -1 : 1;
+}
+
 function doNudge(dir) {
   if (!ball || won) return;
   if (simTime < (ball._cool || 0)) return;
@@ -1528,7 +1532,7 @@ function burstConfetti() {
     origins.push({ x: p.x, y: p.y });
   }
   if (!origins.length) return;
-  const total = 1200;
+  const total = 100;
   const pieces = [];
   for (let i = 0; i < total; i++) {
     const origin = origins[i % origins.length];
@@ -2203,6 +2207,7 @@ function onPointerDown(e) {
   if (mode === "play" && ball) {
     const bp = ball.getPosition();
     pointer.onBall = Math.hypot(bp.x - w.x, bp.y - w.y) < BALL_R * 1.3;
+    pointer.nudgeDir = nudgeDirFromClick(bp.x, w.x);
   }
   canvas.setPointerCapture(e.pointerId);
 }
@@ -2239,10 +2244,7 @@ function onPointerUp(e) {
     const now = performance.now();
     if (mode === "play" && now - lastTap < 320) eraseAt(w.x, w.y);
     lastTap = now;
-    if (mode === "play" && current.onBall) {
-      const bp = ball.getPosition();
-      doNudge(w.x >= bp.x ? 1 : -1);
-    }
+    if (mode === "play" && current.onBall) doNudge(current.nudgeDir);
     return;
   }
   if (mode === "play") commitStroke(current.pts, COLORS[colorIndex]);
@@ -2576,8 +2578,8 @@ function runTests() {
     for (const star of stars) star.got = true;
     step(1 / 60);
     const starPos = stars[0].body.getPosition();
-    check("confetti has a thousand pieces", confetti.length >= 1000);
-    check("confetti rectangles have two colors", confetti.length >= 1000 && confetti.every((c) => c.front !== c.back));
+    check("confetti has one hundred pieces", confetti.length === 100);
+    check("confetti rectangles have two colors", confetti.length === 100 && confetti.every((c) => c.front !== c.back));
     check("confetti rotates", confetti.every((c) => c.spinV !== 0 && c.flipV !== 0));
     check("confetti starts at the star", confetti.every((c) => Math.hypot(c.ox - starPos.x, c.oy - starPos.y) < 0.02));
     let turned = false;
@@ -2591,7 +2593,9 @@ function runTests() {
     for (const star of stars) star.got = true;
     step(1 / 60);
     const used = new Set(confetti.map((c) => c.ox.toFixed(2) + "," + c.oy.toFixed(2)));
-    check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length >= 1000);
+    check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length === 100);
+    check("click on the left half pushes right", nudgeDirFromClick(5, 4.7) === 1);
+    check("click on the right half pushes left", nudgeDirFromClick(5, 5.2) === -1);
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
