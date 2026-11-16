@@ -1589,9 +1589,49 @@ function clampDragGoal(body, goal) {
   return { x: cx, y: cy };
 }
 
+function hingeWorldPoints(body) {
+  const pts = [];
+  for (const pin of pins) {
+    for (const j of pin.joints) {
+      if (!j) continue;
+      if (j.getBodyA() !== body && j.getBodyB() !== body) continue;
+      const wp = pinWorld(pin);
+      if (pts.some((p) => Math.hypot(p.x - wp.x, p.y - wp.y) < 0.05)) continue;
+      pts.push({ x: wp.x, y: wp.y, pin });
+      break;
+    }
+  }
+  return pts;
+}
+
+function constrainNailedGoal(body, goal) {
+  if (!playDrag) return null;
+  const hinges = hingeWorldPoints(body);
+  if (hinges.length >= 2) {
+    const g = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+    return { x: g.x, y: g.y, hinges };
+  }
+  if (hinges.length === 1) {
+    const p = hinges[0];
+    const grab = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+    const r = Math.hypot(grab.x - p.x, grab.y - p.y);
+    if (r < 0.02) return { x: p.x, y: p.y, hinges };
+    const dx = goal.x - p.x;
+    const dy = goal.y - p.y;
+    const d = Math.hypot(dx, dy) || 1;
+    return { x: p.x + dx / d * r, y: p.y + dy / d * r, hinges };
+  }
+  return null;
+}
+
 function chaseDrag() {
   if (!playDrag || !world || !playDrag.joint) return;
   const body = playDrag.body;
+  const nailed = constrainNailedGoal(body, playDrag.goal);
+  if (nailed) {
+    playDrag.joint.setTarget(V(nailed.x, nailed.y));
+    return;
+  }
   const anchor = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
   const com = body.getPosition();
   const offx = com.x - anchor.x;
@@ -1606,6 +1646,34 @@ function chaseDrag() {
 function snapDrag() {
   if (!playDrag || !playDrag.body) return;
   const body = playDrag.body;
+  const nailed = constrainNailedGoal(body, playDrag.goal);
+  if (nailed) {
+    const hinges = nailed.hinges;
+    if (hinges.length >= 2) {
+      body.setLinearVelocity(V(0, 0));
+      body.setAngularVelocity(0);
+      playDrag.joint.setTarget(V(nailed.x, nailed.y));
+      return;
+    }
+    const p = hinges[0];
+    const grab = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+    const a0 = Math.atan2(grab.y - p.y, grab.x - p.x);
+    const a1 = Math.atan2(nailed.y - p.y, nailed.x - p.x);
+    let dang = a1 - a0;
+    while (dang > Math.PI) dang -= Math.PI * 2;
+    while (dang < -Math.PI) dang += Math.PI * 2;
+    const pos = body.getPosition();
+    const c = Math.cos(dang);
+    const s = Math.sin(dang);
+    const ox = pos.x - p.x;
+    const oy = pos.y - p.y;
+    body.setTransform(V(p.x + ox * c - oy * s, p.y + ox * s + oy * c), body.getAngle() + dang);
+    body.setLinearVelocity(V(0, 0));
+    body.setAngularVelocity(0);
+    body.setAwake(true);
+    playDrag.joint.setTarget(V(nailed.x, nailed.y));
+    return;
+  }
   const anchor = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
   const com = body.getPosition();
   const offx = com.x - anchor.x;
@@ -4379,6 +4447,15 @@ function runTests() {
         { x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y },
       ], color);
     }
+    function tinyNail(x, y) {
+      const pts = [];
+      for (let i = 0; i <= 10; i++) {
+        const a = (i / 10) * Math.PI * 2;
+        pts.push({ x: x + Math.cos(a) * 0.16, y: y + Math.sin(a) * 0.16 });
+      }
+      return commitStroke(pts, "#2b2b2b");
+    }
+
     buildLevel(LEVELS["ein-klotz"]);
     const tintA = ancBox(19, 1.4, 1.5, 1, "#3c7fd6");
     for (let i = 0; i < 90; i++) step(1 / 60);
@@ -4407,6 +4484,45 @@ function runTests() {
     for (let i = 0; i < 90; i++) step(1 / 60);
     finishPlayStroke([{ x: 20.6, y: 8.85 }, { x: 21.1, y: 9.1 }, { x: 21.5, y: 9.3 }]);
     check("anchor tint follows the local ground color", !!tintLeft && !!tintRight && isAnchored(tintLeft.body) && isAnchored(tintRight.body) && tintLeft.color === "#3f8f55" && tintRight.color === "#c9854a");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    tinyNail(16, 1.42);
+    const nailHang = ancBox(14, 1.4, 4, 0.8, "#8d5a34");
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    const nailPin = pins.find((p) => p.userMade);
+    const nailJoints = nailPin ? nailPin.joints.filter(Boolean).length : 0;
+    const nailGrabX = 17.6;
+    const nailGrabY = nailHang.body.getPosition().y;
+    const nailP0 = pinWorld(nailPin);
+    const nailLocal = nailHang.body.getLocalPoint(V(nailGrabX, nailGrabY));
+    const nailR0 = Math.hypot(nailGrabX - nailP0.x, nailGrabY - nailP0.y);
+    const nailAng0 = nailHang.body.getAngle();
+    const nailDragOk = beginDrag(nailGrabX, nailGrabY);
+    moveDrag(nailGrabX + 2.2, nailGrabY + 2.8);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    const nailP1 = pinWorld(nailPin);
+    const nailGrabNow = nailHang.body.getWorldPoint(V(nailLocal.x, nailLocal.y));
+    const nailR1 = Math.hypot(nailGrabNow.x - nailP1.x, nailGrabNow.y - nailP1.y);
+    const nailAng1 = nailHang.body.getAngle();
+    endDrag();
+    check("nailed body stays on the nail while dragged", !!nailHang && nailJoints >= 1 && nailDragOk && Math.hypot(nailP1.x - nailP0.x, nailP1.y - nailP0.y) < 0.05);
+    check("nailed drag keeps the grab distance and rotates", Math.abs(nailR1 - nailR0) < 0.08 && Math.abs(nailAng1 - nailAng0) > 0.25);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    tinyNail(14.5, 1.42);
+    tinyNail(17.5, 1.42);
+    const nailLock = ancBox(13.5, 1.4, 5, 0.85, "#3c7fd6");
+    for (let i = 0; i < 80; i++) step(1 / 60);
+    const nailLockPins = pins.filter((p) => p.userMade && p.joints.some(Boolean));
+    const nailLockPos = nailLock.body.getPosition();
+    const nailLockAng = nailLock.body.getAngle();
+    const nailLockDrag = beginDrag(nailLockPos.x, nailLockPos.y);
+    moveDrag(nailLockPos.x + 2, nailLockPos.y + 3);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    const nailLockPos2 = nailLock.body.getPosition();
+    const nailLockAng2 = nailLock.body.getAngle();
+    endDrag();
+    check("a body locked by two nails does not move when dragged", nailLockPins.length >= 2 && nailLockDrag && Math.hypot(nailLockPos2.x - nailLockPos.x, nailLockPos2.y - nailLockPos.y) < 0.08 && Math.abs(nailLockAng2 - nailLockAng) < 0.08);
 
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
