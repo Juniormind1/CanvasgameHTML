@@ -1089,6 +1089,7 @@ function rememberPin(x, y, body, userMade) {
     body,
     userMade: !!userMade,
     joints: [],
+    motor: 0,
   };
   pins.push(pin);
   return pin;
@@ -1108,6 +1109,7 @@ function attachExistingPins(body, meta) {
       collideConnected: false,
     }));
     pin.joints.push(joint);
+    applyNailMotor(pin);
     n++;
   }
   return n;
@@ -1587,6 +1589,33 @@ function clampDragGoal(body, goal) {
     dy = lefty - ny * into;
   }
   return { x: cx, y: cy };
+}
+
+const NAIL_MOTOR_SPEED = Math.PI / 2;
+const NAIL_MOTOR_TORQUE = 8000;
+const NAIL_HIT = 0.32;
+
+function applyNailMotor(pin) {
+  if (!pin) return;
+  const mode = pin.motor || 0;
+  const on = mode !== 0;
+  const speed = mode * NAIL_MOTOR_SPEED;
+  for (const j of pin.joints) {
+    if (!j) continue;
+    j.enableMotor(on);
+    if (on) {
+      j.setMotorSpeed(speed);
+      j.setMaxMotorTorque(NAIL_MOTOR_TORQUE);
+    }
+  }
+}
+
+function cycleNailMotor(pin) {
+  if (!pin) return 0;
+  const cur = pin.motor || 0;
+  pin.motor = cur === 0 ? 1 : cur === 1 ? -1 : 0;
+  applyNailMotor(pin);
+  return pin.motor;
 }
 
 function hingeWorldPoints(body) {
@@ -2456,19 +2485,43 @@ function drawPin(pin) {
   const p = pinWorld(pin);
   const s = worldToScreen(p.x, p.y);
   const r = 0.16 * camScale();
+  const motor = pin.motor || 0;
   ctx.save();
   ctx.translate(s.x, s.y);
-  ctx.strokeStyle = "#24324a";
+  ctx.strokeStyle = motor ? (motor > 0 ? "#1f7a4c" : "#8a3a22") : "#24324a";
   ctx.fillStyle = "#f4e6c6";
-  ctx.lineWidth = 2;
+  ctx.lineWidth = motor ? 2.4 : 2;
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.rotate(simTime * 2);
-  ctx.beginPath();
-  ctx.arc(0, 0, r * 0.72, 0.4, Math.PI * 1.7);
-  ctx.stroke();
+  if (motor) {
+    ctx.rotate(motor * simTime * NAIL_MOTOR_SPEED);
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.82, -0.95, 0.95);
+    ctx.stroke();
+    const ar = r * 0.82;
+    const tip = 0.95;
+    const tx = Math.cos(tip) * ar;
+    const ty = Math.sin(tip) * ar;
+    const dir = motor > 0 ? 1 : -1;
+    const hx = tx - Math.cos(tip) * r * 0.28;
+    const hy = ty - Math.sin(tip) * r * 0.28;
+    const px = -Math.sin(tip) * r * 0.2 * dir;
+    const py = Math.cos(tip) * r * 0.2 * dir;
+    ctx.beginPath();
+    ctx.moveTo(tx, ty);
+    ctx.lineTo(hx + px, hy + py);
+    ctx.lineTo(hx - px, hy - py);
+    ctx.closePath();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.fill();
+  } else {
+    ctx.rotate(simTime * 2);
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.72, 0.4, Math.PI * 1.7);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -3347,7 +3400,9 @@ function onPointerDown(e) {
     pointer = { tap: true };
     return;
   }
-  const kind = mode === "play" ? pressKind(w.x, w.y) : "draw";
+  let kind = mode === "play" ? pressKind(w.x, w.y) : "draw";
+  const nailHit = mode === "play" && kind !== "nudge" ? nearestPin(w.x, w.y, NAIL_HIT) : null;
+  if (nailHit && kind === "drag") kind = "draw";
   const ink = kind !== "drag" && strokeSnaps() ? snapDrawPoint(w) : w;
   pointer = {
     id: e.pointerId,
@@ -3361,6 +3416,7 @@ function onPointerDown(e) {
     downT: performance.now(),
     grab: null,
     trail: [{ x: w.x, y: w.y }],
+    nailClick: nailHit || null,
   };
   if (kind === "nudge") {
     const bp = ball.getPosition();
@@ -3370,7 +3426,7 @@ function onPointerDown(e) {
     pointer.grab = { x: w.x, y: w.y };
     engageGrab(pointer.grab);
   }
-  canvas.setPointerCapture(e.pointerId);
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
 }
 
 function pressKind(x, y) {
@@ -3458,6 +3514,10 @@ function onPointerUp(e) {
     return;
   }
   if (!current.moved) {
+    if (mode === "play" && current.nailClick) {
+      cycleNailMotor(current.nailClick);
+      return;
+    }
     const now = performance.now();
     if (mode === "play" && now - lastTap < 320) eraseAt(w.x, w.y);
     lastTap = now;
@@ -4524,6 +4584,37 @@ function runTests() {
     endDrag();
     check("a body locked by two nails does not move when dragged", nailLockPins.length >= 2 && nailLockDrag && Math.hypot(nailLockPos2.x - nailLockPos.x, nailLockPos2.y - nailLockPos.y) < 0.08 && Math.abs(nailLockAng2 - nailLockAng) < 0.08);
 
+    buildLevel(LEVELS["ein-klotz"]);
+    tinyNail(12, 1.42);
+    const nailLone = pins.find((p) => p.userMade);
+    const nailLone0 = cycleNailMotor(nailLone);
+    const nailLone1 = cycleNailMotor(nailLone);
+    const nailLone2 = cycleNailMotor(nailLone);
+    check("a lone nail still cycles its motor state", nailLone0 === 1 && nailLone1 === -1 && nailLone2 === 0 && nailLone.motor === 0);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const nailMot = rememberPin(16, 8, ground, true);
+    const nailMotBox = ancBox(14, 7.2, 4, 0.8, "#8d5a34");
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    const nailMotScr = worldToScreen(pinWorld(nailMot).x, pinWorld(nailMot).y);
+    onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 61 });
+    onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 61 });
+    check("clicking a nail cycles to left turn", nailMot.motor === 1 && !playDrag && nailMot.joints.some(Boolean));
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const nailWccw = nailMotBox.body.getAngularVelocity();
+    check("left motor reaches about +90 deg/s", Math.abs(nailWccw - Math.PI / 2) < 0.35 && !stats.dragTrick);
+    onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
+    onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
+    check("second click switches to right turn", nailMot.motor === -1);
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const nailWcw = nailMotBox.body.getAngularVelocity();
+    check("right motor reaches about -90 deg/s", Math.abs(nailWcw + Math.PI / 2) < 0.35);
+    onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
+    onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
+    check("third click turns the motor off", nailMot.motor === 0 && nailMot.joints.every((j) => !j || !j.isMotorEnabled()));
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const nailWoff = nailMotBox.body.getAngularVelocity();
+    check("an off nail joint is not driven", Math.abs(nailWoff) < 1.0);
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
