@@ -71,6 +71,8 @@ const BALL_R = 0.34;
 const THICK = 0.16;
 const COLORS = ["#d94b3a", "#ef8b2c", "#e6b423", "#3e9a48", "#3c7fd6", "#7a4fbf", "#8d5a34", "#2b2b2b"];
 
+if (typeof planck !== "undefined" && planck.Settings) planck.Settings.velocityThreshold = 2.2;
+
 const canvas = document.getElementById("view");
 const ctx = canvas.getContext("2d");
 const namebox = document.getElementById("namebox");
@@ -507,6 +509,210 @@ function convexHull(pts) {
   return lower.concat(upper);
 }
 
+function turnAngle(a, b, c) {
+  const ix = b.x - a.x;
+  const iy = b.y - a.y;
+  const ox = c.x - b.x;
+  const oy = c.y - b.y;
+  return Math.atan2(ix * oy - iy * ox, ix * ox + iy * oy);
+}
+
+function armAngle(prev, cur, next) {
+  const v1x = prev.x - cur.x;
+  const v1y = prev.y - cur.y;
+  const v2x = next.x - cur.x;
+  const v2y = next.y - cur.y;
+  return Math.atan2(Math.abs(v1x * v2y - v1y * v2x), v1x * v2x + v1y * v2y);
+}
+
+function isConvex(pts) {
+  if (pts.length < 3) return false;
+  let sign = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const c = pts[(i + 2) % pts.length];
+    const cr = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (Math.abs(cr) < 1e-8) continue;
+    const s = cr > 0 ? 1 : -1;
+    if (!sign) sign = s;
+    else if (s !== sign) return false;
+  }
+  return sign !== 0;
+}
+
+function pruneByTurn(pts, maxDeg) {
+  const limit = maxDeg * Math.PI / 180;
+  const cur = pts.map((p) => ({ x: p.x, y: p.y }));
+  let guard = 0;
+  while (cur.length > 3 && guard++ < 48) {
+    let bestI = -1;
+    let best = Infinity;
+    for (let i = 0; i < cur.length; i++) {
+      const turn = Math.abs(turnAngle(cur[(i + cur.length - 1) % cur.length], cur[i], cur[(i + 1) % cur.length]));
+      if (turn < best) {
+        best = turn;
+        bestI = i;
+      }
+    }
+    if (bestI < 0 || best >= limit) break;
+    cur.splice(bestI, 1);
+  }
+  return cur;
+}
+
+function interiorAngles(pts) {
+  const ccw = ensureCCW(pts);
+  const out = [];
+  for (let i = 0; i < ccw.length; i++) {
+    const turn = turnAngle(ccw[(i + ccw.length - 1) % ccw.length], ccw[i], ccw[(i + 1) % ccw.length]);
+    out.push(Math.PI - turn);
+  }
+  return out;
+}
+
+function isRoughRect(pts) {
+  if (pts.length !== 4) return false;
+  const angs = interiorAngles(pts);
+  let dev = 0;
+  for (const ang of angs) {
+    if (ang < 55 * Math.PI / 180 || ang > 125 * Math.PI / 180) return false;
+    dev += Math.abs(ang - Math.PI / 2);
+  }
+  return dev / 4 < 28 * Math.PI / 180;
+}
+
+function orientedRect(corners, allPts) {
+  let best = -1;
+  let ang = 0;
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i];
+    const b = corners[(i + 1) % corners.length];
+    const len = dist(a, b);
+    if (len > best) {
+      best = len;
+      ang = Math.atan2(b.y - a.y, b.x - a.x);
+    }
+  }
+  const c = Math.cos(ang);
+  const s = Math.sin(ang);
+  let minU = Infinity;
+  let maxU = -Infinity;
+  let minV = Infinity;
+  let maxV = -Infinity;
+  const src = allPts && allPts.length ? allPts : corners;
+  for (const p of src) {
+    const u = p.x * c + p.y * s;
+    const v = -p.x * s + p.y * c;
+    if (u < minU) minU = u;
+    if (u > maxU) maxU = u;
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+  }
+  if (maxU - minU < 0.08 || maxV - minV < 0.08) return null;
+  const uv = (u, v) => ({ x: u * c - v * s, y: u * s + v * c });
+  return [uv(minU, minV), uv(maxU, minV), uv(maxU, maxV), uv(minU, maxV)];
+}
+
+function snapTriangle(corners) {
+  const pts = corners.map((p) => ({ x: p.x, y: p.y }));
+  let bestI = 0;
+  let bestDev = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const dev = Math.abs(armAngle(pts[(i + 2) % 3], pts[i], pts[(i + 1) % 3]) - Math.PI / 2);
+    if (dev < bestDev) {
+      bestDev = dev;
+      bestI = i;
+    }
+  }
+  if (bestDev > 22 * Math.PI / 180) return pts;
+  const cur = pts[bestI];
+  const prev = pts[(bestI + 2) % 3];
+  const next = pts[(bestI + 1) % 3];
+  const bax = prev.x - cur.x;
+  const bay = prev.y - cur.y;
+  const bcx = next.x - cur.x;
+  const bcy = next.y - cur.y;
+  const cross = bax * bcy - bay * bcx;
+  const la = Math.hypot(bax, bay) || 1;
+  const lb = Math.hypot(bcx, bcy) || 1;
+  const sign = cross >= 0 ? 1 : -1;
+  pts[(bestI + 1) % 3] = {
+    x: cur.x + (-bay / la) * sign * lb,
+    y: cur.y + (bax / la) * sign * lb,
+  };
+  return pts;
+}
+
+function cornerGap(hull, box) {
+  let worst = 0;
+  for (const c of box) {
+    let best = Infinity;
+    for (const h of hull) best = Math.min(best, dist(c, h));
+    worst = Math.max(worst, best);
+  }
+  return worst;
+}
+
+function regularizeClosed(pts) {
+  const src = ensureCCW(dedupe(pts));
+  if (src.length < 3 || Math.abs(signedArea(src)) < 0.04) return src;
+  const hull = ensureCCW(convexHull(src));
+  if (hull.length < 3) return src;
+  const area = Math.abs(signedArea(src));
+  const hArea = Math.abs(signedArea(hull));
+  if (hArea < 1e-4 || area / hArea < 0.7) return src;
+  let shape = pruneByTurn(hull, 25);
+  if (shape.length > 4 && shape.length <= 6) {
+    const softer = pruneByTurn(shape, 42);
+    if ((softer.length === 4 && isRoughRect(softer)) || softer.length === 3) shape = softer;
+  }
+  if (shape.length === 4 && isRoughRect(shape)) {
+    const box = orientedRect(shape, src);
+    if (box) return ensureCCW(box);
+  }
+  if (shape.length === 3) return ensureCCW(snapTriangle(shape));
+  if (shape.length > 4) {
+    const box = orientedRect(hull, src);
+    if (box) {
+      const bArea = Math.abs(signedArea(box));
+      const shortSide = Math.min(dist(box[0], box[1]), dist(box[1], box[2]));
+      if (bArea > 1e-4 && hArea / bArea > 0.9 && cornerGap(hull, box) < shortSide * 0.16) {
+        return ensureCCW(box);
+      }
+    }
+  }
+  return src;
+}
+
+function straightenOpen(pts) {
+  const clean = pts.map((p) => ({ x: p.x, y: p.y }));
+  if (clean.length < 3) return clean;
+  const a = clean[0];
+  const b = clean[clean.length - 1];
+  const len = dist(a, b);
+  if (len < 0.12) return clean;
+  let maxD = 0;
+  for (let i = 1; i < clean.length - 1; i++) {
+    maxD = Math.max(maxD, distPointSeg(clean[i].x, clean[i].y, a.x, a.y, b.x, b.y));
+  }
+  // Hand wobble on a straight stroke stays under this. A deliberate bend is larger.
+  if (maxD <= Math.max(0.28, len * 0.08)) return [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+  return clean;
+}
+
+function tidyTerrain(rawPts) {
+  let pts = dedupe(simplify(rawPts, 0.045));
+  if (pts.length < 2) return pts;
+  if (!isClosedStroke(pts)) return straightenOpen(pts);
+  const ring = dedupe(pts.slice(0, -1));
+  if (ring.length >= 3 && !selfIntersects(ring, true) && Math.abs(signedArea(ring)) >= 0.05) {
+    const neat = regularizeClosed(ring);
+    return neat.concat([{ x: neat[0].x, y: neat[0].y }]);
+  }
+  return pts;
+}
+
 function makePaper() {
   const c = document.createElement("canvas");
   c.width = 512;
@@ -630,9 +836,21 @@ function fixtureOpt(extra) {
   return Object.assign({
     density: 1,
     friction: 0.6,
-    restitution: 0.02,
+    restitution: 0,
     filterGroupIndex: 0,
   }, extra || {});
+}
+
+function addConvexFixture(body, pts, opt) {
+  const maxV = (planck.Settings && planck.Settings.maxPolygonVertices) || 8;
+  if (pts.length < 3 || pts.length > maxV || !isConvex(pts)) return false;
+  if (Math.abs(signedArea(pts)) < 0.04) return false;
+  try {
+    body.createFixture(new planck.Polygon(pts.map((p) => V(p.x, p.y))), opt);
+    return true;
+  } catch (err) {
+    return false;
+  }
 }
 
 function mountOutline(body, worldPts, closed, color, width) {
@@ -740,15 +958,17 @@ function spawnSolid(pts, opt) {
     angularDamping: 0.35,
   });
   const local = clean.map((p) => ({ x: p.x - cx, y: p.y - cy }));
-  let tris = triangulate(local);
-  if (!tris.length) {
-    const hull = convexHull(local);
-    tris = [];
-    for (let i = 1; i < hull.length - 1; i++) tris.push([hull[0], hull[i], hull[i + 1]]);
+  const fopt = fixtureOpt({ density: opt.density || 1.5, friction: 0.72, restitution: 0 });
+  let made = addConvexFixture(body, local, fopt) ? 1 : 0;
+  if (!made) {
+    let tris = triangulate(local);
+    if (!tris.length) {
+      const hull = convexHull(local);
+      tris = [];
+      for (let i = 1; i < hull.length - 1; i++) tris.push([hull[0], hull[i], hull[i + 1]]);
+    }
+    for (const tri of tris) made += addTriFixture(body, tri, fopt) ? 1 : 0;
   }
-  const fopt = fixtureOpt({ density: opt.density || 1.5, friction: 0.72 });
-  let made = 0;
-  for (const tri of tris) made += addTriFixture(body, tri, fopt) ? 1 : 0;
   if (!made) {
     world.destroyBody(body);
     return null;
@@ -778,8 +998,12 @@ function spawnWire(pts, opt) {
     linearDamping: 0.08,
     angularDamping: 0.25,
   });
-  const fopt = fixtureOpt({ density: opt.density || 2.1, friction: 0.62 });
+  const fopt = fixtureOpt({ density: opt.density || 2.1, friction: 0.62, restitution: 0 });
   let made = 0;
+  for (const p of clean) {
+    body.createFixture(new planck.Circle(V(p.x - ox, p.y - oy), THICK / 2), fopt);
+    made++;
+  }
   for (let i = 0; i < clean.length - 1; i++) {
     const a = clean[i];
     const b = clean[i + 1];
@@ -813,7 +1037,7 @@ function spawnBlob(x, y, r, color) {
     linearDamping: 0.2,
     angularDamping: 0.2,
   });
-  body.createFixture(new planck.Circle(r), fixtureOpt({ density: 1.2, friction: 0.5, restitution: 0.05 }));
+  body.createFixture(new planck.Circle(r), fixtureOpt({ density: 1.2, friction: 0.5, restitution: 0 }));
   const meta = track(body, {
     kind: "draw",
     circles: [{ x: 0, y: 0, r }],
@@ -997,8 +1221,9 @@ function commitStroke(rawPts, color) {
     if (a && b && a !== b) return spawnRope(a, b, pts, used);
   }
   if (closed && !selfIntersects(pts, true) && Math.abs(signedArea(pts)) >= 0.05) {
-    return spawnSolid(pts, { color: used });
+    return spawnSolid(regularizeClosed(pts), { color: used });
   }
+  if (!closed) return spawnWire(straightenOpen(pts), { color: used });
   return spawnWire(pts, { color: used });
 }
 
@@ -1058,21 +1283,23 @@ function doNudge(dir) {
   if (simTime < (ball._cool || 0)) return;
   ball._cool = simTime + 0.4;
   stats.nudges += 1;
-  ball.applyLinearImpulse(V(dir * 3.4, 0.25), ball.getWorldCenter(), true);
+  ball.applyLinearImpulse(V(dir * 8.2, 0.55), ball.getWorldCenter(), true);
 }
 
 function addStaticSolid(pts, color) {
   const clean = ensureCCW(dedupe(pts));
   if (clean.length < 3) return;
-  const localTris = triangulate(clean.map((p) => ({ x: p.x, y: p.y })));
-  const tris = localTris.length ? localTris : (() => {
-    const hull = convexHull(clean);
-    const t = [];
-    for (let i = 1; i < hull.length - 1; i++) t.push([hull[0], hull[i], hull[i + 1]]);
-    return t;
-  })();
-  const opt = fixtureOpt({ density: 0, friction: 0.5, restitution: 0.02 });
-  for (const tri of tris) addTriFixture(ground, tri, opt);
+  const opt = fixtureOpt({ density: 0, friction: 0.5, restitution: 0 });
+  if (!addConvexFixture(ground, clean, opt)) {
+    const localTris = triangulate(clean.map((p) => ({ x: p.x, y: p.y })));
+    const tris = localTris.length ? localTris : (() => {
+      const hull = convexHull(clean);
+      const t = [];
+      for (let i = 1; i < hull.length - 1; i++) t.push([hull[0], hull[i], hull[i + 1]]);
+      return t;
+    })();
+    for (const tri of tris) addTriFixture(ground, tri, opt);
+  }
   geometry.push({ closed: true, pts: clean });
   scenery.push({ kind: "poly", pts: clean, color, width: 0.16 });
 }
@@ -1080,7 +1307,8 @@ function addStaticSolid(pts, color) {
 function addStaticWire(pts, color) {
   const clean = dedupe(pts);
   if (clean.length < 2) return;
-  const opt = fixtureOpt({ density: 0, friction: 0.55 });
+  const opt = fixtureOpt({ density: 0, friction: 0.55, restitution: 0 });
+  for (const p of clean) ground.createFixture(new planck.Circle(V(p.x, p.y), 0.1), opt);
   for (let i = 0; i < clean.length - 1; i++) {
     const a = clean[i];
     const b = clean[i + 1];
@@ -1127,7 +1355,7 @@ function makeRocket(def) {
     fixedRotation: true,
     linearDamping: 0.02,
   });
-  body.createFixture(new planck.Box(0.85, 0.36), fixtureOpt({ density: 1.4, friction: 0.4, restitution: 0.05 }));
+  body.createFixture(new planck.Box(0.85, 0.36), fixtureOpt({ density: 1.4, friction: 0.4, restitution: 0 }));
   const local = [
     { x: -0.9, y: -0.38 },
     { x: 0.55, y: -0.38 },
@@ -1198,13 +1426,13 @@ function buildLevel(def) {
   ball = world.createDynamicBody({
     position: V(def.ball[0], def.ball[1]),
     bullet: true,
-    linearDamping: 0.04,
+    linearDamping: 0.01,
     angularDamping: 0.02,
   });
   ball.createFixture(new planck.Circle(BALL_R), {
     density: 3.2,
-    friction: 0.22,
-    restitution: 0.12,
+    friction: 0.12,
+    restitution: 0,
   });
   track(ball, { kind: "ball" });
   mode = "play";
@@ -1234,7 +1462,7 @@ function step(dt) {
   if (simTime > 0.35) {
     for (const rocket of rockets) rocket.armed = true;
   }
-  world.step(dt, 8, 3);
+  world.step(dt, 10, 8);
   handleContacts();
   for (const rocket of rockets) {
     if (rocket.mode === "fly") {
@@ -1685,22 +1913,22 @@ function levelFromDoc(doc) {
   const wires = [];
   const decor = [];
   for (const stroke of doc.strokes || []) {
-    let pts = simplify(stroke.points, 0.05);
-    pts = dedupe(pts);
-    if (pts.length < 2) continue;
+    const raw = (stroke.points || []).map((p) => ({ x: p[0], y: p[1] }));
     if (stroke.kind === "decor") {
-      decor.push({ pts, color: stroke.color, width: 0.12 });
+      const pts = dedupe(simplify(raw, 0.05));
+      if (pts.length >= 2) decor.push({ pts, color: stroke.color, width: 0.12 });
       continue;
     }
-    const closed = isClosedStroke(pts);
-    if (closed) {
-      const ring = dedupe(pts.slice(0, -1).concat([pts[0]])).slice(0, -1);
-      if (!selfIntersects(ring.length ? ring : pts, true) && Math.abs(signedArea(ring.length ? ring : pts)) > 0.05) {
-        solids.push({ pts: ensureCCW(ring.length ? ring : pts), color: stroke.color });
+    const tidy = tidyTerrain(raw);
+    if (tidy.length < 2) continue;
+    if (isClosedStroke(tidy)) {
+      const ring = dedupe(tidy.slice(0, -1));
+      if (ring.length >= 3 && !selfIntersects(ring, true) && Math.abs(signedArea(ring)) > 0.05) {
+        solids.push({ pts: ensureCCW(ring), color: stroke.color });
         continue;
       }
     }
-    wires.push({ pts, color: stroke.color });
+    wires.push({ pts: tidy, color: stroke.color });
   }
   return {
     id: doc.id || "custom",
@@ -1921,10 +2149,11 @@ function onPointerUp(e) {
   }
   if (mode === "play") commitStroke(current.pts, COLORS[colorIndex]);
   if (mode === "editor" && (editorTool === "terrain" || editorTool === "decor")) {
+    const shaped = editorTool === "terrain" ? tidyTerrain(current.pts) : current.pts;
     editorDoc.strokes.push({
       kind: editorTool === "decor" ? "decor" : "terrain",
       color: COLORS[colorIndex],
-      points: current.pts.map((p) => [p.x, p.y]),
+      points: shaped.map((p) => [p.x, p.y]),
     });
   }
 }
@@ -1998,18 +2227,33 @@ function runTests() {
     check("klotz moves ball", b1.x > 7.5 || stars.every((s) => s.got));
 
     buildLevel(LEVELS["die-luecke"]);
-    commitStroke([{ x: 7.5, y: 5.16 }, { x: 24.5, y: 5.16 }], "#8d5a34");
-    for (let i = 0; i < 40; i++) step(1 / 60);
+    let maxAlone = ball.getPosition().x;
+    doNudge(1);
+    for (let i = 0; i < 220; i++) {
+      step(1 / 60);
+      maxAlone = Math.max(maxAlone, ball.getPosition().x);
+    }
+    check("one nudge does not clear the gap", maxAlone < 18);
+
+    buildLevel(LEVELS["die-luecke"]);
+    commitStroke([
+      { x: 6.2, y: 5.1 }, { x: 9, y: 5.24 }, { x: 13, y: 5.02 },
+      { x: 17, y: 5.2 }, { x: 21, y: 5.05 }, { x: 24.4, y: 5.14 },
+    ], "#8d5a34");
     const bridge = drawings.find((d) => d.kind === "wire");
+    check("wobbly bridge straightens", !!bridge && bridge.meta.outline.local.length === 2);
+    for (let i = 0; i < 30; i++) step(1 / 60);
     const by0 = bridge ? bridge.body.getPosition().y : -1;
-    for (let n = 0; n < 6; n++) {
-      ball._cool = 0;
-      doNudge(1);
-      for (let i = 0; i < 40; i++) step(1 / 60);
+    doNudge(1);
+    let climbed = false;
+    for (let i = 0; i < 240; i++) {
+      step(1 / 60);
+      const p = ball.getPosition();
+      if (p.x > 12 && p.y > 4.6) climbed = true;
     }
     check("bridge stays up", !!bridge && bridge.body.getPosition().y > 3);
-    check("bridge reaches star or crosses gap", ball.getPosition().x > 16 || stars.every((s) => s.got));
-    lines.push("INFO bridge y0 " + by0.toFixed(2) + " y " + (bridge ? bridge.body.getPosition().y.toFixed(2) : "none") + " ball " + ball.getPosition().x.toFixed(2) + "," + ball.getPosition().y.toFixed(2));
+    check("one nudge climbs the bridge", climbed);
+    lines.push("INFO bridge y0 " + by0.toFixed(2) + " y " + (bridge ? bridge.body.getPosition().y.toFixed(2) : "none") + " ball " + ball.getPosition().x.toFixed(2) + "," + ball.getPosition().y.toFixed(2) + " nudges " + stats.nudges);
 
     buildLevel(LEVELS["der-nagel"]);
     const before = ball.getPosition().x;
@@ -2087,6 +2331,145 @@ function runTests() {
     check("workshop has two stars and a rocket", stars.length === 2 && rockets.length === 1);
     buildLevel(LEVELS.flaschenzug);
     check("pulley level has basket and crate pins", pins.length >= 2);
+
+    function interiors(draw) {
+      return interiorAngles(draw.meta.outline.local).map((a) => a * 180 / Math.PI);
+    }
+    function near90(angs) {
+      return angs.every((a) => Math.abs(a - 90) < 2);
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 10, y: 3.82 }, { x: 12, y: 4.08 },
+      { x: 12.15, y: 5.5 }, { x: 11.9, y: 7 },
+      { x: 10, y: 7.16 }, { x: 8.1, y: 6.9 },
+      { x: 7.85, y: 5.4 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const quad = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const quadAng = quad ? interiors(quad) : [];
+    check("wobbly quad becomes a right rectangle", !!quad && quad.meta.outline.local.length === 4 && near90(quadAng));
+    lines.push("INFO quad corners " + (quad ? quad.meta.outline.local.length : 0) + " angles " + quadAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const tilt = 25 * Math.PI / 180;
+    const tc = Math.cos(tilt);
+    const ts = Math.sin(tilt);
+    const around = (x, y) => ({ x: 18 + x * tc - y * ts, y: 8 + x * ts + y * tc });
+    const tilted = [
+      around(-1.5, -0.7), around(0, -0.86), around(1.5, -0.66),
+      around(1.62, 0), around(1.45, 0.72),
+      around(0, 0.84), around(-1.55, 0.68), around(-1.62, 0),
+    ];
+    tilted.push(tilted[0]);
+    commitStroke(tilted, "#ef8b2c");
+    const tquad = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const tAng = tquad ? interiors(tquad) : [];
+    let edgeAng = 0;
+    if (tquad) {
+      const p = tquad.meta.outline.local;
+      let best = -1;
+      for (let i = 0; i < p.length; i++) {
+        const q = p[(i + 1) % p.length];
+        const len = Math.hypot(q.x - p[i].x, q.y - p[i].y);
+        if (len > best) {
+          best = len;
+          edgeAng = Math.atan2(q.y - p[i].y, q.x - p[i].x) * 180 / Math.PI;
+        }
+      }
+    }
+    let lineAng = Math.abs(edgeAng) % 180;
+    if (lineAng > 90) lineAng = 180 - lineAng;
+    const tiltOk = Math.min(Math.abs(lineAng - 25), Math.abs(lineAng - 65)) < 8;
+    check("tilted quad stays tilted and square", !!tquad && tquad.meta.outline.local.length === 4 && near90(tAng) && tiltOk);
+    lines.push("INFO tilt edge " + edgeAng.toFixed(1) + " angles " + tAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 14, y: 6 }, { x: 15.2, y: 6.32 }, { x: 16.4, y: 6.1 },
+      { x: 15.55, y: 7.15 }, { x: 15.1, y: 8.2 }, { x: 14.35, y: 7.05 }, { x: 14, y: 6 },
+    ], "#3e9a48");
+    const tri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const triAng = tri ? interiors(tri) : [];
+    check("wobbly triangle straightens to three corners", !!tri && tri.meta.outline.local.length === 3);
+    check("non-right triangle stays non-right", triAng.length === 3 && triAng.every((a) => Math.abs(a - 90) > 15));
+    lines.push("INFO tri angles " + triAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 20, y: 6 }, { x: 21.5, y: 6.4 }, { x: 23.1, y: 6.22 },
+      { x: 21.55, y: 7.05 }, { x: 20.3, y: 8.15 }, { x: 20.18, y: 7.05 }, { x: 20, y: 6 },
+    ], "#7a4fbf");
+    const right = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const rightAng = right ? interiors(right) : [];
+    check("near-right triangle snaps one corner to 90", !!right && right.meta.outline.local.length === 3 && rightAng.some((a) => Math.abs(a - 90) < 2));
+    lines.push("INFO right angles " + rightAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 6, y: 9 }, { x: 9, y: 9.15 }, { x: 10.5, y: 11.1 }, { x: 8.1, y: 13 }, { x: 5.3, y: 11.2 }, { x: 6, y: 9 },
+    ], "#d94b3a");
+    const pent = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("pentagon does not snap to a rectangle", !!pent && pent.meta.outline.local.length >= 5);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 4, y: 10 }, { x: 7, y: 11.6 }, { x: 10, y: 10.2 }, { x: 13, y: 12.1 }, { x: 16, y: 9.4 },
+    ], "#8d5a34");
+    const curve = drawings.find((d) => d.kind === "wire");
+    check("curved line stays curved", !!curve && curve.meta.outline.local.length >= 4);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 15, y: 3.2 }, { x: 18, y: 3.2 }, { x: 18, y: 4.8 }, { x: 15, y: 4.8 }, { x: 15, y: 3.2 },
+    ], "#3c7fd6");
+    for (let i = 0; i < 100; i++) step(1 / 60);
+    commitStroke([
+      { x: 15.3, y: 7 }, { x: 17.7, y: 7 }, { x: 17.7, y: 8.5 }, { x: 15.3, y: 8.5 }, { x: 15.3, y: 7 },
+    ], "#ef8b2c");
+    const stack = drawings.filter((d) => d.kind === "solid" && !d.preset);
+    const top = stack[stack.length - 1];
+    let flew = false;
+    for (let i = 0; i < 160; i++) {
+      step(1 / 60);
+      if (top && top.body.getPosition().y > 11) flew = true;
+    }
+    const vend = top ? top.body.getLinearVelocity() : { x: 0, y: 9 };
+    check("stacked boxes settle", !!top && !flew && Math.abs(vend.y) < 0.6 && top.body.getPosition().y < 7);
+    lines.push("INFO stack y " + (top ? top.body.getPosition().y.toFixed(2) : "none") + " vy " + vend.y.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 4.1, y: 4.2 }, { x: 6.3, y: 4.2 }, { x: 6.3, y: 5.7 }, { x: 4.1, y: 5.7 }, { x: 4.1, y: 4.2 },
+    ], "#8d5a34");
+    let ballFlew = false;
+    for (let i = 0; i < 140; i++) {
+      step(1 / 60);
+      if (ball.getPosition().y > 6) ballFlew = true;
+    }
+    const bv = ball.getLinearVelocity();
+    check("box on the ball does not launch it", !ballFlew && Math.abs(bv.y) < 1.5);
+    lines.push("INFO ball drop y " + ball.getPosition().y.toFixed(2) + " vy " + bv.y.toFixed(2));
+
+    const edited = levelFromDoc({
+      name: "Snap",
+      ball: [6, 2],
+      stars: [[24, 2]],
+      strokes: [
+        {
+          kind: "terrain",
+          color: "#3f8f55",
+          points: [[8, 4], [10, 3.8], [12, 4.1], [12.2, 6.9], [10, 7.2], [7.9, 6.8], [8, 4]],
+        },
+        {
+          kind: "terrain",
+          color: "#8d5a34",
+          points: [[2, 3], [6, 3.15], [10, 2.9], [14, 3.1]],
+        },
+      ],
+    });
+    const editorAng = edited.solids.length ? interiorAngles(edited.solids[0].pts).map((a) => a * 180 / Math.PI) : [];
+    check("editor quad snaps", edited.solids.length === 1 && edited.solids[0].pts.length === 4 && near90(editorAng));
+    check("editor line snaps", edited.wires.length === 1 && edited.wires[0].pts.length === 2);
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
