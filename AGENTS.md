@@ -12,8 +12,8 @@
 
 - **Zeichnen:** Zug auf freier Fläche oder vom Boden aus. Kurze Striche vom Boden ins Leere bleiben Striche.
 - **Greifen:** Druck auf einen beweglichen Körper fasst ihn sofort an.
-- **Verankern:** kurzer, fast gerader Zug (höchstens 1,5 m) vom Boden oder einem verankerten Körper, der *in* einem festen Körper endet (keine Kugeln, keine Drähte). Der Körper muss die Basis berühren und wird statisch. Umgekehrt: Körper greifen und Maus auf dem Boden loslassen. Ketten nur vom Boden aus.
-- **Lösen:** Rechtsklick auf den Verbindungsstrich (Körperfarbe) oder dieselbe Geste noch einmal. Alles, was daran hängt, wird mitgelöst.
+- **Verankern:** kurzer, fast gerader Zug (höchstens 1,5 m) vom Boden oder einem verankerten Körper, der *in* einem festen Körper endet (keine Kugeln, keine Drähte). Der Körper muss die Basis berühren und wird statisch. Umgekehrt: Körper greifen und Maus auf dem Boden loslassen. Ketten nur vom Boden aus. Trifft die Geste einen Körper, der nicht verankert werden kann (z. B. weil er die Basis nicht berührt), entsteht kein Strich; der Körper wird stattdessen gegriffen und folgt der Maus.
+- **Lösen:** Rechtsklick auf den Verbindungsstrich (Körperfarbe) oder dieselbe Geste noch einmal. Alles, was daran hängt, wird mitgelöst. Rechtsklick auf einen verankerten Körper selbst löscht ihn nicht – erst muss die Verbindung gelöst werden, danach löscht Rechtsklick den Körper wie gewohnt.
 - Schwellwerte stehen als `ANCHOR_*`-Konstanten in `src/game.js`.
 
 ## Quellen und Build
