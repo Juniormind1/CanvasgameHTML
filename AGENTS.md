@@ -8,6 +8,14 @@
 - **Abwechslung kommt aus gutem Leveldesign**, nicht aus immer mehr Werkzeugen oder Objekttypen.
 - Vorschläge für neue Bedienelemente (Buttons, Menüs, Modi) vorher mit dem Nutzer klären.
 
+## Gesten im Spiel
+
+- **Zeichnen:** Zug auf freier Fläche oder vom Boden aus. Kurze Striche vom Boden ins Leere bleiben Striche.
+- **Greifen:** Druck auf einen beweglichen Körper fasst ihn sofort an.
+- **Verankern:** kurzer, fast gerader Zug (höchstens 1,5 m) vom Boden oder einem verankerten Körper, der *in* einem festen Körper endet (keine Kugeln, keine Drähte). Der Körper muss die Basis berühren und wird statisch. Umgekehrt: Körper greifen und Maus auf dem Boden loslassen. Ketten nur vom Boden aus.
+- **Lösen:** Rechtsklick auf den Verbindungsstrich (Körperfarbe) oder dieselbe Geste noch einmal. Alles, was daran hängt, wird mitgelöst.
+- Schwellwerte stehen als `ANCHOR_*`-Konstanten in `src/game.js`.
+
 ## Quellen und Build
 
 - `src/game.js` ist die einzige Quelle für das Spiel.
