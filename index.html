@@ -4333,6 +4333,78 @@ function runTests() {
       onPointerDown({ button: 2, clientX: ancDepFreeScr.x, clientY: ancDepFreeScr.y, pointerId: 45 });
       check("right click deletes the body after the link is gone", !drawings.includes(ancDep) && drawings.includes(ancKeep) && isAnchored(ancKeep.body));
     }
+
+    function circRing(cx, cy, rx, ry, n, wob1, wob2) {
+      const pts = [];
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const wob = 1 + wob1 * Math.sin(a * 3) + wob2 * Math.sin(a * 5 + 0.4);
+        pts.push({ x: cx + Math.cos(a) * rx * wob, y: cy + Math.sin(a) * ry * wob });
+      }
+      return pts;
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(12, 6, 1.05, 0.95, 28, 0.07, 0.03), "#3c7fd6");
+    const circHand = drawings.find((d) => d.kind === "roller");
+    const circHandShape = circHand && circHand.body.getFixtureList().getShape();
+    check("shaky slightly oval freehand stroke is a circle", !!circHand && circHandShape && circHandShape.m_type === "circle" && Math.abs(circHand.r - 1) < 0.15);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(14, 7, 1.1, 1.0, 30, 0.08, 0.03), "#7a4fbf");
+    const circHand2 = drawings.find((d) => d.kind === "roller");
+    check("another shaky freehand loop is a circle", !!circHand2 && circHand2.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 10, y: 5 }, { x: 11.2, y: 4.6 }, { x: 12.5, y: 5.1 }, { x: 12.8, y: 6.3 },
+      { x: 11.9, y: 7.4 }, { x: 10.4, y: 7.1 }, { x: 9.6, y: 6.0 }, { x: 10, y: 5 },
+    ], "#8d5a34");
+    const circRockA = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("irregular rock stays a polygon", !!circRockA && circRockA.kind === "solid" && circRockA.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 3 }, { x: 10.5, y: 3.2 }, { x: 11.8, y: 3.8 }, { x: 12.0, y: 4.6 },
+      { x: 10.8, y: 5.3 }, { x: 9.2, y: 5.5 }, { x: 7.6, y: 4.9 }, { x: 7.4, y: 3.8 }, { x: 8, y: 3 },
+    ], "#d94b3a");
+    const circRockB = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("elongated rock stays a polygon", !!circRockB && circRockB.kind === "solid" && circRockB.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 9, y: 4 }, { x: 10, y: 4 }, { x: 11, y: 5 }, { x: 11, y: 6 },
+      { x: 10, y: 7 }, { x: 9, y: 7 }, { x: 8, y: 6 }, { x: 8, y: 5 }, { x: 9, y: 4 },
+    ], "#3e9a48");
+    const circGeoRound = drawings.find((d) => d.kind === "roller");
+    check("geodreieck shape without a right angle becomes a circle", !!circGeoRound && circGeoRound.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 10, y: 7 }, { x: 8, y: 4 },
+    ], "#ef8b2c");
+    const circGeoTri = drawings.find((d) => d.kind === "roller");
+    check("geodreieck triangle without a right angle becomes a circle", !!circGeoTri && circGeoTri.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 12, y: 7 }, { x: 8, y: 7 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const circGeoRect = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("geodreieck rectangle with right angles stays a polygon", !!circGeoRect && circGeoRect.kind === "solid" && circGeoRect.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 8, y: 7 }, { x: 8, y: 4 },
+    ], "#7a4fbf");
+    const circGeoRight = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const circGeoRightAng = circGeoRight ? interiorAngles(circGeoRight.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    check("geodreieck right triangle stays a polygon", !!circGeoRight && circGeoRight.kind === "solid" && circGeoRight.meta.outline.local.length === 3 && circGeoRightAng.some((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller"));
+    geoSnap = false;
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
