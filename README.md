@@ -2,7 +2,11 @@
 
 Eigenes Browser-Rätsel im Stil von Crayon Physics: eine HTML-Datei, Physik im Browser, ohne Ton.
 
-`index.html` im Browser öffnen. Gezeichnete Striche werden zu Körpern. Die rote Kugel muss die Sterne berühren.
+**[Im Browser spielen](https://juniormind1.github.io/CanvasgameHTML/)**
+
+Der Link öffnet das spielbare `index.html` als eigene Seite.
+
+Lokal geht dieselbe Datei über `index.html`. Gezeichnete Striche werden zu Körpern. Die rote Kugel muss die Sterne berühren.
 
 - Offene Linie: Draht. Geschlossene Fläche: schwerer Körper.
 - Kleiner Kreis auf einem Körper: Nagel. Linie von Nagel zu Nagel: Seil.

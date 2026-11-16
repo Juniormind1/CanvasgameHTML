@@ -108,6 +108,18 @@ let returnMode = "map";
 let pointer = null;
 let lastTap = 0;
 let paper = null;
+let confetti = [];
+
+const CONFETTI_PAIRS = [
+  ["#e23b32", "#f6e27a"],
+  ["#3c7fd6", "#f2c14b"],
+  ["#3e9a48", "#ff5fa2"],
+  ["#7a4fbf", "#8ee0c2"],
+  ["#ef8b2c", "#1f4f8a"],
+  ["#d94b3a", "#fff6d8"],
+  ["#1f6f8a", "#f08bb0"],
+  ["#c9854a", "#24324a"],
+];
 
 const LEVELS = {};
 
@@ -807,6 +819,7 @@ function clearWorld() {
   medals = { elegant: false, oldschool: false };
   stats = { shapes: 0, nudges: 0, userPins: 0, ropes: 0, drewUnder: false };
   simTime = 0;
+  confetti = [];
 }
 
 function track(body, meta) {
@@ -1502,6 +1515,89 @@ function step(dt) {
       };
       saveJSON("crayon-progress", store);
     }
+    burstConfetti();
+  }
+  stepConfetti(dt);
+}
+
+function burstConfetti() {
+  const origins = [];
+  for (const star of stars) {
+    if (!star.body) continue;
+    const p = star.body.getPosition();
+    origins.push({ x: p.x, y: p.y });
+  }
+  if (!origins.length) return;
+  const total = 1200;
+  const pieces = [];
+  for (let i = 0; i < total; i++) {
+    const origin = origins[i % origins.length];
+    const pair = CONFETTI_PAIRS[i % CONFETTI_PAIRS.length];
+    const swap = ((i * 17) % 3) === 0;
+    const ang = Math.PI * (0.05 + ((i * 47) % 1000) / 1000 * 0.9);
+    const speed = 5 + ((i * 91) % 1000) / 1000 * 9;
+    const jitter = ((i * 13) % 100) / 100;
+    pieces.push({
+      ox: origin.x,
+      oy: origin.y,
+      x: origin.x,
+      y: origin.y,
+      vx: Math.cos(ang) * speed * (0.65 + jitter * 0.7),
+      vy: Math.abs(Math.sin(ang)) * speed + 3.5,
+      spin: (i % 628) / 100,
+      spinV: (1.4 + ((i * 37) % 50) / 12) * (i % 2 ? 1 : -1),
+      flip: ((i * 19) % 628) / 100,
+      flipV: (1.6 + ((i * 53) % 50) / 10) * (i % 3 ? 1 : -1),
+      w: 0.28 + ((i * 29) % 100) / 100 * 0.34,
+      h: 0.12 + ((i * 31) % 100) / 100 * 0.2,
+      front: swap ? pair[1] : pair[0],
+      back: swap ? pair[0] : pair[1],
+      delay: (i % 70) / 55,
+      age: 0,
+    });
+  }
+  confetti = pieces;
+}
+
+function stepConfetti(dt) {
+  if (!confetti.length) return;
+  const keep = [];
+  for (const c of confetti) {
+    c.age += dt;
+    if (c.delay > 0) {
+      c.delay -= dt;
+      keep.push(c);
+      continue;
+    }
+    c.vy -= 11 * dt;
+    c.vx *= Math.exp(-0.35 * dt);
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    c.spin += c.spinV * dt;
+    c.flip += c.flipV * dt;
+    if (c.age < 8 && c.y > -4) keep.push(c);
+  }
+  confetti = keep;
+}
+
+function drawConfetti() {
+  if (!confetti.length) return;
+  const scale = camScale();
+  for (const c of confetti) {
+    const p = worldToScreen(c.x, c.y);
+    const facing = Math.cos(c.flip);
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(c.spin);
+    ctx.scale(Math.max(0.05, Math.abs(facing)), 1);
+    ctx.fillStyle = facing >= 0 ? c.front : c.back;
+    const w = c.w * scale;
+    const h = c.h * scale;
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.strokeStyle = "rgba(36,24,12,0.45)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
   }
 }
 
@@ -1879,6 +1975,7 @@ function showMap() {
   mode = "map";
   namebox.style.display = "none";
   world = null;
+  confetti = [];
 }
 
 function freshDoc() {
@@ -2035,6 +2132,7 @@ function render() {
   else {
     renderPlay();
     drawHUD();
+    drawConfetti();
   }
 }
 
@@ -2191,7 +2289,10 @@ function boot() {
   if (params.get("test") === "1") runTests();
   else if (params.get("shot")) {
     const id = params.get("shot");
-    if (LEVELS[id]) buildLevel(LEVELS[id]);
+    if (id === "feier") {
+      buildLevel(LEVELS["ein-klotz"]);
+      for (const star of stars) star.got = true;
+    } else if (LEVELS[id]) buildLevel(LEVELS[id]);
     else showMap();
   } else showMap();
   let last = performance.now();
@@ -2470,6 +2571,27 @@ function runTests() {
     const editorAng = edited.solids.length ? interiorAngles(edited.solids[0].pts).map((a) => a * 180 / Math.PI) : [];
     check("editor quad snaps", edited.solids.length === 1 && edited.solids[0].pts.length === 4 && near90(editorAng));
     check("editor line snaps", edited.wires.length === 1 && edited.wires[0].pts.length === 2);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    const starPos = stars[0].body.getPosition();
+    check("confetti has a thousand pieces", confetti.length >= 1000);
+    check("confetti rectangles have two colors", confetti.length >= 1000 && confetti.every((c) => c.front !== c.back));
+    check("confetti rotates", confetti.every((c) => c.spinV !== 0 && c.flipV !== 0));
+    check("confetti starts at the star", confetti.every((c) => Math.hypot(c.ox - starPos.x, c.oy - starPos.y) < 0.02));
+    let turned = false;
+    const spin0 = confetti[0] ? confetti[0].spin : 0;
+    const flip0 = confetti[0] ? confetti[0].flip : 0;
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    if (confetti[0] && (Math.abs(confetti[0].spin - spin0) > 0.2 || Math.abs(confetti[0].flip - flip0) > 0.2)) turned = true;
+    check("confetti keeps turning", turned);
+
+    buildLevel(LEVELS.werkstatt);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    const used = new Set(confetti.map((c) => c.ox.toFixed(2) + "," + c.oy.toFixed(2)));
+    check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length >= 1000);
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
