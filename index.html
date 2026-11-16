@@ -68,7 +68,6 @@ canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 const VIEW_W = 32;
 const VIEW_H = 18;
 const BALL_R = 0.34;
-const POKE_IMPULSE = 8.2;
 const THICK = 0.16;
 const COLORS = ["#d94b3a", "#ef8b2c", "#e6b423", "#3e9a48", "#3c7fd6", "#7a4fbf", "#8d5a34", "#2b2b2b"];
 
@@ -112,8 +111,6 @@ let paper = null;
 let confetti = [];
 let playDrag = null;
 let dragFresh = new Map();
-let cursorPoke = null;
-let cursorAim = null;
 let cradleWorld = null;
 let cradleGround = null;
 let cradleBalls = [];
@@ -146,7 +143,7 @@ function addLevel(id, def) {
 
 addLevel("ein-klotz", {
   name: "Ein Klotz",
-  hint: "Male einen Klotz über die Kugel. Gehaltene Maus wird zur Kugel und schubst seitlich.",
+  hint: "Male einen Klotz über die Kugel. Ein Klick auf sie schubst nur ein bisschen.",
   ball: [5, 1.66],
   stars: [[11.5, 2.05]],
   solids: [{ pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#3f8f55" }],
@@ -865,8 +862,6 @@ function clearWorld() {
   simTime = 0;
   confetti = [];
   dragFresh = new Map();
-  cursorPoke = null;
-  cursorAim = null;
 }
 
 function track(body, meta) {
@@ -1557,65 +1552,16 @@ function stepDragFresh(dt) {
   }
 }
 
-function pokeAim() {
-  if (cursorAim) return cursorAim;
-  if (mode !== "play" || !pointer) return null;
-  if (pointer.dragging || playDrag || pointer.grab) return null;
-  if (pointer.pan || pointer.ui || pointer.cradle || pointer.tap) return null;
-  if (pointer.wx == null || pointer.wy == null) return null;
-  return { x: pointer.wx, y: pointer.wy };
+function nudgeDirFromClick(ballX, clickX) {
+  return clickX >= ballX ? 1 : -1;
 }
 
-function stepPoke(dt) {
-  const aim = pokeAim();
-  if (!aim || !ball) {
-    cursorPoke = null;
-    return;
-  }
-  if (!cursorPoke) {
-    cursorPoke = { x: aim.x, y: aim.y, touching: false, budget: POKE_IMPULSE, counted: false };
-    return;
-  }
-  const vx = dt > 0 ? (aim.x - cursorPoke.x) / dt : 0;
-  const vy = dt > 0 ? (aim.y - cursorPoke.y) / dt : 0;
-  cursorPoke.x = aim.x;
-  cursorPoke.y = aim.y;
-  const bp = ball.getPosition();
-  const dx = bp.x - aim.x;
-  const dy = bp.y - aim.y;
-  const dist = Math.hypot(dx, dy);
-  const reach = BALL_R * 2;
-  if (dist >= reach) {
-    cursorPoke.touching = false;
-    cursorPoke.budget = POKE_IMPULSE;
-    cursorPoke.counted = false;
-    return;
-  }
-  if (!cursorPoke.touching) {
-    if (simTime < (ball._cool || 0)) return;
-    cursorPoke.touching = true;
-    cursorPoke.budget = POKE_IMPULSE;
-    cursorPoke.counted = false;
-  }
-  if (cursorPoke.budget <= 0.05) return;
-  const nlen = dist || 1e-6;
-  const nx = dx / nlen;
-  const ny = dy / nlen;
-  const bv = ball.getLinearVelocity();
-  const approach = (bv.x - vx) * nx + (bv.y - vy) * ny;
-  if (approach >= -0.2) return;
-  const mass = Math.max(0.05, ball.getMass());
-  let Jx = -(1.98) * approach * mass / 2 * nx;
-  const cap = cursorPoke.budget;
-  if (Math.abs(Jx) > cap) Jx = Math.sign(Jx) * cap;
-  if (Math.abs(Jx) < 0.05) return;
-  ball.applyLinearImpulse(V(Jx, 0), ball.getWorldCenter(), true);
-  cursorPoke.budget -= Math.abs(Jx);
-  if (!cursorPoke.counted) {
-    cursorPoke.counted = true;
-    stats.nudges += 1;
-    ball._cool = simTime + 0.4;
-  }
+function doNudge(dir) {
+  if (!ball || won) return;
+  if (simTime < (ball._cool || 0)) return;
+  ball._cool = simTime + 0.4;
+  stats.nudges += 1;
+  ball.applyLinearImpulse(V(dir * 8.2, 0.55), ball.getWorldCenter(), true);
 }
 
 function addStaticSolid(pts, color) {
@@ -1800,7 +1746,6 @@ function step(dt) {
   if (!world) return;
   chaseDrag();
   simTime += dt;
-  stepPoke(dt);
   if (simTime > 0.35) {
     for (const rocket of rockets) rocket.armed = true;
   }
@@ -2017,29 +1962,6 @@ function drawBall() {
   ctx.restore();
 }
 
-function drawCursorBall() {
-  const aim = pokeAim();
-  if (!aim) return;
-  const s = worldToScreen(aim.x, aim.y);
-  const rad = BALL_R * camScale();
-  ctx.save();
-  ctx.translate(s.x, s.y);
-  ctx.fillStyle = COLORS[colorIndex];
-  ctx.globalAlpha = 0.9;
-  ctx.beginPath();
-  ctx.arc(0, 0, rad, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "#2b2b2b";
-  ctx.globalAlpha = 0.8;
-  ctx.lineWidth = Math.max(2, rad * 0.16);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.strokeStyle = "rgba(255,255,255,0.5)";
-  ctx.arc(-rad * 0.25, -rad * 0.2, rad * 0.72, Math.PI * 1.1, Math.PI * 1.7);
-  ctx.stroke();
-  ctx.restore();
-}
-
 function drawStar(meta) {
   const p = meta.body.getPosition();
   const s = worldToScreen(p.x, p.y);
@@ -2151,8 +2073,7 @@ function renderPlay() {
   for (const pin of pins) drawPin(pin);
   for (const star of stars) drawStar(star);
   drawBall();
-  drawCursorBall();
-  if (pointer && pointer.pts && pointer.pts.length && !pointer.shove) {
+  if (pointer && pointer.pts && pointer.pts.length) {
     crayonPath(pointer.pts, COLORS[colorIndex], THICK);
   }
 }
@@ -2583,9 +2504,9 @@ function renderHelp() {
     "Kurz stillhalten, dann ziehen. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
-    "Gedrückte Maustaste: der Zeiger wird zur Kugel und schiebt die rote nur seitlich, nie stärker als früher ein Klick. Rechtsklick radiert.",
+    "Klick auf die rote Kugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
     "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
-    "Elegant: genau ein Gegenstand, ohne die Kugel anzuschubsen. Nägel zählen nicht.",
+    "Elegant: genau ein Gegenstand, ohne die Kugel anzuklicken. Nägel zählen nicht.",
     "Old School: kein Schubs, kein eigener Nagel, kein Seil, nichts unter der Kugel.",
     "Mausrad wählt die Farbe, Shift+Rad zoomt, mittlere Taste verschiebt das Blatt.",
     "R setzt das Level zurück. M oder Esc öffnet die Karte.",
@@ -2760,7 +2681,6 @@ function render() {
     drawHUD();
     drawConfetti();
   }
-  canvas.style.cursor = pokeAim() ? "none" : "";
 }
 
 function editorClick(worldPt) {
@@ -2828,26 +2748,22 @@ function onPointerDown(e) {
     pointer = { tap: true };
     return;
   }
-  let onBall = false;
-  if (mode === "play" && ball) {
-    const bp = ball.getPosition();
-    onBall = Math.hypot(bp.x - w.x, bp.y - w.y) < BALL_R * 1.3;
-  }
   pointer = {
     id: e.pointerId,
     x: e.clientX,
     y: e.clientY,
-    wx: w.x,
-    wy: w.y,
     pts: [{ x: w.x, y: w.y }],
     moved: false,
-    shove: onBall,
     rocket: mode === "editor" && editorTool === "rocket",
     downT: performance.now(),
     grab: null,
   };
-  cursorPoke = { x: w.x, y: w.y, touching: false, budget: POKE_IMPULSE, counted: false };
-  if (mode === "play" && !onBall) {
+  if (mode === "play" && ball) {
+    const bp = ball.getPosition();
+    pointer.onBall = Math.hypot(bp.x - w.x, bp.y - w.y) < BALL_R * 1.3;
+    pointer.nudgeDir = nudgeDirFromClick(bp.x, w.x);
+  }
+  if (mode === "play" && !pointer.onBall) {
     const draw = drawingAt(w.x, w.y);
     if (draw) pointer.grab = { x: w.x, y: w.y };
   }
@@ -2886,8 +2802,6 @@ function onPointerMove(e) {
     return;
   }
   const w = screenToWorld(e.clientX, e.clientY);
-  pointer.wx = w.x;
-  pointer.wy = w.y;
   if (pointer.dragging && playDrag) {
     moveDrag(w.x, w.y);
     pointer.moved = true;
@@ -2895,10 +2809,6 @@ function onPointerMove(e) {
   }
   engageGrab(w);
   if (pointer.dragging) return;
-  if (pointer.shove) {
-    if (Math.hypot(w.x - pointer.pts[0].x, w.y - pointer.pts[0].y) > 0.02) pointer.moved = true;
-    return;
-  }
   if (!pointer.pts) return;
   const last = pointer.pts[pointer.pts.length - 1];
   if (Math.hypot(w.x - last.x, w.y - last.y) > 0.04) {
@@ -2911,7 +2821,6 @@ function onPointerUp(e) {
   if (!pointer) return;
   const current = pointer;
   pointer = null;
-  cursorPoke = null;
   if (current.dragging || playDrag) {
     endDrag();
     return;
@@ -2931,9 +2840,9 @@ function onPointerUp(e) {
     const now = performance.now();
     if (mode === "play" && now - lastTap < 320) eraseAt(w.x, w.y);
     lastTap = now;
+    if (mode === "play" && current.onBall) doNudge(current.nudgeDir);
     return;
   }
-  if (current.shove) return;
   if (mode === "play") commitStroke(current.pts, COLORS[colorIndex]);
   if (mode === "editor" && (editorTool === "terrain" || editorTool === "decor")) {
     const shaped = editorTool === "terrain" ? tidyTerrain(current.pts) : current.pts;
@@ -2954,7 +2863,6 @@ function boot() {
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", () => {
     pointer = null;
-    cursorPoke = null;
     endDrag();
     endCradleDrag();
   });
@@ -3021,20 +2929,6 @@ function runTests() {
   function check(name, cond) {
     lines.push((cond ? "PASS " : "FAIL ") + name);
   }
-  function sweepCursor(dir, speed) {
-    const p = ball.getPosition();
-    const y = p.y;
-    cursorAim = { x: p.x - dir * (BALL_R * 2 + 0.08), y: y };
-    step(1 / 60);
-    for (let i = 0; i < 5; i++) {
-      cursorAim = { x: cursorAim.x + dir * speed / 60, y: y };
-      step(1 / 60);
-    }
-    const vx = ball.getLinearVelocity().x;
-    cursorAim = null;
-    cursorPoke = null;
-    return vx;
-  }
   try {
     buildLevel(LEVELS["ein-klotz"]);
     commitStroke([
@@ -3046,9 +2940,7 @@ function runTests() {
 
     buildLevel(LEVELS["die-luecke"]);
     let maxAlone = ball.getPosition().x;
-    const gapVx = sweepCursor(1, 30);
-    check("one cursor shove is a single nudge", stats.nudges === 1);
-    lines.push("INFO gap vx " + gapVx.toFixed(2));
+    doNudge(1);
     for (let i = 0; i < 220; i++) {
       step(1 / 60);
       maxAlone = Math.max(maxAlone, ball.getPosition().x);
@@ -3064,7 +2956,7 @@ function runTests() {
     check("wobbly bridge straightens", !!bridge && bridge.meta.outline.local.length === 2);
     for (let i = 0; i < 30; i++) step(1 / 60);
     const by0 = bridge ? bridge.body.getPosition().y : -1;
-    sweepCursor(1, 30);
+    doNudge(1);
     let climbed = false;
     for (let i = 0; i < 240; i++) {
       step(1 / 60);
@@ -3311,50 +3203,21 @@ function runTests() {
     step(1 / 60);
     const used = new Set(confetti.map((c) => c.ox.toFixed(2) + "," + c.oy.toFixed(2)));
     check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length === 20);
+    check("click on the left half pushes left", nudgeDirFromClick(5, 4.7) === -1);
+    check("click on the right half pushes right", nudgeDirFromClick(5, 5.2) === 1);
 
     buildLevel(LEVELS["ein-klotz"]);
-    for (let i = 0; i < 20; i++) step(1 / 60);
-    const still = ball.getPosition();
-    const nudgesStill = stats.nudges;
-    cursorAim = { x: still.x, y: still.y };
-    for (let i = 0; i < 20; i++) step(1 / 60);
-    cursorAim = null;
-    cursorPoke = null;
-    check("a still cursor on the ball does not push", stats.nudges === nudgesStill && Math.abs(ball.getPosition().x - still.x) < 0.05);
-
-    buildLevel(LEVELS["ein-klotz"]);
-    for (let i = 0; i < 15; i++) step(1 / 60);
-    const leftVx = sweepCursor(1, 30);
-    lines.push("INFO poke left vx " + leftVx.toFixed(2));
-    check("cursor from the left pushes right", leftVx > 4);
-    check("a cursor shove stays within the old click", leftVx < 7.8);
-
-    buildLevel(LEVELS["ein-klotz"]);
-    for (let i = 0; i < 15; i++) step(1 / 60);
-    const rightVx = sweepCursor(-1, 30);
-    check("cursor from the right pushes left", rightVx < -4);
-
-    buildLevel(LEVELS["ein-klotz"]);
-    for (let i = 0; i < 15; i++) step(1 / 60);
-    const slowVx = sweepCursor(1, 2);
-    lines.push("INFO poke slow vx " + slowVx.toFixed(2));
-    check("a slow cursor shove is weaker than the cap", slowVx > 0.3 && slowVx < 3.5);
-
-    buildLevel(LEVELS["ein-klotz"]);
-    for (let i = 0; i < 15; i++) step(1 / 60);
-    const above = ball.getPosition();
-    const nudgesAbove = stats.nudges;
-    cursorAim = { x: above.x, y: above.y + BALL_R * 2 + 0.08 };
+    for (let i = 0; i < 10; i++) step(1 / 60);
+    const half = ball.getPosition().x;
+    doNudge(nudgeDirFromClick(half, half - 0.05));
     step(1 / 60);
-    for (let i = 0; i < 6; i++) {
-      cursorAim = { x: above.x, y: cursorAim.y - 0.4 };
-      step(1 / 60);
-    }
-    const dropVx = ball.getLinearVelocity().x;
-    cursorAim = null;
-    cursorPoke = null;
-    lines.push("INFO poke down vx " + dropVx.toFixed(2));
-    check("a vertical cursor hit does not push along x", Math.abs(dropVx) < 0.35 && stats.nudges === nudgesAbove);
+    check("left half click accelerates left", ball.getLinearVelocity().x < -2);
+    buildLevel(LEVELS["ein-klotz"]);
+    for (let i = 0; i < 10; i++) step(1 / 60);
+    const halfR = ball.getPosition().x;
+    doNudge(nudgeDirFromClick(halfR, halfR + 0.05));
+    step(1 / 60);
+    check("right half click accelerates right", ball.getLinearVelocity().x > 2);
 
     function ring(cx, cy, r) {
       const pts = [];

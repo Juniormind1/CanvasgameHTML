@@ -14,6 +14,6 @@ Lokal geht dieselbe Datei über `index.html`. Gezeichnete Striche werden zu Kör
 - Kurz stillhalten und ziehen verschiebt einen Gegenstand. Er bleibt schwer, dreht sich unter den Finger und lässt sich stapeln.
 - Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level ohne Konfetti.
 - Auf der Karte hängt ein Kugelstoßpendel. Eine äußere Kugel zur Seite ziehen und loslassen.
-- Rechtsklick radiert. Gehaltene Maus wird zur Kugel und schubst die rote nur seitlich.
+- Rechtsklick radiert. Klick auf die Kugel schubst sie.
 - Rakete startet, wenn etwas auf sie fällt.
 - Karte, 13 Level, Schmierzettel und ein Editor. Fortschritt bleibt lokal im Browser.
