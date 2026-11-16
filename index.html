@@ -1292,7 +1292,7 @@ function eraseAt(x, y) {
 }
 
 function nudgeDirFromClick(ballX, clickX) {
-  return clickX >= ballX ? -1 : 1;
+  return clickX >= ballX ? 1 : -1;
 }
 
 function doNudge(dir) {
@@ -1532,7 +1532,7 @@ function burstConfetti() {
     origins.push({ x: p.x, y: p.y });
   }
   if (!origins.length) return;
-  const total = 100;
+  const total = 20;
   const pieces = [];
   for (let i = 0; i < total; i++) {
     const origin = origins[i % origins.length];
@@ -1556,7 +1556,7 @@ function burstConfetti() {
       h: 0.12 + ((i * 31) % 100) / 100 * 0.2,
       front: swap ? pair[1] : pair[0],
       back: swap ? pair[0] : pair[1],
-      delay: (i % 70) / 55,
+      delay: (i % 10) / 40,
       age: 0,
     });
   }
@@ -2578,8 +2578,8 @@ function runTests() {
     for (const star of stars) star.got = true;
     step(1 / 60);
     const starPos = stars[0].body.getPosition();
-    check("confetti has one hundred pieces", confetti.length === 100);
-    check("confetti rectangles have two colors", confetti.length === 100 && confetti.every((c) => c.front !== c.back));
+    check("confetti has twenty pieces", confetti.length === 20);
+    check("confetti rectangles have two colors", confetti.length === 20 && confetti.every((c) => c.front !== c.back));
     check("confetti rotates", confetti.every((c) => c.spinV !== 0 && c.flipV !== 0));
     check("confetti starts at the star", confetti.every((c) => Math.hypot(c.ox - starPos.x, c.oy - starPos.y) < 0.02));
     let turned = false;
@@ -2593,9 +2593,9 @@ function runTests() {
     for (const star of stars) star.got = true;
     step(1 / 60);
     const used = new Set(confetti.map((c) => c.ox.toFixed(2) + "," + c.oy.toFixed(2)));
-    check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length === 100);
-    check("click on the left half pushes right", nudgeDirFromClick(5, 4.7) === 1);
-    check("click on the right half pushes left", nudgeDirFromClick(5, 5.2) === -1);
+    check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length === 20);
+    check("click on the left half pushes left", nudgeDirFromClick(5, 4.7) === -1);
+    check("click on the right half pushes right", nudgeDirFromClick(5, 5.2) === 1);
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
