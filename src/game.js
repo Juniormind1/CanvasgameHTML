@@ -52,6 +52,7 @@ let cradleWorld = null;
 let cradleGround = null;
 let cradleBalls = [];
 let cradleDrag = null;
+let anchors = [];
 
 const CONFETTI_PAIRS = [
   ["#e23b32", "#f6e27a"],
@@ -813,6 +814,7 @@ function clearWorld() {
   simTime = 0;
   confetti = [];
   dragFresh = new Map();
+  anchors = [];
 }
 
 function track(body, meta) {
@@ -1330,6 +1332,7 @@ function destroyDrawing(draw) {
     }
   } else if (draw.body) {
     const doomed = draw.body;
+    if (isAnchored(doomed)) releaseAnchor(doomed);
     pins = pins.filter((pin) => {
       if (pin.body !== doomed) return true;
       return false;
@@ -1573,6 +1576,192 @@ function stepDragFresh(dt) {
     const slow = Math.hypot(v.x, v.y) < 0.4 && Math.abs(body.getAngularVelocity()) < 0.45;
     if (slow && still + dt > 0.45) dragFresh.delete(body);
     else dragFresh.set(body, slow ? still + dt : 0);
+  }
+}
+
+// Verankern: ein kurzer, fast gerader Zug vom Boden (oder einem verankerten
+// Körper) in einen festen Körper macht ihn statisch, als wäre er Teil des
+// Bodens. Umgekehrt geht es auch: Körper greifen und auf dem Boden loslassen.
+// Ketten beginnen immer am Boden. Rechtsklick auf den Verbindungsstrich löst
+// den Körper und alles, was an ihm hängt.
+const ANCHOR_MAX_LEN = 1.5;     // m, Weglänge des Zugs
+const ANCHOR_MIN_LEN = 0.15;    // m, Sehne; kürzer ist ein Klick
+const ANCHOR_STRAIGHT = 0.8;    // Sehne / Weglänge
+const ANCHOR_MAX_BOW = 0.2;     // m, größte Abweichung von der Sehne
+const ANCHOR_TOUCH = 0.05;      // m, Abstand, der noch als Berührung gilt
+const ANCHOR_BASE_TOL = 0.15;   // m, Start so nah am Boden zählt als „auf dem Boden“
+const ANCHOR_TARGET_TOL = 0.06; // m, Ende so nah am Umriss zählt als „im Körper“
+const ANCHOR_LINK_HIT = 0.22;   // m, Rechtsklick-Abstand zum Verbindungsstrich
+
+function anchorOf(body) {
+  return anchors.find((a) => a.body === body) || null;
+}
+
+function isAnchored(body) {
+  return !!anchorOf(body);
+}
+
+function anchorStrokeOk(trail) {
+  if (!trail || trail.length < 2) return false;
+  const a = trail[0];
+  const b = trail[trail.length - 1];
+  const chord = dist(a, b);
+  let len = 0;
+  let bow = 0;
+  for (let i = 1; i < trail.length; i++) len += dist(trail[i - 1], trail[i]);
+  for (const p of trail) bow = Math.max(bow, distPointSeg(p.x, p.y, a.x, a.y, b.x, b.y));
+  return len <= ANCHOR_MAX_LEN && chord >= ANCHOR_MIN_LEN && chord >= ANCHOR_STRAIGHT * len && bow <= ANCHOR_MAX_BOW;
+}
+
+function insideDraw(d, x, y, tol) {
+  if (!d || !d.body || !d.meta || !d.meta.outline || !d.meta.outline.closed) return false;
+  const lp = d.body.getLocalPoint(V(x, y));
+  return distToPoly(lp.x, lp.y, d.meta.outline.local) <= tol;
+}
+
+// Nur feste Körper: keine Drähte, keine Kugeln, keine Seile.
+function anchorableAt(x, y) {
+  for (let i = drawings.length - 1; i >= 0; i--) {
+    const d = drawings[i];
+    if (d.kind !== "solid" || !d.body || (d.meta && d.meta.round)) continue;
+    if (insideDraw(d, x, y, ANCHOR_TARGET_TOL)) return d;
+  }
+  return null;
+}
+
+// Boden oder verankerter Körper unter dem Punkt.
+function anchorBaseAt(x, y, except) {
+  for (let i = drawings.length - 1; i >= 0; i--) {
+    const d = drawings[i];
+    if (!d.body || d.body === except || !isAnchored(d.body)) continue;
+    if (insideDraw(d, x, y, ANCHOR_BASE_TOL)) return d.body;
+  }
+  for (const g of geometry) {
+    if (g.closed ? distToPoly(x, y, g.pts) <= ANCHOR_BASE_TOL : distToWire(x, y, g.pts) <= ANCHOR_BASE_TOL + 0.1) return ground;
+  }
+  return null;
+}
+
+function bodyGap(a, b) {
+  let best = Infinity;
+  const xa = a.getTransform();
+  const xb = b.getTransform();
+  for (let fa = a.getFixtureList(); fa; fa = fa.getNext()) {
+    for (let fb = b.getFixtureList(); fb; fb = fb.getNext()) {
+      const ba = fa.getAABB(0);
+      const bb = fb.getAABB(0);
+      if (ba.lowerBound.x - bb.upperBound.x > best || bb.lowerBound.x - ba.upperBound.x > best) continue;
+      if (ba.lowerBound.y - bb.upperBound.y > best || bb.lowerBound.y - ba.upperBound.y > best) continue;
+      const input = new planck.DistanceInput();
+      input.proxyA.set(fa.getShape(), 0);
+      input.proxyB.set(fb.getShape(), 0);
+      input.transformA = xa;
+      input.transformB = xb;
+      input.useRadii = true;
+      const output = new planck.DistanceOutput();
+      planck.Distance(output, new planck.SimplexCache(), input);
+      best = Math.min(best, output.distance);
+    }
+  }
+  return best;
+}
+
+function anchorBody(draw, base, from, to) {
+  if (!world || world.isLocked() || !draw || !draw.body || !base) return false;
+  const body = draw.body;
+  if (draw.kind !== "solid" || (draw.meta && draw.meta.round)) return false;
+  if (!body.isDynamic() || isAnchored(body) || base === body) return false;
+  if (base !== ground && !isAnchored(base)) return false;
+  if (bodyGap(body, base) > ANCHOR_TOUCH) return false;
+  if (playDrag && playDrag.body === body) endDrag();
+  body.setStatic();
+  dragFresh.delete(body);
+  anchors.push({
+    body, base, draw,
+    a: { x: from.x, y: from.y },
+    b: { x: to.x, y: to.y },
+    color: draw.color,
+  });
+  return true;
+}
+
+function releaseAnchor(body) {
+  const link = anchorOf(body);
+  if (!link || !world || world.isLocked()) return false;
+  anchors = anchors.filter((a) => a !== link);
+  for (const dep of anchors.filter((a) => a.base === body)) releaseAnchor(dep.body);
+  if (bodyMeta.has(body)) {
+    body.setDynamic();
+    body.setAwake(true);
+  }
+  return true;
+}
+
+function anchorLinkAt(x, y) {
+  let best = null;
+  let bestD = ANCHOR_LINK_HIT;
+  for (const link of anchors) {
+    const d = distPointSeg(x, y, link.a.x, link.a.y, link.b.x, link.b.y);
+    if (d <= bestD) { bestD = d; best = link; }
+  }
+  return best;
+}
+
+function releaseAnchorAt(x, y) {
+  const link = anchorLinkAt(x, y);
+  return link ? releaseAnchor(link.body) : false;
+}
+
+// Gezeichneter Zug. true heißt: war eine Ankergeste, kein Strich zeichnen.
+function tryAnchorGesture(trail) {
+  if (!world || !anchorStrokeOk(trail)) return false;
+  const from = trail[0];
+  const to = trail[trail.length - 1];
+  // Vom verankerten Körper zurück auf seine Basis: lösen.
+  const startIn = anchorableAt(from.x, from.y);
+  if (startIn && isAnchored(startIn.body)) {
+    const back = anchorBaseAt(to.x, to.y, startIn.body);
+    if (back && back === anchorOf(startIn.body).base) {
+      releaseAnchor(startIn.body);
+      return true;
+    }
+  }
+  const base = anchorBaseAt(from.x, from.y);
+  if (!base) return false;
+  const target = anchorableAt(to.x, to.y);
+  if (!target || target.body === base) return false;
+  if (isAnchored(target.body)) {
+    releaseAnchor(target.body);
+    return true;
+  }
+  anchorBody(target, base, from, to);
+  return true;
+}
+
+// Gegriffener Körper, Maus auf Boden oder verankertem Körper losgelassen.
+function tryAnchorDragEnd(body, grabPt, trail) {
+  if (!world || !anchorStrokeOk(trail)) return false;
+  const to = trail[trail.length - 1];
+  const draw = drawings.find((d) => d.body === body);
+  if (!draw || insideDraw(draw, to.x, to.y, 0)) return false;
+  const base = anchorBaseAt(to.x, to.y, body);
+  if (!base) return false;
+  return anchorBody(draw, base, to, grabPt);
+}
+
+function drawAnchorLinks() {
+  for (const link of anchors) {
+    crayonPath([link.a, link.b], link.color, 0.1);
+    for (const p of [link.a, link.b]) {
+      const s = worldToScreen(p.x, p.y);
+      ctx.save();
+      ctx.fillStyle = link.color;
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, Math.max(2.5, 0.08 * camScale()), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
   }
 }
 
@@ -2146,6 +2335,7 @@ function renderPlay() {
       } else crayonPath(pts, draw.color, THICK);
     }
   }
+  drawAnchorLinks();
   for (const pin of pins) drawPin(pin);
   for (const star of stars) drawStar(star);
   drawBall();
@@ -2888,7 +3078,7 @@ function onPointerDown(e) {
   }
   if (e.button === 2) {
     const w = screenToWorld(e.clientX, e.clientY);
-    if (mode === "play") eraseAt(w.x, w.y);
+    if (mode === "play" && !releaseAnchorAt(w.x, w.y)) eraseAt(w.x, w.y);
     if (mode === "editor") editorClick(w);
     return;
   }
@@ -2921,6 +3111,7 @@ function onPointerDown(e) {
     rocket: mode === "editor" && editorTool === "rocket",
     downT: performance.now(),
     grab: null,
+    trail: [{ x: w.x, y: w.y }],
   };
   if (kind === "nudge") {
     const bp = ball.getPosition();
@@ -2966,6 +3157,10 @@ function onPointerMove(e) {
   const w = screenToWorld(e.clientX, e.clientY);
   pointer.wx = w.x;
   pointer.wy = w.y;
+  if (pointer.trail) {
+    const tl = pointer.trail[pointer.trail.length - 1];
+    if (Math.hypot(w.x - tl.x, w.y - tl.y) > 0.02) pointer.trail.push({ x: w.x, y: w.y });
+  }
   if (pointer.dragging && playDrag) {
     moveDrag(w.x, w.y);
     pointer.moved = true;
@@ -2988,8 +3183,17 @@ function onPointerUp(e) {
   if (!pointer) return;
   const current = pointer;
   pointer = null;
+  if (current.trail) {
+    const up = screenToWorld(e.clientX, e.clientY);
+    const tl = current.trail[current.trail.length - 1];
+    if (Math.hypot(up.x - tl.x, up.y - tl.y) > 0.02) current.trail.push({ x: up.x, y: up.y });
+  }
   if (current.dragging || playDrag || current.grab) {
+    const held = playDrag && playDrag.body
+      ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)) }
+      : null;
     endDrag();
+    if (held && mode === "play") tryAnchorDragEnd(held.body, { x: held.at.x, y: held.at.y }, current.trail);
     return;
   }
   if (current.cradle) {
@@ -3010,7 +3214,7 @@ function onPointerUp(e) {
     if (mode === "play" && current.onBall) doNudge(current.nudgeDir);
     return;
   }
-  if (mode === "play") commitStroke(current.pts, COLORS[colorIndex]);
+  if (mode === "play") finishPlayStroke(current.trail, current.pts);
   if (mode === "editor" && (editorTool === "terrain" || editorTool === "decor")) {
     const shaped = editorTool === "terrain" ? tidyTerrain(current.pts) : current.pts;
     editorDoc.strokes.push({
@@ -3019,6 +3223,11 @@ function onPointerUp(e) {
       points: shaped.map((p) => [p.x, p.y]),
     });
   }
+}
+
+function finishPlayStroke(trail, pts) {
+  if (tryAnchorGesture(trail)) return "anchor";
+  return commitStroke(pts || trail, COLORS[colorIndex]);
 }
 
 // Planck skaliert den gespeicherten Kontakt- und Gelenkimpuls beim Warmstart mit
@@ -3769,6 +3978,7 @@ function runTests() {
     check("cradle middle balls stay calm for 10 half swings", swingWins.length >= 10 && swingWorst < 0.1);
     lines.push("INFO cradle mid/outer worst " + swingWorst.toFixed(3) + " over " + Math.min(10, swingWins.length) + " half swings");
     lines.push("INFO cradle swing far " + farSwing.toFixed(2) + " mid " + midSwing.toFixed(2) + " overlap " + cradleOverlap.toFixed(3));
+
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
