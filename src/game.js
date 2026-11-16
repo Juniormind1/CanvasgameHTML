@@ -3979,6 +3979,85 @@ function runTests() {
     lines.push("INFO cradle mid/outer worst " + swingWorst.toFixed(3) + " over " + Math.min(10, swingWins.length) + " half swings");
     lines.push("INFO cradle swing far " + farSwing.toFixed(2) + " mid " + midSwing.toFixed(2) + " overlap " + cradleOverlap.toFixed(3));
 
+    {
+      // Verankern: kurzer gerader Zug Boden -> Körper, Ketten nur vom Boden aus.
+      buildLevel(LEVELS["ein-klotz"]);
+      const ancRect = (x0, y0, w, h, color) => commitStroke([
+        { x: x0, y: y0 }, { x: x0 + w, y: y0 }, { x: x0 + w, y: y0 + h }, { x: x0, y: y0 + h }, { x: x0, y: y0 },
+      ], color);
+      const ancA = ancRect(19, 1.4, 1.5, 1, "#3c7fd6");
+      const ancE = ancRect(25, 1.4, 1.5, 1, "#3e9a48");
+      const ancC = ancRect(29, 1.4, 1.2, 0.8, "#7a4fbf");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const ancTopA = ancA.body.getPosition().y + 0.5;
+      const ancDrawCount = drawings.length;
+      const ancShapes = stats.shapes;
+      const ancRes1 = finishPlayStroke([{ x: 18.6, y: 1.2 }, { x: 19, y: 1.45 }, { x: 19.4, y: 1.7 }]);
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      check("anchor ground->rectangle makes it static", ancRes1 === "anchor" && ancA.body.isStatic() && anchors.length === 1 && anchors[0].base === ground);
+      check("anchor gesture draws no stroke", drawings.length === ancDrawCount && stats.shapes === ancShapes);
+      check("anchor link has the body color", anchors.length === 1 && anchors[0].color === "#3c7fd6");
+
+      const ancB = ancRect(19.2, ancTopA + 0.05, 1, 0.8, "#d94b3a");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const ancResB = finishPlayStroke([{ x: 19.9, y: ancTopA - 0.15 }, { x: 19.85, y: ancTopA + 0.1 }, { x: 19.8, y: ancTopA + 0.35 }]);
+      check("anchor to an anchored body works", ancResB === "anchor" && ancB.body.isStatic() && anchorOf(ancB.body) && anchorOf(ancB.body).base === ancA.body);
+
+      const ancD = ancRect(29.1, ancC.body.getPosition().y + 0.45, 0.9, 0.6, "#ef8b2c");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const ancTopC = ancC.body.getPosition().y + 0.4;
+      const ancFreeDirect = anchorBody(ancD, ancC.body, { x: 29.6, y: ancTopC - 0.1 }, { x: 29.6, y: ancTopC + 0.2 });
+      const ancFreeGesture = tryAnchorGesture([{ x: 29.6, y: ancTopC - 0.15 }, { x: 29.6, y: ancTopC + 0.25 }]);
+      check("chain between two free bodies is refused", !ancFreeDirect && !ancFreeGesture && ancD.body.isDynamic() && ancC.body.isDynamic());
+
+      const ancLong = finishPlayStroke([{ x: 22.5, y: 1.2 }, { x: 24, y: 1.45 }, { x: 25.4, y: 1.7 }]);
+      check("long drag into a body still draws", ancLong && ancLong !== "anchor" && ancE.body.isDynamic());
+      const ancCurved = finishPlayStroke([{ x: 24.6, y: 1.25 }, { x: 24.62, y: 1.75 }, { x: 24.9, y: 1.95 }, { x: 25.25, y: 1.8 }]);
+      check("curved short drag into a body still draws", ancCurved && ancCurved !== "anchor" && ancE.body.isDynamic());
+      const ancEmpty = finishPlayStroke([{ x: 12.5, y: 1.25 }, { x: 12.9, y: 1.55 }, { x: 13.3, y: 1.9 }]);
+      check("short stroke from the ground into empty space draws", ancEmpty && ancEmpty !== "anchor" && drawings.includes(ancEmpty));
+
+      const ancMid = { x: (anchors[0].a.x + anchors[0].b.x) / 2, y: (anchors[0].a.y + anchors[0].b.y) / 2 };
+      const ancMidScr = worldToScreen(ancMid.x, ancMid.y);
+      onPointerDown({ button: 2, clientX: ancMidScr.x, clientY: ancMidScr.y, pointerId: 7 });
+      const ancRight = anchors.length === 0 && drawings.includes(ancA) && drawings.includes(ancB);
+      for (let i = 0; i < 30; i++) step(1 / 60);
+      check("right click on the link releases body and dependents", ancRight && ancA.body.isDynamic() && ancB.body.isDynamic() && anchors.length === 0);
+
+      buildLevel(LEVELS["ein-klotz"]);
+      const ancBlob = spawnBlob(21.5, 1.62, 0.3, "#e6b423");
+      const ancRoll = spawnRoller(23.5, 1.85, 0.5, "#8d5a34");
+      const ancWire = spawnWire([{ x: 27, y: 1.5 }, { x: 28.5, y: 1.5 }], { color: "#2b2b2b" });
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      finishPlayStroke([{ x: 21.1, y: 1.2 }, { x: 21.5, y: 1.6 }]);
+      finishPlayStroke([{ x: 23.0, y: 1.2 }, { x: 23.4, y: 1.7 }]);
+      const ancWy = ancWire.body.getPosition().y;
+      finishPlayStroke([{ x: 27.4, y: 1.2 }, { x: 27.7, y: ancWy }]);
+      check("balls and wires are not anchored", ancBlob.body.isDynamic() && ancRoll.body.isDynamic() && ancWire.body.isDynamic() && anchors.length === 0);
+
+      const ancG = ancRect(16, 1.4, 1.5, 1, "#3c7fd6");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const ancGc = ancG.body.getPosition();
+      finishPlayStroke([{ x: 15.6, y: 1.2 }, { x: 16.4, y: 1.6 }]);
+      const ancGrabKind = pressKind(ancGc.x, ancGc.y);
+      const ancGrab = beginDrag(ancGc.x, ancGc.y);
+      check("anchored body cannot be grabbed", ancG.body.isStatic() && ancGrabKind !== "drag" && !ancGrab && !playDrag);
+      const ancAgain = finishPlayStroke([{ x: 15.6, y: 1.2 }, { x: 16.4, y: 1.6 }]);
+      check("same anchor gesture again releases it", ancAgain === "anchor" && ancG.body.isDynamic() && anchors.length === 0);
+
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      const ancHc = ancG.body.getPosition();
+      const ancDragOk = beginDrag(ancHc.x, ancHc.y);
+      moveDrag(ancHc.x + 0.1, 1.1);
+      for (let i = 0; i < 20; i++) step(1 / 60);
+      const ancHeld = playDrag ? playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)) : ancHc;
+      endDrag();
+      const ancRev = tryAnchorDragEnd(ancG.body, { x: ancHeld.x, y: ancHeld.y }, [{ x: ancHc.x, y: ancHc.y }, { x: ancHc.x + 0.1, y: 1.1 }]);
+      check("reverse drag body->ground anchors it", ancDragOk && ancRev && ancG.body.isStatic());
+      const ancPose = ancG.body.getPosition().y;
+      for (let i = 0; i < 120; i++) step(1 / 60);
+      check("anchored body stays put", Math.abs(ancG.body.getPosition().y - ancPose) < 1e-6);
+    }
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
