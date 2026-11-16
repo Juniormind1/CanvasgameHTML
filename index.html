@@ -100,7 +100,7 @@ let ropeSeq = 1;
 let levelDef = null;
 let won = false;
 let medals = { elegant: false, oldschool: false };
-let stats = { shapes: 0, nudges: 0, userPins: 0, ropes: 0, drewUnder: false };
+let stats = { shapes: 0, nudges: 0, userPins: 0, ropes: 0, drewUnder: false, dragTrick: false };
 let simTime = 0;
 let editorDoc = null;
 let editorTool = "terrain";
@@ -110,6 +110,7 @@ let lastTap = 0;
 let paper = null;
 let confetti = [];
 let playDrag = null;
+let dragFresh = new Map();
 let cradleWorld = null;
 let cradleGround = null;
 let cradleBalls = [];
@@ -857,9 +858,10 @@ function clearWorld() {
   contactQ = [];
   won = false;
   medals = { elegant: false, oldschool: false };
-  stats = { shapes: 0, nudges: 0, userPins: 0, ropes: 0, drewUnder: false };
+  stats = { shapes: 0, nudges: 0, userPins: 0, ropes: 0, drewUnder: false, dragTrick: false };
   simTime = 0;
   confetti = [];
+  dragFresh = new Map();
 }
 
 function track(body, meta) {
@@ -1405,7 +1407,7 @@ function rayBlock(body, x1, y1, x2, y2) {
     const nx = normal.x;
     const ny = normal.y;
     if (nx * dirx + ny * diry > 0) return -1;
-    if (!best || fraction < best.fraction) best = { fraction, nx, ny };
+    if (!best || fraction < best.fraction) best = { fraction, nx, ny, quest: other === ball };
     return Math.max(fraction, 1e-5);
   });
   return best;
@@ -1423,20 +1425,24 @@ function clampDragGoal(body, goal) {
     dx *= maxStep / len;
     dy *= maxStep / len;
   }
-  const skin = 0.012;
+  // Other bodies stop 1.2 cm short. The quest ball is pressed 5 cm so the
+  // contact solver actually shoves it; that shove is the drag trick.
+  const skinOut = 0.012;
+  const skinBall = -0.05;
   for (let slide = 0; slide < 2; slide++) {
     const seg = Math.hypot(dx, dy);
     if (seg < 1e-4) break;
     const dirx = dx / seg;
     const diry = dy / seg;
     const support = supportAlong(body, dirx, diry);
-    const cast = support + seg + skin;
+    const cast = support + seg + skinBall;
     const hit = rayBlock(body, cx, cy, cx + dirx * cast, cy + diry * cast);
     if (!hit) {
       cx += dx;
       cy += dy;
       break;
     }
+    const skin = hit.quest ? skinBall : skinOut;
     const allow = hit.fraction * cast - support - skin;
     const stepLen = Math.min(seg, Math.max(allow, 0));
     if (allow < 0) {
@@ -1461,8 +1467,16 @@ function clampDragGoal(body, goal) {
 
 function chaseDrag() {
   if (!playDrag || !world || !playDrag.joint) return;
-  const goal = clampDragGoal(playDrag.body, playDrag.goal);
-  playDrag.joint.setTarget(V(goal.x, goal.y));
+  const body = playDrag.body;
+  const anchor = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+  const com = body.getPosition();
+  const offx = com.x - anchor.x;
+  const offy = com.y - anchor.y;
+  const clamped = clampDragGoal(body, {
+    x: playDrag.goal.x + offx,
+    y: playDrag.goal.y + offy,
+  });
+  playDrag.joint.setTarget(V(clamped.x - offx, clamped.y - offy));
 }
 
 function beginDrag(x, y) {
@@ -1472,14 +1486,16 @@ function beginDrag(x, y) {
   endDrag();
   const body = draw.body;
   const wasBullet = body.isBullet();
+  const angularDamping = body.getAngularDamping();
   body.setBullet(true);
+  body.setAngularDamping(1.8);
   body.setAwake(true);
   const mass = Math.max(0.2, body.getMass());
-  const p = body.getPosition();
+  const local = body.getLocalPoint(V(x, y));
   const joint = world.createJoint(new planck.MouseJoint({
     bodyA: ground,
     bodyB: body,
-    target: V(p.x, p.y),
+    target: V(x, y),
     maxForce: mass * 160,
     frequencyHz: 7,
     dampingRatio: 1,
@@ -1489,6 +1505,8 @@ function beginDrag(x, y) {
     body,
     joint,
     wasBullet,
+    angularDamping,
+    local: { x: local.x, y: local.y },
     goal: { x, y },
   };
   return true;
@@ -1510,7 +1528,28 @@ function endDrag() {
   drag.body.setLinearVelocity(V(0, 0));
   drag.body.setAngularVelocity(0);
   drag.body.setBullet(drag.wasBullet);
+  drag.body.setAngularDamping(drag.angularDamping);
   drag.body.setAwake(true);
+  dragFresh.set(drag.body, 0);
+}
+
+function dragBodyHot(body) {
+  if (!body) return false;
+  if (playDrag && playDrag.body === body) return true;
+  return dragFresh.has(body);
+}
+
+function stepDragFresh(dt) {
+  for (const [body, still] of dragFresh) {
+    if (!bodyMeta.has(body)) {
+      dragFresh.delete(body);
+      continue;
+    }
+    const v = body.getLinearVelocity();
+    const slow = Math.hypot(v.x, v.y) < 0.4 && Math.abs(body.getAngularVelocity()) < 0.45;
+    if (slow && still + dt > 0.45) dragFresh.delete(body);
+    else dragFresh.set(body, slow ? still + dt : 0);
+  }
 }
 
 function nudgeDirFromClick(ballX, clickX) {
@@ -1693,6 +1732,7 @@ function handleContacts() {
     const star = ma.kind === "star" ? ma : mb.kind === "star" ? mb : null;
     const isBall = ma.kind === "ball" || mb.kind === "ball";
     if (star && isBall) star.got = true;
+    if (isBall && (dragBodyHot(a) || dragBodyHot(b))) stats.dragTrick = true;
     const rocketMeta = ma.kind === "rocket" ? ma : mb.kind === "rocket" ? mb : null;
     const other = rocketMeta === ma ? mb : rocketMeta === mb ? ma : null;
     if (rocketMeta && other && other.kind !== "star" && other.body && other.body.isDynamic()) {
@@ -1711,6 +1751,7 @@ function step(dt) {
   }
   world.step(dt, 10, 8);
   handleContacts();
+  stepDragFresh(dt);
   for (const rocket of rockets) {
     if (rocket.mode === "fly") {
       const angle = rocket.body.getAngle();
@@ -1738,8 +1779,10 @@ function step(dt) {
   }
   if (!won && stars.length && stars.every((s) => s.got)) {
     won = true;
-    medals.elegant = stats.shapes === 1 && stats.nudges === 0;
-    medals.oldschool = stats.nudges === 0 && stats.userPins === 0 && stats.ropes === 0 && !stats.drewUnder;
+    if (!stats.dragTrick) {
+      medals.elegant = stats.shapes === 1 && stats.nudges === 0;
+      medals.oldschool = stats.nudges === 0 && stats.userPins === 0 && stats.ropes === 0 && !stats.drewUnder;
+    }
     if (levelDef && !levelDef.sandbox && !levelDef.custom) {
       const store = progress();
       const prev = store.cleared[levelDef.id] || {};
@@ -1749,7 +1792,7 @@ function step(dt) {
       };
       saveJSON("crayon-progress", store);
     }
-    burstConfetti();
+    if (!stats.dragTrick) burstConfetti();
   }
   stepConfetti(dt);
 }
@@ -2119,9 +2162,12 @@ function drawHUD() {
     ctx.stroke();
     label("Stern gefangen", x + 36, y + 24, 32);
     const bits = [];
-    if (medals.elegant) bits.push("Elegant");
-    if (medals.oldschool) bits.push("Old School");
-    label(bits.length ? bits.join("  ·  ") : "Ein Weg von vielen.", x + 36, y + 78, 20, "#3e9a48");
+    if (stats.dragTrick) bits.push("Unerlaubtes Tricksen");
+    else {
+      if (medals.elegant) bits.push("Elegant");
+      if (medals.oldschool) bits.push("Old School");
+    }
+    label(bits.length ? bits.join("  ·  ") : "Ein Weg von vielen.", x + 36, y + 78, 20, stats.dragTrick ? "#a33b32" : "#3e9a48");
     button(x + 30, y + 140, 110, 46, "Nochmal", () => buildLevel(levelDef));
     button(x + 155, y + 140, 110, 46, "Karte", showMap);
     const next = nextLevelId();
@@ -2455,7 +2501,8 @@ function renderHelp() {
     "Winziger Kreis auf einem Körper oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
     "Linie von Nagel zu Nagel: Seil.",
-    "Kurz stillhalten, dann ziehen: der Gegenstand folgt, bleibt undurchdringlich und lässt sich stapeln.",
+    "Kurz stillhalten, dann ziehen. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
+    "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
     "Klick auf die rote Kugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
     "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
@@ -3301,6 +3348,58 @@ function runTests() {
     const stackedOverlap = pairOverlap(pile, base);
     check("released box stacks on the other", stackedGap > 1.2 && stackedGap < 2.2 && stackedOverlap < 0.08 && Math.abs(pile.getPosition().x - base.getPosition().x) < 0.45);
     lines.push("INFO stack gap " + stackedGap.toFixed(2) + " overlap " + stackedOverlap.toFixed(3));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const slab = makeBox({ x: 10, y: 6, hw: 1.2, hh: 0.35, color: "#3c7fd6" });
+    for (let i = 0; i < 5; i++) step(1 / 60);
+    const grip = slab.getWorldPoint(V(1.0, 0.22));
+    check("corner grab starts", beginDrag(grip.x, grip.y));
+    for (let i = 0; i < 300; i++) {
+      moveDrag(grip.x, grip.y);
+      step(1 / 60);
+    }
+    const held = slab.getWorldPoint(V(1.0, 0.22));
+    const com = slab.getPosition();
+    const hangX = com.x - held.x;
+    const hangY = com.y - held.y;
+    check("grab point stays under the cursor", Math.hypot(held.x - grip.x, held.y - grip.y) < 0.25);
+    check("weight hangs below the grab", hangY < -0.85 && Math.abs(hangX) < 0.16);
+    lines.push("INFO hang " + hangX.toFixed(2) + "," + hangY.toFixed(2));
+    endDrag();
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const pusher = makeBox({ x: 3.1, y: 2.3, hw: 0.4, hh: 0.4, color: "#d94b3a" });
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    const shoveX0 = ball.getPosition().x;
+    beginDrag(pusher.getPosition().x, pusher.getPosition().y);
+    for (let i = 0; i < 120; i++) {
+      const bp = ball.getPosition();
+      moveDrag(bp.x, bp.y);
+      step(1 / 60);
+    }
+    lines.push("INFO shove ball " + ball.getPosition().x.toFixed(2) + " box " + pusher.getPosition().x.toFixed(2) + " trick " + stats.dragTrick);
+    check("a dragged body can shove the ball", ball.getPosition().x > shoveX0 + 0.35);
+    check("dragging a body into the ball is a trick", stats.dragTrick);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    check("a trick still solves the level", won);
+    check("a trick skips confetti", confetti.length === 0);
+    endDrag();
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const rested = makeBox({ x: 18, y: 3.2, hw: 0.4, hh: 0.4, color: "#3e9a48" });
+    for (let i = 0; i < 15; i++) step(1 / 60);
+    beginDrag(rested.getPosition().x, rested.getPosition().y);
+    for (let i = 0; i < 30; i++) {
+      moveDrag(18, 3.4);
+      step(1 / 60);
+    }
+    endDrag();
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    check("a settled drag is not yet a trick", !stats.dragTrick);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    check("a settled drag still gets confetti", won && confetti.length === 20);
 
     ensureCradle();
     for (let i = 0; i < 40; i++) stepCradle(1 / 60);
