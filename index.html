@@ -713,6 +713,40 @@ function straightenOpen(pts) {
   return clean;
 }
 
+function circleFit(pts) {
+  if (!pts || pts.length < 6) return null;
+  let cx = 0;
+  let cy = 0;
+  for (const p of pts) {
+    cx += p.x;
+    cy += p.y;
+  }
+  cx /= pts.length;
+  cy /= pts.length;
+  const radii = [];
+  let mean = 0;
+  for (const p of pts) {
+    const r = Math.hypot(p.x - cx, p.y - cy);
+    radii.push(r);
+    mean += r;
+  }
+  mean /= radii.length;
+  if (mean < 0.16 || mean > 4) return null;
+  let dev = 0;
+  for (const r of radii) dev = Math.max(dev, Math.abs(r - mean));
+  if (dev > Math.max(0.07, mean * 0.16)) return null;
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += dist(pts[i - 1], pts[i]);
+  len += dist(pts[0], pts[pts.length - 1]);
+  const circ = Math.PI * 2 * mean;
+  if (len < circ * 0.72 || len > circ * 1.28) return null;
+  const angs = pts.map((p) => Math.atan2(p.y - cy, p.x - cx)).sort((a, b) => a - b);
+  let gap = angs[0] + Math.PI * 2 - angs[angs.length - 1];
+  for (let i = 1; i < angs.length; i++) gap = Math.max(gap, angs[i] - angs[i - 1]);
+  if (gap > Math.PI * 0.7) return null;
+  return { x: cx, y: cy, r: mean };
+}
+
 function tidyTerrain(rawPts) {
   let pts = dedupe(simplify(rawPts, 0.045));
   if (pts.length < 2) return pts;
@@ -1047,18 +1081,40 @@ function spawnWire(pts, opt) {
 function spawnBlob(x, y, r, color) {
   const body = world.createDynamicBody({
     position: V(x, y),
-    linearDamping: 0.2,
-    angularDamping: 0.2,
+    linearDamping: 0.04,
+    angularDamping: 0.04,
   });
-  body.createFixture(new planck.Circle(r), fixtureOpt({ density: 1.2, friction: 0.5, restitution: 0 }));
+  body.createFixture(new planck.Circle(r), fixtureOpt({ density: 3.2, friction: 0.16, restitution: 0 }));
   const meta = track(body, {
     kind: "draw",
+    round: true,
     circles: [{ x: 0, y: 0, r }],
     outline: null,
   });
   const draw = { kind: "blob", body, meta, color, x, y, r };
   drawings.push(draw);
   noteShape([{ x, y: y - r }, { x, y }]);
+  return draw;
+}
+
+function spawnRoller(x, y, r, color) {
+  const body = world.createDynamicBody({
+    position: V(x, y),
+    linearDamping: 0.015,
+    angularDamping: 0.02,
+    bullet: true,
+  });
+  body.createFixture(new planck.Circle(r), fixtureOpt({ density: 3.2, friction: 0.16, restitution: 0 }));
+  const meta = track(body, {
+    kind: "roller",
+    round: true,
+    circles: [{ x: 0, y: 0, r }],
+    outline: null,
+  });
+  const draw = { kind: "roller", body, meta, color, x, y, r };
+  drawings.push(draw);
+  attachExistingPins(body, meta);
+  noteShape([{ x: x - r, y }, { x, y: y - r }, { x: x + r, y }]);
   return draw;
 }
 
@@ -1227,6 +1283,10 @@ function commitStroke(rawPts, color) {
     }
     const r = clamp(Math.max(bw, bh) * 0.5, 0.12, 0.34);
     return spawnBlob(cx, cy, r, used);
+  }
+  if (pts.length >= 6 && (closed || dist(pts[0], pts[pts.length - 1]) < 0.4)) {
+    const fit = circleFit(pts);
+    if (fit) return spawnRoller(fit.x, fit.y, fit.r, used);
   }
   if (!closed) {
     const a = nearestPin(pts[0].x, pts[0].y, 0.55);
@@ -1420,6 +1480,13 @@ function buildLevel(def) {
   world = new planck.World(V(0, -24));
   world.on("begin-contact", (contact) => {
     contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
+  });
+  world.on("pre-solve", (contact) => {
+    const ma = bodyMeta.get(contact.getFixtureA().getBody());
+    const mb = bodyMeta.get(contact.getFixtureB().getBody());
+    const roundA = ma && (ma.kind === "ball" || ma.round);
+    const roundB = mb && (mb.kind === "ball" || mb.round);
+    if (roundA && roundB) contact.setRestitution(0.98);
   });
   ground = world.createBody();
   track(ground, { kind: "level" });
@@ -1777,9 +1844,17 @@ function renderPlay() {
   for (const rocket of rockets) drawRocket(rocket);
   for (const draw of drawings) {
     if (draw.kind === "rope") drawRope(draw);
-    else if (draw.kind === "blob") {
+    else if (draw.kind === "blob" || draw.kind === "roller") {
       const p = draw.body.getPosition();
-      crayonPath(circlePts(p.x, p.y, draw.r, 14), draw.color, 0.12);
+      const s = worldToScreen(p.x, p.y);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, draw.r * camScale(), 0, Math.PI * 2);
+      ctx.fillStyle = draw.color;
+      ctx.globalAlpha = 0.9;
+      ctx.fill();
+      ctx.restore();
+      crayonPath(circlePts(p.x, p.y, draw.r, 16), draw.color, 0.1);
     } else if (draw.meta) {
       const pts = outlineWorld(draw.meta);
       if (!pts) continue;
@@ -1961,6 +2036,7 @@ function renderHelp() {
   const lines = [
     "Linke Maustaste, Finger oder Stift: zeichnen. Loslassen erweckt den Strich.",
     "Offene Linie: leichter, etwas federnder Draht. Geschlossene Fläche: schwerer Körper.",
+    "Ein runder Strich wird eine Kugel. Sie rollt und gibt ihren Schwung weiter.",
     "Winziger Kreis auf etwas Festem: Nagel. Daran dreht sich, was du darüber malst.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
     "Linie von Nagel zu Nagel: Seil.",
@@ -2596,6 +2672,47 @@ function runTests() {
     check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length === 20);
     check("click on the left half pushes left", nudgeDirFromClick(5, 4.7) === -1);
     check("click on the right half pushes right", nudgeDirFromClick(5, 5.2) === 1);
+
+    function ring(cx, cy, r) {
+      const pts = [];
+      for (let i = 0; i <= 18; i++) {
+        const a = (i / 18) * Math.PI * 2;
+        const wob = 1 + 0.045 * Math.sin(a * 3);
+        pts.push({ x: cx + Math.cos(a) * r * wob, y: cy + Math.sin(a) * r * wob });
+      }
+      return pts;
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(12, 6, 0.72), "#3c7fd6");
+    const one = drawings.find((d) => d.kind === "roller");
+    const shape = one && one.body.getFixtureList().getShape();
+    check("wobbly circle becomes a roller", !!one && Math.abs(one.r - 0.72) < 0.08 && shape && shape.m_type === "circle");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const cradleR = 0.4;
+    const cradleY = 1.3 + cradleR + 0.04;
+    const xs = [8, 8.84, 9.68];
+    for (const x of xs) commitStroke(ring(x, cradleY, cradleR), "#ef8b2c");
+    const row = drawings.filter((d) => d.kind === "roller").sort((a, b) => a.body.getPosition().x - b.body.getPosition().x);
+    check("cradle has three rollers", row.length === 3);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    row[0].body.setLinearVelocity(V(5.5, 0));
+    row[0].body.setAwake(true);
+    for (let i = 0; i < 100; i++) step(1 / 60);
+    const v0 = row[0].body.getLinearVelocity().x;
+    const v2 = row[2].body.getLinearVelocity().x;
+    check("cradle passes the shove to the far ball", v2 > 2.2 && v2 > v0 + 1);
+    lines.push("INFO cradle v " + v0.toFixed(2) + " " + row[1].body.getLinearVelocity().x.toFixed(2) + " " + v2.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(3.5, 1.66, 0.34), "#7a4fbf");
+    const hitter = drawings.find((d) => d.kind === "roller");
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    const ballX0 = ball.getPosition().x;
+    hitter.body.setLinearVelocity(V(6, 0));
+    hitter.body.setAwake(true);
+    for (let i = 0; i < 80; i++) step(1 / 60);
+    check("roller gives its shove to the red ball", ball.getPosition().x > ballX0 + 1.2);
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
