@@ -2501,7 +2501,7 @@ function renderHelp() {
     "Winziger Kreis auf einem Körper oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
     "Linie von Nagel zu Nagel: Seil.",
-    "Kurz stillhalten, dann ziehen. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
+    "Klick in einen Gegenstand zieht ihn. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
     "Klick auf die rote Kugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
@@ -2748,41 +2748,42 @@ function onPointerDown(e) {
     pointer = { tap: true };
     return;
   }
+  const kind = mode === "play" ? pressKind(w.x, w.y) : "draw";
   pointer = {
     id: e.pointerId,
     x: e.clientX,
     y: e.clientY,
-    pts: [{ x: w.x, y: w.y }],
+    wx: w.x,
+    wy: w.y,
+    pts: kind === "drag" ? null : [{ x: w.x, y: w.y }],
     moved: false,
     rocket: mode === "editor" && editorTool === "rocket",
     downT: performance.now(),
     grab: null,
   };
-  if (mode === "play" && ball) {
+  if (kind === "nudge") {
     const bp = ball.getPosition();
-    pointer.onBall = Math.hypot(bp.x - w.x, bp.y - w.y) < BALL_R * 1.3;
+    pointer.onBall = true;
     pointer.nudgeDir = nudgeDirFromClick(bp.x, w.x);
-  }
-  if (mode === "play" && !pointer.onBall) {
-    const draw = drawingAt(w.x, w.y);
-    if (draw) pointer.grab = { x: w.x, y: w.y };
+  } else if (kind === "drag") {
+    pointer.grab = { x: w.x, y: w.y };
+    engageGrab(pointer.grab);
   }
   canvas.setPointerCapture(e.pointerId);
 }
 
+function pressKind(x, y) {
+  if (ball) {
+    const bp = ball.getPosition();
+    if (Math.hypot(bp.x - x, bp.y - y) < BALL_R * 1.3) return "nudge";
+  }
+  if (drawingAt(x, y)) return "drag";
+  return "draw";
+}
+
 function engageGrab(worldPt) {
   if (!pointer || !pointer.grab || playDrag) return;
-  const held = performance.now() - pointer.downT;
-  const moved = Math.hypot(worldPt.x - pointer.grab.x, worldPt.y - pointer.grab.y);
-  if (moved > 0.2) {
-    pointer.grab = null;
-    return;
-  }
-  if (held < 260) return;
-  if (!beginDrag(pointer.grab.x, pointer.grab.y)) {
-    pointer.grab = null;
-    return;
-  }
+  if (!beginDrag(pointer.grab.x, pointer.grab.y)) return;
   moveDrag(worldPt.x, worldPt.y);
   pointer.pts = null;
   pointer.grab = null;
@@ -2802,13 +2803,17 @@ function onPointerMove(e) {
     return;
   }
   const w = screenToWorld(e.clientX, e.clientY);
+  pointer.wx = w.x;
+  pointer.wy = w.y;
   if (pointer.dragging && playDrag) {
     moveDrag(w.x, w.y);
     pointer.moved = true;
     return;
   }
-  engageGrab(w);
-  if (pointer.dragging) return;
+  if (pointer.grab) {
+    engageGrab(w);
+    return;
+  }
   if (!pointer.pts) return;
   const last = pointer.pts[pointer.pts.length - 1];
   if (Math.hypot(w.x - last.x, w.y - last.y) > 0.04) {
@@ -2821,7 +2826,7 @@ function onPointerUp(e) {
   if (!pointer) return;
   const current = pointer;
   pointer = null;
-  if (current.dragging || playDrag) {
+  if (current.dragging || playDrag || current.grab) {
     endDrag();
     return;
   }
@@ -2902,7 +2907,10 @@ function boot() {
   function frame(now) {
     const dt = Math.min(0.033, (now - last) / 1000);
     last = now;
-    if (pointer && pointer.grab && !pointer.dragging) engageGrab(pointer.grab);
+    if (pointer && pointer.grab && !pointer.dragging) {
+      const at = pointer.wx == null ? pointer.grab : { x: pointer.wx, y: pointer.wy };
+      engageGrab(at);
+    }
     if (mode === "play") {
       let acc = dt;
       while (acc > 0) {
@@ -3327,6 +3335,20 @@ function runTests() {
     world.setGravity(V(0, -24));
     check("floor nail pulls the box back", pulledIn < 2.4);
     lines.push("INFO anchor dist " + pulledIn.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const wide = makeBox({ x: 8, y: 5, hw: 1.6, hh: 0.9, color: "#3c7fd6" });
+    for (let i = 0; i < 8; i++) step(1 / 60);
+    const boxMid = wide.getPosition();
+    check("the middle of a box is a drag", pressKind(boxMid.x, boxMid.y) === "drag");
+    check("empty paper is a stroke", pressKind(boxMid.x + 4, boxMid.y + 3) === "draw");
+    check("press on the ball is a nudge", pressKind(ball.getPosition().x, ball.getPosition().y) === "nudge");
+    const inkBefore = stats.shapes;
+    check("press in the middle grabs at once", beginDrag(boxMid.x, boxMid.y));
+    moveDrag(boxMid.x + 1.4, boxMid.y);
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    endDrag();
+    check("a grab does not leave a stroke", stats.shapes === inkBefore && !playDrag);
 
     buildLevel(LEVELS["ein-klotz"]);
     const lower = makeBox({ x: 14, y: 2.1, hw: 0.75, hh: 0.75, color: "#3c7fd6" });
