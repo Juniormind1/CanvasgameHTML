@@ -2917,6 +2917,28 @@ function onPointerUp(e) {
   }
 }
 
+// Planck skaliert den gespeicherten Kontakt- und Gelenkimpuls beim Warmstart mit
+// dtRatio = dt / dt_vorher. Früher wurde der Rest eines Frames als eigener
+// Mini-Schritt gerechnet (bei 17 ms zum Beispiel 16.67 ms + 0.3 ms). Der volle
+// Schritt danach hat dann dtRatio um 50 bis über 1000 und multipliziert den
+// Aufprallimpuls aus dem Mini-Schritt entsprechend. Deshalb rechnet die Physik
+// nur in festen Schritten, der Rest wartet auf den nächsten Frame.
+const FIXED_DT = 1 / 60;
+const playClock = { acc: 0 };
+const mapClock = { acc: 0 };
+
+function advanceFixed(clock, dt, stepFn) {
+  clock.acc = Math.min(clock.acc + Math.max(0, dt), FIXED_DT * 3);
+  let n = 0;
+  while (clock.acc >= FIXED_DT - 1e-7) {
+    stepFn(FIXED_DT);
+    clock.acc -= FIXED_DT;
+    n++;
+  }
+  if (clock.acc < 0) clock.acc = 0;
+  return n;
+}
+
 function boot() {
   makePaper();
   resize();
@@ -2969,21 +2991,8 @@ function boot() {
       const at = pointer.wx == null ? pointer.grab : { x: pointer.wx, y: pointer.wy };
       engageGrab(at);
     }
-    if (mode === "play") {
-      let acc = dt;
-      while (acc > 0) {
-        const h = Math.min(acc, 1 / 60);
-        step(h);
-        acc -= h;
-      }
-    } else if (mode === "map") {
-      let acc = dt;
-      while (acc > 0) {
-        const h = Math.min(acc, 1 / 60);
-        stepCradle(h);
-        acc -= h;
-      }
-    }
+    if (mode === "play") advanceFixed(playClock, dt, step);
+    else if (mode === "map") advanceFixed(mapClock, dt, stepCradle);
     render();
     requestAnimationFrame(frame);
   }
@@ -3003,6 +3012,56 @@ function runTests() {
     for (let i = 0; i < 180; i++) step(1 / 60);
     const b1 = ball.getPosition();
     check("klotz moves ball", b1.x > 7.5 || stars.every((s) => s.got));
+
+    {
+      // Regression: Rest-Teilschritte im Frame-Loop haben den Warmstart-Impuls
+      // vervielfacht. Unregelmäßige Form fällt auf Rechteck auf Klotz.
+      const jumpFrames = { even: [0.0172], ragged: [0.0201, 0.0133, 0.0168], jitter: [0.0168, 0.0165, 0.0171, 0.0163, 0.0174, 0.0167] };
+      for (const jumpName of Object.keys(jumpFrames)) {
+        const jumpDts = jumpFrames[jumpName];
+        buildLevel(LEVELS["ein-klotz"]);
+        world.destroyBody(ball);
+        ball = null;
+        stars = [];
+        const jumpBlock = makeBox({ x: 16, y: 2.4, hw: 2.2, hh: 0.4, color: "#3c7fd6" });
+        for (let i = 0; i < 60; i++) step(1 / 60);
+        const jumpTop = jumpBlock.getPosition().y + 0.4;
+        const jumpRect = commitStroke([
+          { x: 15, y: jumpTop + 1.2 }, { x: 17, y: jumpTop + 1.2 }, { x: 17, y: jumpTop + 2.2 }, { x: 15, y: jumpTop + 2.2 }, { x: 15, y: jumpTop + 1.2 },
+        ], "#d94b3a");
+        const zig = [{ x: 15, y: jumpTop + 4 }];
+        for (let k = 0; k < 5; k++) {
+          zig.push({ x: 15.35 + k * 0.5, y: jumpTop + 5.1 });
+          zig.push({ x: 15.6 + k * 0.5, y: jumpTop + 4.25 });
+        }
+        zig.push({ x: 17.8, y: jumpTop + 5.2 }, { x: 17.8, y: jumpTop + 3.7 }, { x: 15, y: jumpTop + 3.7 }, { x: 15, y: jumpTop + 4 });
+        const jumpIrr = commitStroke(zig, "#3e9a48");
+        const jumpBodies = [jumpBlock, jumpRect && jumpRect.body, jumpIrr && jumpIrr.body].filter(Boolean);
+        const jumpSpeed = (b) => Math.hypot(b.getLinearVelocity().x, b.getLinearVelocity().y);
+        const jumpTouch = (b) => {
+          for (let c = b.getContactList(); c; c = c.next) if (c.contact.isTouching()) return true;
+          return false;
+        };
+        const jumpClock = { acc: 0 };
+        let vHit = 0;
+        let tHit = -1;
+        let vAfter = 0;
+        let frameNo = 0;
+        while (jumpIrr && jumpIrr.body && simTime < 4.5) {
+          advanceFixed(jumpClock, jumpDts[frameNo++ % jumpDts.length], step);
+          if (tHit < 0) {
+            vHit = Math.max(vHit, jumpSpeed(jumpIrr.body));
+            if (jumpTouch(jumpIrr.body)) tHit = simTime;
+          } else if (simTime > tHit + 0.1) {
+            for (const b of jumpBodies) vAfter = Math.max(vAfter, jumpSpeed(b));
+          }
+        }
+        const jumpEndY = jumpIrr && jumpIrr.body ? jumpIrr.body.getPosition().y : 999;
+        check("no velocity jump after impact (" + jumpName + " frames)", jumpBodies.length === 3 && tHit > 0 && vAfter < vHit * 0.5 && jumpEndY < jumpTop + 3);
+        lines.push("INFO impact " + jumpName + " vHit " + vHit.toFixed(2) + " vAfter " + vAfter.toFixed(2) + " endY " + jumpEndY.toFixed(2));
+      }
+      check("frame rest waits for the next fixed step", advanceFixed({ acc: 0 }, 0.0172, () => {}) === 1 && advanceFixed({ acc: 0 }, 0.0005, () => {}) === 0);
+    }
 
     buildLevel(LEVELS["die-luecke"]);
     let maxAlone = ball.getPosition().x;
