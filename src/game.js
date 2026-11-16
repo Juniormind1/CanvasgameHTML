@@ -1794,18 +1794,50 @@ function anchorAllowed(draw, base) {
   return true;
 }
 
+function paintDraw(draw, color) {
+  if (!draw) return;
+  draw.color = color;
+  if (draw.meta && draw.meta.outline) draw.meta.outline.color = color;
+}
+
+function groundColorAt(x, y) {
+  let best = null;
+  let bestD = Infinity;
+  for (const item of scenery) {
+    if (item.kind !== "poly" || !item.pts) continue;
+    const d = distToPoly(x, y, item.pts);
+    if (d < bestD) {
+      bestD = d;
+      best = item.color;
+    }
+  }
+  return best || "#3f8f55";
+}
+
+function anchorTintColor(base, at) {
+  if (base === ground) return groundColorAt(at.x, at.y);
+  const host = drawings.find((d) => d.body === base);
+  if (host && host.color) return host.color;
+  const link = anchorOf(base);
+  if (link) return anchorTintColor(link.base, link.a);
+  return groundColorAt(at.x, at.y);
+}
+
 function anchorBody(draw, base, from, to) {
   if (!anchorAllowed(draw, base)) return false;
   const body = draw.body;
   if (playDrag && playDrag.body === body) endDrag();
   body.setStatic();
   dragFresh.delete(body);
+  const savedColor = draw.color;
   anchors.push({
     body, base, draw,
     a: { x: from.x, y: from.y },
     b: { x: to.x, y: to.y },
-    color: draw.color,
+    color: savedColor,
+    savedColor,
   });
+  paintDraw(draw, anchorTintColor(base, from));
   return true;
 }
 
@@ -1813,6 +1845,7 @@ function releaseAnchor(body) {
   const link = anchorOf(body);
   if (!link || !world || world.isLocked()) return false;
   anchors = anchors.filter((a) => a !== link);
+  if (link.savedColor) paintDraw(link.draw, link.savedColor);
   for (const dep of anchors.filter((a) => a.base === body)) releaseAnchor(dep.body);
   if (bodyMeta.has(body)) {
     body.setDynamic();
@@ -4340,6 +4373,41 @@ function runTests() {
     const circGeoRightAng = circGeoRight ? interiorAngles(circGeoRight.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
     check("geodreieck right triangle stays a polygon", !!circGeoRight && circGeoRight.kind === "solid" && circGeoRight.meta.outline.local.length === 3 && circGeoRightAng.some((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller"));
     geoSnap = false;
+
+    function ancBox(x, y, w, h, color) {
+      return commitStroke([
+        { x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y },
+      ], color);
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    const tintA = ancBox(19, 1.4, 1.5, 1, "#3c7fd6");
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    finishPlayStroke([{ x: 18.6, y: 1.2 }, { x: 19, y: 1.45 }, { x: 19.4, y: 1.7 }]);
+    check("anchored body takes the ground color", !!tintA && isAnchored(tintA.body) && tintA.color === "#3f8f55" && anchors[0].color === "#3c7fd6");
+    const tintTop = tintA.body.getPosition().y + 0.5;
+    const tintB = ancBox(19.2, tintTop + 0.05, 1, 0.8, "#d94b3a");
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    finishPlayStroke([{ x: 19.9, y: tintTop - 0.15 }, { x: 19.85, y: tintTop + 0.1 }, { x: 19.8, y: tintTop + 0.35 }]);
+    check("chained body takes the same ground color", !!tintB && isAnchored(tintB.body) && tintB.color === "#3f8f55" && tintA.color === "#3f8f55" && anchorOf(tintB.body).color === "#d94b3a");
+    const tintBLink = anchorOf(tintB.body);
+    const tintBMid = { x: (tintBLink.a.x + tintBLink.b.x) / 2, y: (tintBLink.a.y + tintBLink.b.y) / 2 };
+    const tintBMidScr = worldToScreen(tintBMid.x, tintBMid.y);
+    onPointerDown({ button: 2, clientX: tintBMidScr.x, clientY: tintBMidScr.y, pointerId: 51 });
+    check("released body gets its own color back", !isAnchored(tintB.body) && tintB.color === "#d94b3a" && isAnchored(tintA.body) && tintA.color === "#3f8f55");
+    const tintAMid = { x: (anchors[0].a.x + anchors[0].b.x) / 2, y: (anchors[0].a.y + anchors[0].b.y) / 2 };
+    const tintAMidScr = worldToScreen(tintAMid.x, tintAMid.y);
+    onPointerDown({ button: 2, clientX: tintAMidScr.x, clientY: tintAMidScr.y, pointerId: 52 });
+    check("released root also restores its color", !isAnchored(tintA.body) && tintA.color === "#3c7fd6");
+
+    buildLevel(LEVELS["bergauf"]);
+    const tintLeft = ancBox(3, 2.45, 1.4, 0.9, "#3c7fd6");
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    finishPlayStroke([{ x: 2.6, y: 2.25 }, { x: 3.1, y: 2.5 }, { x: 3.5, y: 2.7 }]);
+    const tintRight = ancBox(21, 9.05, 1.4, 0.9, "#d94b3a");
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    finishPlayStroke([{ x: 20.6, y: 8.85 }, { x: 21.1, y: 9.1 }, { x: 21.5, y: 9.3 }]);
+    check("anchor tint follows the local ground color", !!tintLeft && !!tintRight && isAnchored(tintLeft.body) && isAnchored(tintRight.body) && tintLeft.color === "#3f8f55" && tintRight.color === "#c9854a");
+
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
