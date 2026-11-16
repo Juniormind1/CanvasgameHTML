@@ -1368,6 +1368,7 @@ function eraseAt(x, y) {
         }
       }
     } else if (d.meta && containsMeta(d.meta, x, y)) {
+      if (d.body && isAnchored(d.body)) return false;
       destroyDrawing(d);
       return true;
     }
@@ -1582,8 +1583,11 @@ function stepDragFresh(dt) {
 // Verankern: ein kurzer, fast gerader Zug vom Boden (oder einem verankerten
 // Körper) in einen festen Körper macht ihn statisch, als wäre er Teil des
 // Bodens. Umgekehrt geht es auch: Körper greifen und auf dem Boden loslassen.
-// Ketten beginnen immer am Boden. Rechtsklick auf den Verbindungsstrich löst
-// den Körper und alles, was an ihm hängt.
+// Ketten beginnen immer am Boden. Trifft die Geste einen Körper, der nicht
+// verankert werden kann (er berührt die Basis nicht), entsteht kein Strich;
+// der Körper wird stattdessen gegriffen und folgt der Maus.
+// Rechtsklick auf den Verbindungsstrich löst den Körper und alles, was an
+// ihm hängt. Rechtsklick auf einen verankerten Körper selbst löscht ihn nicht.
 const ANCHOR_MAX_LEN = 1.5;     // m, Weglänge des Zugs
 const ANCHOR_MIN_LEN = 0.15;    // m, Sehne; kürzer ist ein Klick
 const ANCHOR_STRAIGHT = 0.8;    // Sehne / Weglänge
@@ -1666,13 +1670,19 @@ function bodyGap(a, b) {
   return best;
 }
 
-function anchorBody(draw, base, from, to) {
+function anchorAllowed(draw, base) {
   if (!world || world.isLocked() || !draw || !draw.body || !base) return false;
   const body = draw.body;
   if (draw.kind !== "solid" || (draw.meta && draw.meta.round)) return false;
   if (!body.isDynamic() || isAnchored(body) || base === body) return false;
   if (base !== ground && !isAnchored(base)) return false;
   if (bodyGap(body, base) > ANCHOR_TOUCH) return false;
+  return true;
+}
+
+function anchorBody(draw, base, from, to) {
+  if (!anchorAllowed(draw, base)) return false;
+  const body = draw.body;
   if (playDrag && playDrag.body === body) endDrag();
   body.setStatic();
   dragFresh.delete(body);
@@ -1712,7 +1722,8 @@ function releaseAnchorAt(x, y) {
   return link ? releaseAnchor(link.body) : false;
 }
 
-// Gezeichneter Zug. true heißt: war eine Ankergeste, kein Strich zeichnen.
+// Gezeichneter Zug. "anchor" = verankert oder gelöst, "miss" = erkannt aber
+// abgelehnt (kein Strich), false = kein Ankerversuch, weiterzeichnen.
 function tryAnchorGesture(trail) {
   if (!world || !anchorStrokeOk(trail)) return false;
   const from = trail[0];
@@ -1723,7 +1734,7 @@ function tryAnchorGesture(trail) {
     const back = anchorBaseAt(to.x, to.y, startIn.body);
     if (back && back === anchorOf(startIn.body).base) {
       releaseAnchor(startIn.body);
-      return true;
+      return "anchor";
     }
   }
   const base = anchorBaseAt(from.x, from.y);
@@ -1732,9 +1743,32 @@ function tryAnchorGesture(trail) {
   if (!target || target.body === base) return false;
   if (isAnchored(target.body)) {
     releaseAnchor(target.body);
-    return true;
+    return "anchor";
   }
-  anchorBody(target, base, from, to);
+  if (anchorBody(target, base, from, to)) return "anchor";
+  return "miss";
+}
+
+// Abgelehnte Ankergeste während des Ziehens: kein Strich, stattdessen greifen.
+function tryAdoptAnchorGrab(trail) {
+  if (!pointer || pointer.dragging || playDrag || !world) return false;
+  if (!anchorStrokeOk(trail)) return false;
+  const from = trail[0];
+  const to = trail[trail.length - 1];
+  const base = anchorBaseAt(from.x, from.y);
+  if (!base) return false;
+  const target = anchorableAt(to.x, to.y);
+  if (!target || target.body === base || isAnchored(target.body)) return false;
+  if (anchorAllowed(target, base)) return false;
+  const onBody = target.meta && containsMeta(target.meta, to.x, to.y);
+  const grabAt = onBody ? to : target.body.getPosition();
+  pointer.grab = { x: grabAt.x, y: grabAt.y };
+  engageGrab(grabAt);
+  if (!playDrag) {
+    pointer.grab = null;
+    return false;
+  }
+  pointer.moved = true;
   return true;
 }
 
@@ -3177,6 +3211,7 @@ function onPointerMove(e) {
     pointer.pts.push({ x: ink.x, y: ink.y });
     pointer.moved = true;
   }
+  if (mode === "play") tryAdoptAnchorGrab(pointer.trail);
 }
 
 function onPointerUp(e) {
@@ -3226,7 +3261,8 @@ function onPointerUp(e) {
 }
 
 function finishPlayStroke(trail, pts) {
-  if (tryAnchorGesture(trail)) return "anchor";
+  const gesture = tryAnchorGesture(trail);
+  if (gesture) return gesture;
   return commitStroke(pts || trail, COLORS[colorIndex]);
 }
 
