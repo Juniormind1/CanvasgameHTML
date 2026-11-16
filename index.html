@@ -482,7 +482,7 @@ function isClosedStroke(pts) {
   const span = dist(pts[0], pts[pts.length - 1]);
   let len = 0;
   for (let i = 1; i < pts.length; i++) len += dist(pts[i - 1], pts[i]);
-  return span < 0.42 || (len > 0.8 && span < len * 0.14);
+  return span < CIRCLE_CLOSE || (len > 0.8 && span < len * 0.22);
 }
 
 function triangulate(pts) {
@@ -726,15 +726,22 @@ function straightenOpen(pts) {
   return clean;
 }
 
-// Kreiserkennung. Mit Geodreieck: eine geschlossene Form ohne rechten Winkel
-// wird zum Kreis. Ohne Geodreieck nur bei echter Rundheit, sonst Vieleck.
-const CIRCLE_MAX_CORNER = 35 * Math.PI / 180; // rad, scharfe Ecke
-const CIRCLE_MAX_RAD_DEV = 0.15;              // Radius-Schwankung / Mittel
-const CIRCLE_MIN_ASPECT = 0.75;               // kürzere / längere Bounding-Box-Seite
+// Kreiserkennung. Mit Geodreieck: geschlossene Form mit mindestens fünf
+// Ecken und ohne rechten Winkel wird zum Kreis (Dreieck/Viereck bleiben
+// Vielecke). Ohne Geodreieck nur bei erkennbarer Rundheit, sonst Vieleck.
+const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke (vorher 35°)
+const CIRCLE_MAX_RAD_DEV = 0.26;              // Radius-Schwankung / Mittel (vorher 0,15)
+const CIRCLE_MIN_ASPECT = 0.62;               // kürzere / längere Bounding-Box-Seite (vorher 0,75)
 const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
 const CIRCLE_RIGHT_TOL = 10 * Math.PI / 180;  // Geodreieck: Toleranz für 90°
 const CIRCLE_MIN_R = 0.16;
 const CIRCLE_MAX_R = 4;
+const CIRCLE_MIN_PTS = 5;                     // vorher fest 6
+const CIRCLE_LEN_MIN = 0.60;                  // Pfadlänge / Umfang, vorher 0,72
+const CIRCLE_LEN_MAX = 1.42;                  // vorher 1,28
+const CIRCLE_MAX_GAP = Math.PI * 0.95;        // größter Winkelabstand, vorher 0,7π
+const CIRCLE_RAD_FLOOR = 0.08;                // Mindest-Radiusabweichung in m, vorher 0,06
+const CIRCLE_CLOSE = 0.7;                     // Enden dürfen so weit offen sein (vorher 0,4)
 
 function closedRing(pts) {
   if (!pts || pts.length < 2) return pts;
@@ -834,7 +841,7 @@ function hasRightAngle(pts, tol) {
 
 function circleFit(pts) {
   const ring = closedRing(pts);
-  if (!ring || ring.length < 6) return null;
+  if (!ring || ring.length < CIRCLE_MIN_PTS) return null;
   const fit = circleFromPoints(ring);
   if (!fit) return null;
   const mean = fit.r;
@@ -847,17 +854,17 @@ function circleFit(pts) {
     minY = Math.min(minY, p.y);
     maxY = Math.max(maxY, p.y);
   }
-  if (dev > Math.max(0.06, mean * CIRCLE_MAX_RAD_DEV)) return null;
+  if (dev > Math.max(CIRCLE_RAD_FLOOR, mean * CIRCLE_MAX_RAD_DEV)) return null;
   const bw = maxX - minX;
   const bh = maxY - minY;
   if (Math.min(bw, bh) < CIRCLE_MIN_ASPECT * Math.max(bw, bh)) return null;
   const len = ringLen(ring);
   const circ = Math.PI * 2 * mean;
-  if (len < circ * 0.72 || len > circ * 1.28) return null;
+  if (len < circ * CIRCLE_LEN_MIN || len > circ * CIRCLE_LEN_MAX) return null;
   const angs = ring.map((p) => Math.atan2(p.y - fit.y, p.x - fit.x)).sort((a, b) => a - b);
   let gap = angs[0] + Math.PI * 2 - angs[angs.length - 1];
   for (let i = 1; i < angs.length; i++) gap = Math.max(gap, angs[i] - angs[i - 1]);
-  if (gap > Math.PI * 0.7) return null;
+  if (gap > CIRCLE_MAX_GAP) return null;
   if (maxNetTurn(ring, mean * CIRCLE_TURN_WIN) > CIRCLE_MAX_CORNER) return null;
   return fit;
 }
@@ -865,7 +872,7 @@ function circleFit(pts) {
 function tryMakeCircle(pts) {
   if (strokeSnaps()) {
     const ring = closedRing(pts);
-    if (!ring || ring.length < 3 || Math.abs(signedArea(ring)) < 0.05) return null;
+    if (!ring || ring.length < CIRCLE_MIN_PTS || Math.abs(signedArea(ring)) < 0.05) return null;
     if (hasRightAngle(ring)) return null;
     return circleFromPoints(ring);
   }
@@ -1490,7 +1497,7 @@ function commitStroke(rawPts, color) {
   }
   // Rundheit am Originalzug prüfen: simplify() macht aus einem Kreis
   // sonst ein grobes Vieleck und würde echte Kreise verwerfen.
-  if (closed || dist(pts[0], pts[pts.length - 1]) < 0.4) {
+  if (closed || dist(pts[0], pts[pts.length - 1]) < CIRCLE_CLOSE) {
     const fit = tryMakeCircle(dedupe(rawPts));
     if (fit) return spawnRoller(fit.x, fit.y, fit.r, used);
   }
@@ -4557,8 +4564,8 @@ function runTests() {
     commitStroke([
       { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 10, y: 7 }, { x: 8, y: 4 },
     ], "#ef8b2c");
-    const circGeoTri = drawings.find((d) => d.kind === "roller");
-    check("geodreieck triangle without a right angle becomes a circle", !!circGeoTri && circGeoTri.kind === "roller");
+    const circGeoTri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("geodreieck triangle without a right angle stays a polygon", !!circGeoTri && circGeoTri.kind === "solid" && circGeoTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller"));
 
     buildLevel(LEVELS["ein-klotz"]);
     geoSnap = true;
@@ -4577,6 +4584,43 @@ function runTests() {
     const circGeoRightAng = circGeoRight ? interiorAngles(circGeoRight.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
     check("geodreieck right triangle stays a polygon", !!circGeoRight && circGeoRight.kind === "solid" && circGeoRight.meta.outline.local.length === 3 && circGeoRightAng.some((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller"));
     geoSnap = false;
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(16, 7, 1.1, 0.98, 24, 0.12, 0.05), "#3c7fd6");
+    const circNoisy = drawings.find((d) => d.kind === "roller");
+    check("noisy freehand circle with uneven radius is a circle", !!circNoisy && circNoisy.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(15, 6.5, 1.28, 1.0, 22, 0.08, 0.04), "#7a4fbf");
+    const circOval = drawings.find((d) => d.kind === "roller");
+    check("slightly more oval scratchy loop is a circle", !!circOval && circOval.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circOpenPts = circRing(13, 6, 1.05, 0.95, 24, 0.10, 0.04);
+    circOpenPts.splice(-2, 2);
+    commitStroke(circOpenPts, "#ef8b2c");
+    const circOpen = drawings.find((d) => d.kind === "roller");
+    check("almost closed noisy loop is a circle", !!circOpen && circOpen.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(14, 7, 1.05, 0.98, 12, 0.05, 0.02), "#3e9a48");
+    const circFew = drawings.find((d) => d.kind === "roller");
+    check("coarse twelve-point loop is a circle", !!circFew && circFew.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 10.2, y: 3.7 }, { x: 11.6, y: 5.0 },
+      { x: 11.0, y: 6.8 }, { x: 9.1, y: 7.2 }, { x: 7.6, y: 5.6 }, { x: 8, y: 4 },
+    ], "#8d5a34");
+    const circSixRock = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("six-corner rock stays a polygon", !!circSixRock && circSixRock.kind === "solid" && circSixRock.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 10, y: 7 }, { x: 8, y: 4 },
+    ], "#d94b3a");
+    const circFreeTri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("freehand triangle stays a polygon", !!circFreeTri && circFreeTri.kind === "solid" && circFreeTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller"));
 
     function ancBox(x, y, w, h, color) {
       return commitStroke([
