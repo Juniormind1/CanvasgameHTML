@@ -8,6 +8,8 @@ Der Link führt zum spielbaren `index.html`. GitHub entfernt `target="_blank"` a
 
 Lokal geht dieselbe Datei über `index.html`. Gezeichnete Striche werden zu Körpern. Die rote Kugel muss die Sterne berühren.
 
+Quelle ist `src/game.js`. `src/planck.min.js` ist Planck.js 1.4.2. `py -3 src/assemble.py` schreibt `index.html` neu.
+
 - Offene Linie: Draht. Geschlossene Fläche: schwerer Körper.
 - Runder Strich: rollende Kugel, gibt ihren Schwung weiter.
 - Kleiner Kreis auf einem Körper oder auf dem Boden: Nagel. Linie von Nagel zu Nagel: Seil.

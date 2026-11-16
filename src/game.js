@@ -1,0 +1,3750 @@
+"use strict";
+
+const VIEW_W = 32;
+const VIEW_H = 18;
+const BALL_R = 0.34;
+const THICK = 0.16;
+const COLORS = ["#d94b3a", "#ef8b2c", "#e6b423", "#3e9a48", "#3c7fd6", "#7a4fbf", "#8d5a34", "#2b2b2b"];
+const GEO_GRID = 0.5;
+
+if (typeof planck !== "undefined" && planck.Settings) planck.Settings.velocityThreshold = 2.2;
+
+const canvas = document.getElementById("view");
+const ctx = canvas.getContext("2d");
+const namebox = document.getElementById("namebox");
+const testlog = document.getElementById("testlog");
+
+let dpr = 1;
+let viewW = 800;
+let viewH = 450;
+const cam = { cx: 16, cy: 9, zoom: 1 };
+let colorIndex = 4;
+let geoSnap = false;
+let mode = "map";
+let ui = [];
+let world = null;
+let ground = null;
+let ball = null;
+let stars = [];
+let pins = [];
+let rockets = [];
+let drawings = [];
+let scenery = [];
+let geometry = [];
+let bodyMeta = new Map();
+let contactQ = [];
+let ropeSeq = 1;
+let levelDef = null;
+let won = false;
+let medals = { elegant: false, oldschool: false };
+let stats = { shapes: 0, nudges: 0, userPins: 0, ropes: 0, drewUnder: false, dragTrick: false };
+let simTime = 0;
+let editorDoc = null;
+let editorTool = "terrain";
+let returnMode = "map";
+let pointer = null;
+let lastTap = 0;
+let paper = null;
+let confetti = [];
+let playDrag = null;
+let dragFresh = new Map();
+let cradleWorld = null;
+let cradleGround = null;
+let cradleBalls = [];
+let cradleDrag = null;
+
+const CONFETTI_PAIRS = [
+  ["#e23b32", "#f6e27a"],
+  ["#3c7fd6", "#f2c14b"],
+  ["#3e9a48", "#ff5fa2"],
+  ["#7a4fbf", "#8ee0c2"],
+  ["#ef8b2c", "#1f4f8a"],
+  ["#d94b3a", "#fff6d8"],
+  ["#1f6f8a", "#f08bb0"],
+  ["#c9854a", "#24324a"],
+];
+
+const LEVELS = {};
+
+function poly(pts) {
+  return pts.map(([x, y]) => ({ x, y }));
+}
+
+function addLevel(id, def) {
+  def.id = id;
+  if (def.solids) def.solids = def.solids.map((s) => ({ pts: poly(s.pts), color: s.color || "#3f8f55" }));
+  if (def.wires) def.wires = def.wires.map((s) => ({ pts: poly(s.pts), color: s.color || "#5c4632" }));
+  if (def.decor) def.decor = def.decor.map((s) => ({ pts: poly(s.pts), color: s.color || "#7eaa6a", width: s.width || 0.12 }));
+  LEVELS[id] = def;
+}
+
+addLevel("ein-klotz", {
+  name: "Ein Klotz",
+  hint: "Male einen Klotz über die Kugel. Ein Klick auf sie schubst nur ein bisschen.",
+  ball: [5, 1.66],
+  stars: [[11.5, 2.05]],
+  solids: [{ pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#3f8f55" }],
+});
+
+addLevel("die-luecke", {
+  name: "Die Lücke",
+  hint: "Eine offene Linie wird zum Steg. Danach die Kugel anschubsen.",
+  ball: [4.2, 5.38],
+  stars: [[26, 5.55]],
+  solids: [
+    { pts: [[0, 0], [11.2, 0], [11.2, 5], [0, 5]], color: "#3f8f55" },
+    { pts: [[20.8, 0], [32, 0], [32, 5], [20.8, 5]], color: "#3f8f55" },
+  ],
+});
+
+addLevel("bergauf", {
+  name: "Bergauf",
+  hint: "Eine schräge Linie ist eine Rampe. Dicke Flächen sind schwerer als Striche.",
+  ball: [4, 2.78],
+  stars: [[25.5, 9.6]],
+  solids: [
+    { pts: [[0, 0], [10, 0], [10, 2.4], [0, 2.4]], color: "#3f8f55" },
+    { pts: [[18, 0], [32, 0], [32, 9], [18, 9]], color: "#c9854a" },
+  ],
+});
+
+addLevel("die-mulde", {
+  name: "Die Mulde",
+  hint: "Etwas Schweres, das schief auf die Kugel fällt, treibt sie den Hang hinauf.",
+  ball: [12.1, 2.15],
+  stars: [[25, 4.75]],
+  solids: [{
+    pts: [[0, 0], [32, 0], [32, 4.2], [17.2, 4.2], [13.2, 1.5], [9.2, 4.2], [0, 4.2]],
+    color: "#3f8f55",
+  }],
+});
+
+addLevel("der-nagel", {
+  name: "Der Nagel",
+  hint: "Der kleine Kreis am Balken ist ein Nagel. Male einen langen Hammer darum, das dicke Ende nach links.",
+  ball: [12.2, 2.9],
+  stars: [[26, 2.0]],
+  pins: [[15.6, 15.58]],
+  solids: [
+    { pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#3f8f55" },
+    { pts: [[10, 1.3], [15, 1.3], [15, 2.52], [10, 2.52]], color: "#c9854a" },
+    { pts: [[8, 15.5], [22, 15.5], [22, 17.4], [8, 17.4]], color: "#7eaa6a" },
+  ],
+});
+
+addLevel("zwei-naegel", {
+  name: "Zwei Nägel",
+  hint: "Ein Brett durch zwei Nägel sitzt starr. Danach die Kugel hinüberschubsen.",
+  ball: [4, 4.58],
+  stars: [[26.2, 4.75]],
+  pins: [[11.9, 5.05], [20.1, 5.05]],
+  solids: [
+    { pts: [[0, 0], [12, 0], [12, 4.2], [0, 4.2]], color: "#3f8f55" },
+    { pts: [[20, 0], [32, 0], [32, 4.2], [20, 4.2]], color: "#3f8f55" },
+    { pts: [[11.2, 4.2], [12.7, 4.2], [12.7, 5.35], [11.2, 5.35]], color: "#c9854a" },
+    { pts: [[19.3, 4.2], [20.8, 4.2], [20.8, 5.35], [19.3, 5.35]], color: "#c9854a" },
+  ],
+});
+
+addLevel("die-wippe", {
+  name: "Die Wippe",
+  hint: "Nagel auf die Spitze, ein Brett darüber, und einen Klotz auf die rechte Seite.",
+  ball: [3.4, 6.05],
+  stars: [[5.2, 11.2]],
+  pins: [[15, 5.2]],
+  solids: [
+    { pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#d7c39a" },
+    { pts: [[1, 1.3], [6.2, 1.3], [6.2, 5.65], [1, 5.65]], color: "#3f8f55" },
+    { pts: [[13.1, 1.3], [16.9, 1.3], [15, 5.45]], color: "#c9854a" },
+    { pts: [[2.2, 9.6], [8.4, 9.6], [8.4, 10.1], [2.2, 10.1]], color: "#7eaa6a" },
+  ],
+});
+
+addLevel("das-seil", {
+  name: "Das Seil",
+  hint: "Eine Linie von Nagel zu Nagel wird ein Seil. Es hängt durch und trägt die Kugel.",
+  ball: [4.2, 8.42],
+  stars: [[16, 6.3]],
+  pins: [[8.3, 11.2], [23.7, 11.2]],
+  solids: [
+    { pts: [[0, 0], [8, 0], [8, 8], [0, 8]], color: "#3f8f55" },
+    { pts: [[24, 0], [32, 0], [32, 8], [24, 8]], color: "#3f8f55" },
+    { pts: [[6.6, 10.6], [9.4, 10.6], [9.4, 12.4], [6.6, 12.4]], color: "#c9854a" },
+    { pts: [[22.6, 10.6], [25.4, 10.6], [25.4, 12.4], [22.6, 12.4]], color: "#c9854a" },
+  ],
+});
+
+addLevel("flaschenzug", {
+  name: "Flaschenzug",
+  hint: "Nagel auf den Korb, Nagel auf den Klotz, Seil dazwischen. Den Klotz vom Sims stoßen.",
+  ball: [8, 3.35],
+  stars: [[8, 11.4]],
+  boxes: [
+    { x: 8, y: 2.75, hw: 1.35, hh: 0.22, density: 1, color: "#8d5a34", tag: "basket", pin: true },
+    { x: 24.2, y: 8.15, hw: 0.85, hh: 0.85, density: 8, color: "#5c4632", tag: "crate", pin: true },
+  ],
+  solids: [
+    { pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#d7c39a" },
+    { pts: [[5.6, 1.3], [10.6, 1.3], [10.6, 2.45], [5.6, 2.45]], color: "#3f8f55" },
+    { pts: [[21.2, 1.3], [28.5, 1.3], [28.5, 7.2], [21.2, 7.2]], color: "#c9854a" },
+    { pts: [[6.2, 12.2], [10.2, 12.2], [10.2, 12.55], [6.2, 12.55]], color: "#7eaa6a" },
+  ],
+});
+
+addLevel("radiere", {
+  name: "Radiere",
+  hint: "Bau einen Korb um die Kugel, zieh ihn hoch, und radiere ihn über dem Stern weg. Rechtsklick radiert.",
+  ball: [8, 2.0],
+  stars: [[8, 8.3]],
+  pins: [[8, 14.8], [22.5, 14.8]],
+  boxes: [
+    { x: 23.4, y: 8.2, hw: 0.9, hh: 0.9, density: 7, color: "#5c4632", tag: "crate", pin: true },
+  ],
+  solids: [
+    { pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#3f8f55" },
+    { pts: [[4, 15.2], [26, 15.2], [26, 16.8], [4, 16.8]], color: "#7eaa6a" },
+    { pts: [[20.5, 1.3], [27.5, 1.3], [27.5, 7.2], [20.5, 7.2]], color: "#c9854a" },
+  ],
+});
+
+addLevel("zuendung", {
+  name: "Zündung",
+  hint: "Lass etwas auf die Rakete fallen. Sie fliegt dorthin, wohin die Spitze zeigt.",
+  ball: [16, 1.66],
+  stars: [[27, 2.05]],
+  rockets: [{ x: 6.2, y: 1.82, a: 0 }],
+  solids: [
+    { pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#3f8f55" },
+    { pts: [[3, 4.3], [30, 4.3], [30, 4.7], [3, 4.7]], color: "#8d5a34" },
+  ],
+});
+
+addLevel("ein-strich", {
+  name: "Ein Strich",
+  hint: "Elegant heißt: genau ein Gegenstand, kein Schubs, Nägel zählen nicht.",
+  ball: [6, 1.66],
+  stars: [[9.6, 2.05]],
+  solids: [{ pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#3f8f55" }],
+});
+
+addLevel("werkstatt", {
+  name: "Werkstatt",
+  hint: "Zwei Sterne. Nagel, Seil, Rakete, Radiergummi: alles ist erlaubt.",
+  ball: [4.5, 1.66],
+  stars: [[15, 2.05], [26, 8.8]],
+  pins: [[18, 13.6]],
+  rockets: [{ x: 8.5, y: 1.82, a: 0.15 }],
+  solids: [
+    { pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#3f8f55" },
+    { pts: [[20, 1.3], [32, 1.3], [32, 8.2], [22, 8.2]], color: "#c9854a" },
+    { pts: [[12, 13.1], [24, 13.1], [24, 15.2], [12, 15.2]], color: "#7eaa6a" },
+  ],
+});
+
+addLevel("sandbox", {
+  name: "Schmierzettel",
+  hint: "Freies Blatt. Die Kugel und ein Stern, sonst nichts.",
+  ball: [6, 1.66],
+  stars: [[24, 2.1]],
+  solids: [{ pts: [[0, 0], [32, 0], [32, 1.3], [0, 1.3]], color: "#3f8f55" }],
+  sandbox: true,
+});
+
+const ISLANDS = [
+  { name: "Erste Striche", need: 0, blurb: "Fläche, Strich, Gewicht", levels: ["ein-klotz", "die-luecke", "bergauf", "die-mulde"] },
+  { name: "Nägel", need: 3, blurb: "Gelenk, Schloss, Wippe", levels: ["der-nagel", "zwei-naegel", "die-wippe"] },
+  { name: "Seile", need: 6, blurb: "Seil, Zug, Radiergummi", levels: ["das-seil", "flaschenzug", "radiere"] },
+  { name: "Raketen", need: 8, blurb: "Schub, eleganter Strich", levels: ["zuendung", "ein-strich", "werkstatt"] },
+];
+
+const ORDER = ISLANDS.flatMap((island) => island.levels);
+
+function loadJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (err) {
+    return fallback;
+  }
+}
+
+function saveJSON(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (err) { /* private mode */ }
+}
+
+function progress() { return loadJSON("crayon-progress", { cleared: {} }); }
+
+function starCount() {
+  const cleared = progress().cleared;
+  return ORDER.filter((id) => cleared[id]).length;
+}
+
+function customs() { return loadJSON("crayon-customs", {}); }
+
+function hash(i, s) {
+  const n = Math.sin(i * 127.1 + s * 311.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+function signedArea(pts) {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % pts.length];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return a / 2;
+}
+
+function pointInPoly(x, y, polyPts) {
+  let inside = false;
+  for (let i = 0, j = polyPts.length - 1; i < polyPts.length; j = i++) {
+    const pi = polyPts[i];
+    const pj = polyPts[j];
+    const hit = ((pi.y > y) !== (pj.y > y)) &&
+      (x < (pj.x - pi.x) * (y - pi.y) / ((pj.y - pi.y) || 1e-9) + pi.x);
+    if (hit) inside = !inside;
+  }
+  return inside;
+}
+
+function distPointSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const l2 = dx * dx + dy * dy;
+  if (l2 < 1e-8) return Math.hypot(px - ax, py - ay);
+  let t = ((px - ax) * dx + (py - ay) * dy) / l2;
+  t = clamp(t, 0, 1);
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+function distToPoly(x, y, polyPts) {
+  if (pointInPoly(x, y, polyPts)) return 0;
+  let best = Infinity;
+  for (let i = 0; i < polyPts.length; i++) {
+    const a = polyPts[i];
+    const b = polyPts[(i + 1) % polyPts.length];
+    best = Math.min(best, distPointSeg(x, y, a.x, a.y, b.x, b.y));
+  }
+  return best;
+}
+
+function distToWire(x, y, pts) {
+  let best = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) {
+    best = Math.min(best, distPointSeg(x, y, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y));
+  }
+  return best;
+}
+
+function pointInTri(p, a, b, c) {
+  const s1 = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+  const s2 = (c.x - b.x) * (p.y - b.y) - (c.y - b.y) * (p.x - b.x);
+  const s3 = (a.x - c.x) * (p.y - c.y) - (a.y - c.y) * (p.x - c.x);
+  const hasNeg = s1 < -1e-8 || s2 < -1e-8 || s3 < -1e-8;
+  const hasPos = s1 > 1e-8 || s2 > 1e-8 || s3 > 1e-8;
+  return !(hasNeg && hasPos);
+}
+
+function ensureCCW(pts) {
+  const copy = pts.map((p) => ({ x: p.x, y: p.y }));
+  if (signedArea(copy) < 0) copy.reverse();
+  return copy;
+}
+
+function simplify(points, epsilon) {
+  if (points.length < 3) return points.map((p) => ({ x: p.x, y: p.y }));
+  const keep = new Array(points.length).fill(false);
+  keep[0] = keep[points.length - 1] = true;
+  const stack = [[0, points.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    let maxD = 0;
+    let idx = -1;
+    for (let i = a + 1; i < b; i++) {
+      const d = distPointSeg(points[i].x, points[i].y, points[a].x, points[a].y, points[b].x, points[b].y);
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (idx !== -1 && maxD > epsilon) {
+      keep[idx] = true;
+      stack.push([a, idx], [idx, b]);
+    }
+  }
+  const out = [];
+  for (let i = 0; i < points.length; i++) if (keep[i]) out.push({ x: points[i].x, y: points[i].y });
+  return out;
+}
+
+function selfIntersects(pts, closed) {
+  const n = pts.length;
+  const last = closed ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const a1 = pts[i];
+    const a2 = pts[(i + 1) % n];
+    for (let j = i + 1; j < last; j++) {
+      if (Math.abs(i - j) <= 1) continue;
+      if (closed && i === 0 && j === last - 1) continue;
+      const b1 = pts[j];
+      const b2 = pts[(j + 1) % n];
+      if (segmentsCross(a1, a2, b1, b2)) return true;
+    }
+  }
+  return false;
+}
+
+function segmentsCross(a, b, c, d) {
+  function side(p, q, r) {
+    return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  }
+  const s1 = side(a, b, c);
+  const s2 = side(a, b, d);
+  const s3 = side(c, d, a);
+  const s4 = side(c, d, b);
+  return s1 * s2 < 0 && s3 * s4 < 0;
+}
+
+function isClosedStroke(pts) {
+  if (pts.length < 4) return false;
+  const span = dist(pts[0], pts[pts.length - 1]);
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += dist(pts[i - 1], pts[i]);
+  return span < 0.42 || (len > 0.8 && span < len * 0.14);
+}
+
+function triangulate(pts) {
+  const v = pts.map((p) => ({ x: p.x, y: p.y }));
+  const tris = [];
+  let guard = 0;
+  while (v.length > 3 && guard++ < 800) {
+    let clipped = false;
+    for (let i = 0; i < v.length; i++) {
+      const a = v[(i + v.length - 1) % v.length];
+      const b = v[i];
+      const c = v[(i + 1) % v.length];
+      const cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+      if (cross <= 1e-7) continue;
+      let ear = true;
+      for (let j = 0; j < v.length; j++) {
+        if (j === i || v[j] === a || v[j] === c) continue;
+        if (pointInTri(v[j], a, b, c)) { ear = false; break; }
+      }
+      if (!ear) continue;
+      tris.push([{ x: a.x, y: a.y }, { x: b.x, y: b.y }, { x: c.x, y: c.y }]);
+      v.splice(i, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) return [];
+  }
+  if (v.length === 3) tris.push(v.map((p) => ({ x: p.x, y: p.y })));
+  return tris;
+}
+
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  if (p.length < 3) return p;
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [];
+  for (const pt of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pt) <= 0) lower.pop();
+    lower.push(pt);
+  }
+  const upper = [];
+  for (let i = p.length - 1; i >= 0; i--) {
+    const pt = p[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pt) <= 0) upper.pop();
+    upper.push(pt);
+  }
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper);
+}
+
+function turnAngle(a, b, c) {
+  const ix = b.x - a.x;
+  const iy = b.y - a.y;
+  const ox = c.x - b.x;
+  const oy = c.y - b.y;
+  return Math.atan2(ix * oy - iy * ox, ix * ox + iy * oy);
+}
+
+function armAngle(prev, cur, next) {
+  const v1x = prev.x - cur.x;
+  const v1y = prev.y - cur.y;
+  const v2x = next.x - cur.x;
+  const v2y = next.y - cur.y;
+  return Math.atan2(Math.abs(v1x * v2y - v1y * v2x), v1x * v2x + v1y * v2y);
+}
+
+function isConvex(pts) {
+  if (pts.length < 3) return false;
+  let sign = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const c = pts[(i + 2) % pts.length];
+    const cr = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (Math.abs(cr) < 1e-8) continue;
+    const s = cr > 0 ? 1 : -1;
+    if (!sign) sign = s;
+    else if (s !== sign) return false;
+  }
+  return sign !== 0;
+}
+
+function pruneByTurn(pts, maxDeg) {
+  const limit = maxDeg * Math.PI / 180;
+  const cur = pts.map((p) => ({ x: p.x, y: p.y }));
+  let guard = 0;
+  while (cur.length > 3 && guard++ < 48) {
+    let bestI = -1;
+    let best = Infinity;
+    for (let i = 0; i < cur.length; i++) {
+      const turn = Math.abs(turnAngle(cur[(i + cur.length - 1) % cur.length], cur[i], cur[(i + 1) % cur.length]));
+      if (turn < best) {
+        best = turn;
+        bestI = i;
+      }
+    }
+    if (bestI < 0 || best >= limit) break;
+    cur.splice(bestI, 1);
+  }
+  return cur;
+}
+
+function interiorAngles(pts) {
+  const ccw = ensureCCW(pts);
+  const out = [];
+  for (let i = 0; i < ccw.length; i++) {
+    const turn = turnAngle(ccw[(i + ccw.length - 1) % ccw.length], ccw[i], ccw[(i + 1) % ccw.length]);
+    out.push(Math.PI - turn);
+  }
+  return out;
+}
+
+function isRoughRect(pts) {
+  if (pts.length !== 4) return false;
+  const angs = interiorAngles(pts);
+  let dev = 0;
+  for (const ang of angs) {
+    if (ang < 55 * Math.PI / 180 || ang > 125 * Math.PI / 180) return false;
+    dev += Math.abs(ang - Math.PI / 2);
+  }
+  return dev / 4 < 28 * Math.PI / 180;
+}
+
+function orientedRect(corners, allPts) {
+  let best = -1;
+  let ang = 0;
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i];
+    const b = corners[(i + 1) % corners.length];
+    const len = dist(a, b);
+    if (len > best) {
+      best = len;
+      ang = Math.atan2(b.y - a.y, b.x - a.x);
+    }
+  }
+  const c = Math.cos(ang);
+  const s = Math.sin(ang);
+  let minU = Infinity;
+  let maxU = -Infinity;
+  let minV = Infinity;
+  let maxV = -Infinity;
+  const src = allPts && allPts.length ? allPts : corners;
+  for (const p of src) {
+    const u = p.x * c + p.y * s;
+    const v = -p.x * s + p.y * c;
+    if (u < minU) minU = u;
+    if (u > maxU) maxU = u;
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+  }
+  if (maxU - minU < 0.08 || maxV - minV < 0.08) return null;
+  const uv = (u, v) => ({ x: u * c - v * s, y: u * s + v * c });
+  return [uv(minU, minV), uv(maxU, minV), uv(maxU, maxV), uv(minU, maxV)];
+}
+
+function snapTriangle(corners) {
+  const pts = corners.map((p) => ({ x: p.x, y: p.y }));
+  let bestI = 0;
+  let bestDev = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const dev = Math.abs(armAngle(pts[(i + 2) % 3], pts[i], pts[(i + 1) % 3]) - Math.PI / 2);
+    if (dev < bestDev) {
+      bestDev = dev;
+      bestI = i;
+    }
+  }
+  if (bestDev > 22 * Math.PI / 180) return pts;
+  const cur = pts[bestI];
+  const prev = pts[(bestI + 2) % 3];
+  const next = pts[(bestI + 1) % 3];
+  const bax = prev.x - cur.x;
+  const bay = prev.y - cur.y;
+  const bcx = next.x - cur.x;
+  const bcy = next.y - cur.y;
+  const cross = bax * bcy - bay * bcx;
+  const la = Math.hypot(bax, bay) || 1;
+  const lb = Math.hypot(bcx, bcy) || 1;
+  const sign = cross >= 0 ? 1 : -1;
+  pts[(bestI + 1) % 3] = {
+    x: cur.x + (-bay / la) * sign * lb,
+    y: cur.y + (bax / la) * sign * lb,
+  };
+  return pts;
+}
+
+function cornerGap(hull, box) {
+  let worst = 0;
+  for (const c of box) {
+    let best = Infinity;
+    for (const h of hull) best = Math.min(best, dist(c, h));
+    worst = Math.max(worst, best);
+  }
+  return worst;
+}
+
+function regularizeClosed(pts) {
+  const src = ensureCCW(dedupe(pts));
+  if (src.length < 3 || Math.abs(signedArea(src)) < 0.04) return src;
+  const hull = ensureCCW(convexHull(src));
+  if (hull.length < 3) return src;
+  const area = Math.abs(signedArea(src));
+  const hArea = Math.abs(signedArea(hull));
+  if (hArea < 1e-4 || area / hArea < 0.7) return src;
+  let shape = pruneByTurn(hull, 25);
+  if (shape.length > 4 && shape.length <= 6) {
+    const softer = pruneByTurn(shape, 42);
+    if ((softer.length === 4 && isRoughRect(softer)) || softer.length === 3) shape = softer;
+  }
+  if (shape.length === 4 && isRoughRect(shape)) {
+    const box = orientedRect(shape, src);
+    if (box) return ensureCCW(box);
+  }
+  if (shape.length === 3) return ensureCCW(snapTriangle(shape));
+  if (shape.length > 4) {
+    const box = orientedRect(hull, src);
+    if (box) {
+      const bArea = Math.abs(signedArea(box));
+      const shortSide = Math.min(dist(box[0], box[1]), dist(box[1], box[2]));
+      if (bArea > 1e-4 && hArea / bArea > 0.9 && cornerGap(hull, box) < shortSide * 0.16) {
+        return ensureCCW(box);
+      }
+    }
+  }
+  return src;
+}
+
+function straightenOpen(pts) {
+  const clean = pts.map((p) => ({ x: p.x, y: p.y }));
+  if (clean.length < 3) return clean;
+  const a = clean[0];
+  const b = clean[clean.length - 1];
+  const len = dist(a, b);
+  if (len < 0.12) return clean;
+  let maxD = 0;
+  for (let i = 1; i < clean.length - 1; i++) {
+    maxD = Math.max(maxD, distPointSeg(clean[i].x, clean[i].y, a.x, a.y, b.x, b.y));
+  }
+  // Hand wobble on a straight stroke stays under this. A deliberate bend is larger.
+  if (maxD <= Math.max(0.28, len * 0.08)) return [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+  return clean;
+}
+
+function circleFit(pts) {
+  if (!pts || pts.length < 6) return null;
+  let cx = 0;
+  let cy = 0;
+  for (const p of pts) {
+    cx += p.x;
+    cy += p.y;
+  }
+  cx /= pts.length;
+  cy /= pts.length;
+  const radii = [];
+  let mean = 0;
+  for (const p of pts) {
+    const r = Math.hypot(p.x - cx, p.y - cy);
+    radii.push(r);
+    mean += r;
+  }
+  mean /= radii.length;
+  if (mean < 0.16 || mean > 4) return null;
+  let dev = 0;
+  for (const r of radii) dev = Math.max(dev, Math.abs(r - mean));
+  if (dev > Math.max(0.07, mean * 0.16)) return null;
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += dist(pts[i - 1], pts[i]);
+  len += dist(pts[0], pts[pts.length - 1]);
+  const circ = Math.PI * 2 * mean;
+  if (len < circ * 0.72 || len > circ * 1.28) return null;
+  const angs = pts.map((p) => Math.atan2(p.y - cy, p.x - cx)).sort((a, b) => a - b);
+  let gap = angs[0] + Math.PI * 2 - angs[angs.length - 1];
+  for (let i = 1; i < angs.length; i++) gap = Math.max(gap, angs[i] - angs[i - 1]);
+  if (gap > Math.PI * 0.7) return null;
+  return { x: cx, y: cy, r: mean };
+}
+
+function tidyTerrain(rawPts) {
+  let pts = dedupe(simplify(rawPts, 0.045));
+  if (pts.length < 2) return pts;
+  if (!isClosedStroke(pts)) return straightenOpen(pts);
+  const ring = dedupe(pts.slice(0, -1));
+  if (ring.length >= 3 && !selfIntersects(ring, true) && Math.abs(signedArea(ring)) >= 0.05) {
+    const neat = regularizeClosed(ring);
+    return neat.concat([{ x: neat[0].x, y: neat[0].y }]);
+  }
+  return pts;
+}
+
+function makePaper() {
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 512;
+  const g = c.getContext("2d");
+  g.fillStyle = "#f4e6c6";
+  g.fillRect(0, 0, 512, 512);
+  for (let i = 0; i < 2200; i++) {
+    const light = hash(i, 1) > 0.55;
+    g.fillStyle = light ? "rgba(255,255,255,0.22)" : "rgba(150,110,60,0.13)";
+    g.fillRect(hash(i, 2) * 512, hash(i, 3) * 512, 1 + hash(i, 4) * 2.2, 1 + hash(i, 5) * 1.6);
+  }
+  g.strokeStyle = "rgba(80,120,160,0.045)";
+  g.lineWidth = 1;
+  for (let y = 36; y < 512; y += 32) {
+    g.beginPath();
+    g.moveTo(0, y);
+    g.lineTo(512, y);
+    g.stroke();
+  }
+  paper = c;
+}
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  viewW = window.innerWidth;
+  viewH = window.innerHeight;
+  canvas.width = Math.max(1, Math.floor(viewW * dpr));
+  canvas.height = Math.max(1, Math.floor(viewH * dpr));
+}
+
+function viewInset() {
+  if (mode === "play") return { top: 104, bottom: 48 };
+  if (mode === "editor") return { top: 118, bottom: 96 };
+  return { top: 0, bottom: 0 };
+}
+
+function camScale() {
+  const inset = viewInset();
+  const w = Math.max(200, viewW);
+  const h = Math.max(200, viewH - inset.top - inset.bottom);
+  return Math.min(w / VIEW_W, h / VIEW_H) * cam.zoom;
+}
+
+function viewCenter() {
+  const inset = viewInset();
+  return {
+    x: viewW / 2,
+    y: inset.top + (viewH - inset.top - inset.bottom) / 2,
+  };
+}
+
+function worldToScreen(x, y) {
+  const s = camScale();
+  const c = viewCenter();
+  return {
+    x: c.x + (x - cam.cx) * s,
+    y: c.y - (y - cam.cy) * s,
+  };
+}
+
+function screenToWorld(x, y) {
+  const s = camScale();
+  const c = viewCenter();
+  return {
+    x: cam.cx + (x - c.x) / s,
+    y: cam.cy - (y - c.y) / s,
+  };
+}
+
+function snapDrawPoint(p) {
+  if (!geoSnap) return { x: p.x, y: p.y };
+  return {
+    x: Math.round(p.x / GEO_GRID) * GEO_GRID,
+    y: Math.round(p.y / GEO_GRID) * GEO_GRID,
+  };
+}
+
+function strokeSnaps() {
+  if (!geoSnap) return false;
+  if (mode === "play") return true;
+  return mode === "editor" && (editorTool === "terrain" || editorTool === "decor");
+}
+
+function resetCam() {
+  cam.cx = 16;
+  cam.cy = 9;
+  cam.zoom = 1;
+}
+
+function V(x, y) { return planck.Vec2(x, y); }
+
+function clearWorld() {
+  endDrag();
+  world = null;
+  ground = null;
+  ball = null;
+  stars = [];
+  pins = [];
+  rockets = [];
+  drawings = [];
+  scenery = [];
+  geometry = [];
+  bodyMeta = new Map();
+  contactQ = [];
+  won = false;
+  medals = { elegant: false, oldschool: false };
+  stats = { shapes: 0, nudges: 0, userPins: 0, ropes: 0, drewUnder: false, dragTrick: false };
+  simTime = 0;
+  confetti = [];
+  dragFresh = new Map();
+}
+
+function track(body, meta) {
+  meta.body = body;
+  bodyMeta.set(body, meta);
+  return meta;
+}
+
+function addTriFixture(body, tri, opt) {
+  const area = Math.abs(signedArea(tri));
+  if (area < 0.0015) return false;
+  let verts = tri.map((p) => V(p.x, p.y));
+  if (signedArea(tri) < 0) verts.reverse();
+  const e1 = Math.hypot(tri[0].x - tri[1].x, tri[0].y - tri[1].y);
+  const e2 = Math.hypot(tri[1].x - tri[2].x, tri[1].y - tri[2].y);
+  const e3 = Math.hypot(tri[2].x - tri[0].x, tri[2].y - tri[0].y);
+  if (Math.min(e1, e2, e3) < 0.03) return false;
+  try {
+    body.createFixture(new planck.Polygon(verts), opt);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function fixtureOpt(extra) {
+  return Object.assign({
+    density: 1,
+    friction: 0.6,
+    restitution: 0,
+    filterGroupIndex: 0,
+  }, extra || {});
+}
+
+function addConvexFixture(body, pts, opt) {
+  const maxV = (planck.Settings && planck.Settings.maxPolygonVertices) || 8;
+  if (pts.length < 3 || pts.length > maxV || !isConvex(pts)) return false;
+  if (Math.abs(signedArea(pts)) < 0.04) return false;
+  try {
+    body.createFixture(new planck.Polygon(pts.map((p) => V(p.x, p.y))), opt);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function mountOutline(body, worldPts, closed, color, width) {
+  const o = body.getPosition();
+  const local = worldPts.map((p) => ({ x: p.x - o.x, y: p.y - o.y }));
+  return {
+    local,
+    closed,
+    color,
+    width: width || (closed ? 0.14 : THICK),
+    fixed: false,
+  };
+}
+
+function containsMeta(meta, x, y) {
+  if (!meta.body) return false;
+  const lp = meta.body.getLocalPoint(V(x, y));
+  const px = lp.x;
+  const py = lp.y;
+  if (meta.outline && meta.outline.closed) {
+    if (distToPoly(px, py, meta.outline.local) <= 0.2) return true;
+  }
+  if (meta.outline && !meta.outline.closed) {
+    if (distToWire(px, py, meta.outline.local) <= (meta.thick || THICK) * 0.5 + 0.18) return true;
+  }
+  if (meta.circles) {
+    for (const c of meta.circles) {
+      if (Math.hypot(px - c.x, py - c.y) <= c.r + 0.16) return true;
+    }
+  }
+  return false;
+}
+
+function hostAt(x, y) {
+  for (let i = drawings.length - 1; i >= 0; i--) {
+    const d = drawings[i];
+    if (!d.body || d.kind === "rope") continue;
+    if (d.meta && containsMeta(d.meta, x, y)) return d.body;
+  }
+  for (let i = geometry.length - 1; i >= 0; i--) {
+    const g = geometry[i];
+    if (g.closed) {
+      // The center of a tiny loop sits just above the surface it is drawn on.
+      if (distToPoly(x, y, g.pts) <= 0.48) return ground;
+    } else if (distToWire(x, y, g.pts) <= 0.24) return ground;
+  }
+  for (const r of rockets) {
+    if (r.body && containsMeta(r.meta, x, y)) return r.body;
+  }
+  return null;
+}
+
+function rememberPin(x, y, body, userMade) {
+  const local = body.getLocalPoint(V(x, y));
+  const pin = {
+    x, y,
+    local: { x: local.x, y: local.y },
+    body,
+    userMade: !!userMade,
+    joints: [],
+  };
+  pins.push(pin);
+  return pin;
+}
+
+function attachExistingPins(body, meta) {
+  let n = 0;
+  for (const pin of pins) {
+    if (pin.body === body) continue;
+    const wp = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
+    if (!containsMeta(meta, wp.x, wp.y)) continue;
+    const joint = world.createJoint(new planck.RevoluteJoint({
+      bodyA: pin.body,
+      bodyB: body,
+      localAnchorA: V(pin.local.x, pin.local.y),
+      localAnchorB: body.getLocalPoint(V(wp.x, wp.y)),
+      collideConnected: false,
+    }));
+    pin.joints.push(joint);
+    n++;
+  }
+  return n;
+}
+
+function spawnSolid(pts, opt) {
+  const clean = ensureCCW(dedupe(pts));
+  if (clean.length < 3 || Math.abs(signedArea(clean)) < 0.04) return null;
+  let cx = 0;
+  let cy = 0;
+  let a = 0;
+  for (let i = 0; i < clean.length; i++) {
+    const p = clean[i];
+    const q = clean[(i + 1) % clean.length];
+    const cr = p.x * q.y - q.x * p.y;
+    a += cr;
+    cx += (p.x + q.x) * cr;
+    cy += (p.y + q.y) * cr;
+  }
+  a *= 0.5;
+  if (Math.abs(a) < 1e-4) return null;
+  cx /= (6 * a);
+  cy /= (6 * a);
+  const body = world.createDynamicBody({
+    position: V(cx, cy),
+    linearDamping: 0.12,
+    angularDamping: 0.35,
+  });
+  const local = clean.map((p) => ({ x: p.x - cx, y: p.y - cy }));
+  const fopt = fixtureOpt({ density: opt.density || 1.5, friction: 0.72, restitution: 0 });
+  let made = addConvexFixture(body, local, fopt) ? 1 : 0;
+  if (!made) {
+    let tris = triangulate(local);
+    if (!tris.length) {
+      const hull = convexHull(local);
+      tris = [];
+      for (let i = 1; i < hull.length - 1; i++) tris.push([hull[0], hull[i], hull[i + 1]]);
+    }
+    for (const tri of tris) made += addTriFixture(body, tri, fopt) ? 1 : 0;
+  }
+  if (!made) {
+    world.destroyBody(body);
+    return null;
+  }
+  const meta = track(body, {
+    kind: "draw",
+    thick: THICK,
+    outline: { local, closed: true, color: opt.color, width: 0.13, fixed: false },
+  });
+  const draw = { kind: "solid", body, meta, color: opt.color };
+  drawings.push(draw);
+  attachExistingPins(body, meta);
+  noteShape(clean);
+  return draw;
+}
+
+function spawnWire(pts, opt) {
+  const clean = dedupe(pts);
+  if (clean.length < 2) return null;
+  let ox = 0;
+  let oy = 0;
+  for (const p of clean) { ox += p.x; oy += p.y; }
+  ox /= clean.length;
+  oy /= clean.length;
+  const body = world.createDynamicBody({
+    position: V(ox, oy),
+    linearDamping: 0.08,
+    angularDamping: 0.25,
+  });
+  const fopt = fixtureOpt({ density: opt.density || 2.1, friction: 0.62, restitution: 0 });
+  let made = 0;
+  for (const p of clean) {
+    body.createFixture(new planck.Circle(V(p.x - ox, p.y - oy), THICK / 2), fopt);
+    made++;
+  }
+  for (let i = 0; i < clean.length - 1; i++) {
+    const a = clean[i];
+    const b = clean[i + 1];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 0.05) continue;
+    const localCenter = V((a.x + b.x) / 2 - ox, (a.y + b.y) / 2 - oy);
+    const shape = new planck.Box(len / 2, THICK / 2, localCenter, Math.atan2(b.y - a.y, b.x - a.x));
+    body.createFixture(shape, fopt);
+    made++;
+  }
+  if (!made) {
+    world.destroyBody(body);
+    return null;
+  }
+  const local = clean.map((p) => ({ x: p.x - ox, y: p.y - oy }));
+  const meta = track(body, {
+    kind: "draw",
+    thick: THICK,
+    outline: { local, closed: false, color: opt.color, width: THICK, fixed: false },
+  });
+  const draw = { kind: "wire", body, meta, color: opt.color };
+  drawings.push(draw);
+  attachExistingPins(body, meta);
+  noteShape(clean);
+  return draw;
+}
+
+function spawnBlob(x, y, r, color) {
+  const body = world.createDynamicBody({
+    position: V(x, y),
+    linearDamping: 0.04,
+    angularDamping: 0.04,
+  });
+  body.createFixture(new planck.Circle(r), fixtureOpt({ density: 3.2, friction: 0.16, restitution: 0 }));
+  const meta = track(body, {
+    kind: "draw",
+    round: true,
+    circles: [{ x: 0, y: 0, r }],
+    outline: null,
+  });
+  const draw = { kind: "blob", body, meta, color, x, y, r };
+  drawings.push(draw);
+  noteShape([{ x, y: y - r }, { x, y }]);
+  return draw;
+}
+
+function spawnRoller(x, y, r, color) {
+  const body = world.createDynamicBody({
+    position: V(x, y),
+    linearDamping: 0.015,
+    angularDamping: 0.02,
+    bullet: true,
+  });
+  body.createFixture(new planck.Circle(r), fixtureOpt({ density: 3.2, friction: 0.16, restitution: 0 }));
+  const meta = track(body, {
+    kind: "roller",
+    round: true,
+    circles: [{ x: 0, y: 0, r }],
+    outline: null,
+  });
+  const draw = { kind: "roller", body, meta, color, x, y, r };
+  drawings.push(draw);
+  attachExistingPins(body, meta);
+  noteShape([{ x: x - r, y }, { x, y: y - r }, { x: x + r, y }]);
+  return draw;
+}
+
+function spawnRope(pinA, pinB, stroke, color) {
+  const start = pinWorld(pinA);
+  const end = pinWorld(pinB);
+  let pts = stroke.map((p) => ({ x: p.x, y: p.y }));
+  if (pts.length < 2) pts = [start, end];
+  pts[0] = start;
+  pts[pts.length - 1] = end;
+  const mid = pts[Math.floor(pts.length / 2)];
+  const lineD = distPointSeg(mid.x, mid.y, start.x, start.y, end.x, end.y);
+  if (lineD < 0.35) {
+    pts = pts.map((p) => ({ x: p.x, y: p.y }));
+    const samplesHint = [];
+    const steps = Math.max(4, Math.round(dist(start, end) / 0.6));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const sag = Math.sin(t * Math.PI) * Math.min(1.6, dist(start, end) * 0.18);
+      samplesHint.push({
+        x: start.x + (end.x - start.x) * t,
+        y: start.y + (end.y - start.y) * t - sag,
+      });
+    }
+    pts = samplesHint;
+  }
+  const samples = resample(pts, 0.5);
+  if (samples.length < 2) return null;
+  const ropeId = ropeSeq++;
+  const bodies = [];
+  for (const p of samples) {
+    const body = world.createDynamicBody({
+      position: V(p.x, p.y),
+      linearDamping: 1.4,
+      angularDamping: 1.4,
+    });
+    body.createFixture(new planck.Circle(0.075), fixtureOpt({
+      density: 0.45,
+      friction: 0.45,
+      restitution: 0,
+      filterGroupIndex: -2,
+    }));
+    track(body, { kind: "rope", ropeId });
+    bodies.push(body);
+  }
+  for (let i = 0; i < bodies.length - 1; i++) {
+    world.createJoint(new planck.DistanceJoint({
+      bodyA: bodies[i],
+      bodyB: bodies[i + 1],
+      localAnchorA: V(0, 0),
+      localAnchorB: V(0, 0),
+      frequencyHz: 7,
+      dampingRatio: 0.6,
+      collideConnected: false,
+    }));
+  }
+  world.createJoint(new planck.RevoluteJoint({
+    bodyA: pinA.body,
+    bodyB: bodies[0],
+    localAnchorA: V(pinA.local.x, pinA.local.y),
+    localAnchorB: V(0, 0),
+    collideConnected: false,
+  }));
+  world.createJoint(new planck.RevoluteJoint({
+    bodyA: pinB.body,
+    bodyB: bodies[bodies.length - 1],
+    localAnchorA: V(pinB.local.x, pinB.local.y),
+    localAnchorB: V(0, 0),
+    collideConnected: false,
+  }));
+  drawings.push({ kind: "rope", ropeId, bodies, color });
+  stats.shapes += 1;
+  stats.ropes += 1;
+  return drawings[drawings.length - 1];
+}
+
+function resample(pts, spacing) {
+  if (pts.length < 2) return pts.slice();
+  const out = [{ x: pts[0].x, y: pts[0].y }];
+  let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    let ax = pts[i - 1].x;
+    let ay = pts[i - 1].y;
+    let bx = pts[i].x;
+    let by = pts[i].y;
+    let seg = Math.hypot(bx - ax, by - ay);
+    if (seg < 1e-4) continue;
+    while (acc + seg >= spacing) {
+      const t = (spacing - acc) / seg;
+      ax = ax + (bx - ax) * t;
+      ay = ay + (by - ay) * t;
+      out.push({ x: ax, y: ay });
+      seg = Math.hypot(bx - ax, by - ay);
+      acc = 0;
+    }
+    acc += seg;
+  }
+  const last = pts[pts.length - 1];
+  if (dist(out[out.length - 1], last) > spacing * 0.35) out.push({ x: last.x, y: last.y });
+  return out;
+}
+
+function dedupe(pts) {
+  const out = [];
+  for (const p of pts) {
+    if (!out.length || dist(out[out.length - 1], p) > 0.03) out.push({ x: p.x, y: p.y });
+  }
+  return out;
+}
+
+function pinWorld(pin) {
+  const p = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
+  return { x: p.x, y: p.y, pin };
+}
+
+function nearestPin(x, y, maxD) {
+  let best = null;
+  let bestD = maxD;
+  for (const pin of pins) {
+    const p = pinWorld(pin);
+    const d = Math.hypot(p.x - x, p.y - y);
+    if (d < bestD) { bestD = d; best = pin; }
+  }
+  return best;
+}
+
+function noteShape(pts) {
+  stats.shapes += 1;
+  if (!ball) return;
+  const by = ball.getPosition().y;
+  let minY = Infinity;
+  for (const p of pts) minY = Math.min(minY, p.y);
+  if (minY < by - 0.5) stats.drewUnder = true;
+}
+
+function commitStroke(rawPts, color) {
+  if (won || !world) return null;
+  const used = color || COLORS[colorIndex];
+  let pts = simplify(rawPts, 0.045);
+  pts = dedupe(pts);
+  if (pts.length < 2) return null;
+  const closed = isClosedStroke(pts);
+  if (closed) {
+    pts = dedupe(pts.slice(0, -1));
+    if (dist(pts[0], pts[pts.length - 1]) > 0.02) {
+      /* ring already open */
+    }
+  }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of pts) {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  const bw = maxX - minX;
+  const bh = maxY - minY;
+  const small = Math.max(bw, bh) < 0.62 && pts.length >= 4 && Math.min(bw, bh) > 0.05;
+  if (small && (closed || dist(pts[0], pts[pts.length - 1]) < 0.4)) {
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const host = hostAt(cx, cy);
+    if (host && bodyMeta.get(host) && bodyMeta.get(host).kind === "ball") {
+      /* pins are not allowed on the quest ball */
+    } else if (host) {
+      stats.userPins += 1;
+      return rememberPin(cx, cy, host, true);
+    }
+    const r = clamp(Math.max(bw, bh) * 0.5, 0.12, 0.34);
+    return spawnBlob(cx, cy, r, used);
+  }
+  if (pts.length >= 6 && (closed || dist(pts[0], pts[pts.length - 1]) < 0.4)) {
+    const fit = circleFit(pts);
+    if (fit) return spawnRoller(fit.x, fit.y, fit.r, used);
+  }
+  if (!closed) {
+    const a = nearestPin(pts[0].x, pts[0].y, 0.55);
+    const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55);
+    if (a && b && a !== b) return spawnRope(a, b, pts, used);
+  }
+  if (closed && !selfIntersects(pts, true) && Math.abs(signedArea(pts)) >= 0.05) {
+    return spawnSolid(regularizeClosed(pts), { color: used });
+  }
+  if (!closed) return spawnWire(straightenOpen(pts), { color: used });
+  return spawnWire(pts, { color: used });
+}
+
+function destroyDrawing(draw) {
+  if (!draw || !world) return;
+  if (draw.kind === "rope") {
+    for (const body of draw.bodies) {
+      bodyMeta.delete(body);
+      world.destroyBody(body);
+    }
+  } else if (draw.body) {
+    const doomed = draw.body;
+    pins = pins.filter((pin) => {
+      if (pin.body !== doomed) return true;
+      return false;
+    });
+    bodyMeta.delete(doomed);
+    world.destroyBody(doomed);
+  }
+  drawings = drawings.filter((d) => d !== draw);
+}
+
+function eraseAt(x, y) {
+  if (!world || world.isLocked()) return false;
+  for (let i = pins.length - 1; i >= 0; i--) {
+    const pin = pins[i];
+    if (!pin.userMade) continue;
+    const p = pinWorld(pin);
+    if (Math.hypot(p.x - x, p.y - y) < 0.4) {
+      for (const j of pin.joints) {
+        if (j) world.destroyJoint(j);
+      }
+      pins.splice(i, 1);
+      return true;
+    }
+  }
+  for (let i = drawings.length - 1; i >= 0; i--) {
+    const d = drawings[i];
+    if (d.kind === "rope") {
+      for (const body of d.bodies) {
+        const p = body.getPosition();
+        if (Math.hypot(p.x - x, p.y - y) < 0.35) {
+          destroyDrawing(d);
+          return true;
+        }
+      }
+    } else if (d.meta && containsMeta(d.meta, x, y)) {
+      destroyDrawing(d);
+      return true;
+    }
+  }
+  return false;
+}
+
+function drawingAt(x, y) {
+  for (let i = drawings.length - 1; i >= 0; i--) {
+    const d = drawings[i];
+    if (d.kind === "rope" || !d.body || !d.meta) continue;
+    if (!d.body.isDynamic()) continue;
+    if (containsMeta(d.meta, x, y)) return d;
+  }
+  return null;
+}
+
+function supportAlong(body, dx, dy) {
+  const len = Math.hypot(dx, dy) || 1;
+  const wx = dx / len;
+  const wy = dy / len;
+  const ang = body.getAngle();
+  const c = Math.cos(ang);
+  const s = Math.sin(ang);
+  const lx = c * wx + s * wy;
+  const ly = -s * wx + c * wy;
+  let best = 0.02;
+  for (let f = body.getFixtureList(); f; f = f.getNext()) {
+    const shape = f.getShape();
+    if (shape.m_type === "circle") {
+      const p = shape.m_p || { x: 0, y: 0 };
+      best = Math.max(best, p.x * lx + p.y * ly + shape.m_radius);
+    } else if (shape.m_vertices && shape.m_count) {
+      for (let i = 0; i < shape.m_count; i++) {
+        const v = shape.m_vertices[i];
+        best = Math.max(best, v.x * lx + v.y * ly);
+      }
+    }
+  }
+  return best;
+}
+
+function rayBlock(body, x1, y1, x2, y2) {
+  let best = null;
+  const dirx = x2 - x1;
+  const diry = y2 - y1;
+  world.rayCast(V(x1, y1), V(x2, y2), (fixture, point, normal, fraction) => {
+    const other = fixture.getBody();
+    if (other === body || fixture.isSensor()) return -1;
+    const meta = bodyMeta.get(other);
+    if (meta && (meta.kind === "star" || meta.kind === "rope")) return -1;
+    const nx = normal.x;
+    const ny = normal.y;
+    if (nx * dirx + ny * diry > 0) return -1;
+    if (!best || fraction < best.fraction) best = { fraction, nx, ny, quest: other === ball };
+    return Math.max(fraction, 1e-5);
+  });
+  return best;
+}
+
+function clampDragGoal(body, goal) {
+  const origin = body.getPosition();
+  let cx = origin.x;
+  let cy = origin.y;
+  let dx = goal.x - cx;
+  let dy = goal.y - cy;
+  // Other bodies stop 1.2 cm short. The quest ball is pressed 5 cm so the
+  // contact solver actually shoves it; that shove is the drag trick.
+  const skinOut = 0.012;
+  const skinBall = -0.05;
+  for (let slide = 0; slide < 4; slide++) {
+    const seg = Math.hypot(dx, dy);
+    if (seg < 1e-4) break;
+    const dirx = dx / seg;
+    const diry = dy / seg;
+    const support = supportAlong(body, dirx, diry);
+    const cast = support + seg + skinBall;
+    const hit = rayBlock(body, cx, cy, cx + dirx * cast, cy + diry * cast);
+    if (!hit) {
+      cx += dx;
+      cy += dy;
+      break;
+    }
+    const skin = hit.quest ? skinBall : skinOut;
+    const allow = hit.fraction * cast - support - skin;
+    const stepLen = Math.min(seg, Math.max(allow, 0));
+    if (allow < 0) {
+      cx += dirx * allow;
+      cy += diry * allow;
+    } else {
+      cx += dirx * stepLen;
+      cy += diry * stepLen;
+    }
+    if (allow >= seg - 1e-4) break;
+    const nx = hit.nx;
+    const ny = hit.ny;
+    const leftx = dx - dirx * Math.max(allow, 0);
+    const lefty = dy - diry * Math.max(allow, 0);
+    const into = leftx * nx + lefty * ny;
+    if (into >= 0) break;
+    dx = leftx - nx * into;
+    dy = lefty - ny * into;
+  }
+  return { x: cx, y: cy };
+}
+
+function chaseDrag() {
+  if (!playDrag || !world || !playDrag.joint) return;
+  const body = playDrag.body;
+  const anchor = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+  const com = body.getPosition();
+  const offx = com.x - anchor.x;
+  const offy = com.y - anchor.y;
+  const clamped = clampDragGoal(body, {
+    x: playDrag.goal.x + offx,
+    y: playDrag.goal.y + offy,
+  });
+  playDrag.joint.setTarget(V(clamped.x - offx, clamped.y - offy));
+}
+
+function snapDrag() {
+  if (!playDrag || !playDrag.body) return;
+  const body = playDrag.body;
+  const anchor = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+  const com = body.getPosition();
+  const offx = com.x - anchor.x;
+  const offy = com.y - anchor.y;
+  const clamped = clampDragGoal(body, {
+    x: playDrag.goal.x + offx,
+    y: playDrag.goal.y + offy,
+  });
+  body.setTransform(V(clamped.x, clamped.y), body.getAngle());
+  const spin = body.getAngularVelocity();
+  body.setLinearVelocity(V(-spin * offy, spin * offx));
+  body.setAwake(true);
+  playDrag.joint.setTarget(V(clamped.x - offx, clamped.y - offy));
+}
+
+function beginDrag(x, y) {
+  if (!world || world.isLocked()) return false;
+  const draw = drawingAt(x, y);
+  if (!draw) return false;
+  endDrag();
+  const body = draw.body;
+  const wasBullet = body.isBullet();
+  const angularDamping = body.getAngularDamping();
+  body.setBullet(true);
+  body.setAngularDamping(1.8);
+  body.setAwake(true);
+  const mass = Math.max(0.2, body.getMass());
+  const local = body.getLocalPoint(V(x, y));
+  const joint = world.createJoint(new planck.MouseJoint({
+    bodyA: ground,
+    bodyB: body,
+    target: V(x, y),
+    maxForce: mass * 160,
+    frequencyHz: 7,
+    dampingRatio: 1,
+    collideConnected: true,
+  }));
+  playDrag = {
+    body,
+    joint,
+    wasBullet,
+    angularDamping,
+    local: { x: local.x, y: local.y },
+    goal: { x, y },
+  };
+  return true;
+}
+
+function moveDrag(x, y) {
+  if (!playDrag) return;
+  playDrag.goal.x = x;
+  playDrag.goal.y = y;
+}
+
+function endDrag() {
+  if (!playDrag) return;
+  const drag = playDrag;
+  playDrag = null;
+  if (!world || !drag.joint) return;
+  world.destroyJoint(drag.joint);
+  if (!drag.body) return;
+  drag.body.setLinearVelocity(V(0, 0));
+  drag.body.setAngularVelocity(0);
+  drag.body.setBullet(drag.wasBullet);
+  drag.body.setAngularDamping(drag.angularDamping);
+  drag.body.setAwake(true);
+  dragFresh.set(drag.body, 0);
+}
+
+function dragBodyHot(body) {
+  if (!body) return false;
+  if (playDrag && playDrag.body === body) return true;
+  return dragFresh.has(body);
+}
+
+function stepDragFresh(dt) {
+  for (const [body, still] of dragFresh) {
+    if (!bodyMeta.has(body)) {
+      dragFresh.delete(body);
+      continue;
+    }
+    const v = body.getLinearVelocity();
+    const slow = Math.hypot(v.x, v.y) < 0.4 && Math.abs(body.getAngularVelocity()) < 0.45;
+    if (slow && still + dt > 0.45) dragFresh.delete(body);
+    else dragFresh.set(body, slow ? still + dt : 0);
+  }
+}
+
+function nudgeDirFromClick(ballX, clickX) {
+  return clickX >= ballX ? 1 : -1;
+}
+
+function doNudge(dir) {
+  if (!ball || won) return;
+  if (simTime < (ball._cool || 0)) return;
+  ball._cool = simTime + 0.4;
+  stats.nudges += 1;
+  ball.applyLinearImpulse(V(dir * 8.2, 0.55), ball.getWorldCenter(), true);
+}
+
+function addStaticSolid(pts, color) {
+  const clean = ensureCCW(dedupe(pts));
+  if (clean.length < 3) return;
+  const opt = fixtureOpt({ density: 0, friction: 0.5, restitution: 0 });
+  if (!addConvexFixture(ground, clean, opt)) {
+    const localTris = triangulate(clean.map((p) => ({ x: p.x, y: p.y })));
+    const tris = localTris.length ? localTris : (() => {
+      const hull = convexHull(clean);
+      const t = [];
+      for (let i = 1; i < hull.length - 1; i++) t.push([hull[0], hull[i], hull[i + 1]]);
+      return t;
+    })();
+    for (const tri of tris) addTriFixture(ground, tri, opt);
+  }
+  geometry.push({ closed: true, pts: clean });
+  scenery.push({ kind: "poly", pts: clean, color, width: 0.16 });
+}
+
+function addStaticWire(pts, color) {
+  const clean = dedupe(pts);
+  if (clean.length < 2) return;
+  const opt = fixtureOpt({ density: 0, friction: 0.55, restitution: 0 });
+  for (const p of clean) ground.createFixture(new planck.Circle(V(p.x, p.y), 0.1), opt);
+  for (let i = 0; i < clean.length - 1; i++) {
+    const a = clean[i];
+    const b = clean[i + 1];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 0.05) continue;
+    const shape = new planck.Box(len / 2, 0.1, V((a.x + b.x) / 2, (a.y + b.y) / 2), Math.atan2(b.y - a.y, b.x - a.x));
+    ground.createFixture(shape, opt);
+  }
+  geometry.push({ closed: false, pts: clean });
+  scenery.push({ kind: "line", pts: clean, color, width: 0.18 });
+}
+
+function makeBox(def) {
+  const body = world.createDynamicBody({
+    position: V(def.x, def.y),
+    linearDamping: 0.15,
+    angularDamping: 0.4,
+  });
+  body.createFixture(new planck.Box(def.hw, def.hh), fixtureOpt({
+    density: def.density || 1,
+    friction: 0.7,
+  }));
+  const local = [
+    { x: -def.hw, y: -def.hh },
+    { x: def.hw, y: -def.hh },
+    { x: def.hw, y: def.hh },
+    { x: -def.hw, y: def.hh },
+  ];
+  const meta = track(body, {
+    kind: "draw",
+    tag: def.tag || "",
+    outline: { local, closed: true, color: def.color, width: 0.12, fixed: false },
+  });
+  drawings.push({ kind: "solid", body, meta, color: def.color, preset: true });
+  if (def.pin) rememberPin(def.x, def.y + def.hh - 0.05, body, false);
+  return body;
+}
+
+function makeRocket(def) {
+  const body = world.createBody({
+    type: "static",
+    position: V(def.x, def.y),
+    angle: def.a || 0,
+    fixedRotation: true,
+    linearDamping: 0.02,
+  });
+  body.createFixture(new planck.Box(0.85, 0.36), fixtureOpt({ density: 1.4, friction: 0.4, restitution: 0 }));
+  const local = [
+    { x: -0.9, y: -0.38 },
+    { x: 0.55, y: -0.38 },
+    { x: 1.15, y: 0 },
+    { x: 0.55, y: 0.38 },
+    { x: -0.9, y: 0.38 },
+  ];
+  const meta = track(body, {
+    kind: "rocket",
+    outline: { local, closed: true, color: "#d94b3a", width: 0.1, fixed: false },
+  });
+  const rocket = {
+    x: def.x, y: def.y, a: def.a || 0,
+    body, meta,
+    mode: "idle",
+    timer: 0,
+    wait: 0,
+    armed: false,
+  };
+  rockets.push(rocket);
+  return rocket;
+}
+
+function ignite(rocket) {
+  if (!rocket || rocket.mode !== "idle" || !rocket.armed) return;
+  rocket.mode = "fly";
+  rocket.timer = 2.3;
+  rocket.body.setDynamic();
+  rocket.body.setBullet(true);
+  rocket.body.setAwake(true);
+}
+
+function resetBall() {
+  if (!ball || !levelDef) return;
+  ball.setTransform(V(levelDef.ball[0], levelDef.ball[1]), 0);
+  ball.setLinearVelocity(V(0, 0));
+  ball.setAngularVelocity(0);
+  ball.setAwake(true);
+}
+
+function buildLevel(def) {
+  clearWorld();
+  levelDef = def;
+  resetCam();
+  world = new planck.World(V(0, -24));
+  world.on("begin-contact", (contact) => {
+    contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
+  });
+  world.on("pre-solve", (contact) => {
+    const ma = bodyMeta.get(contact.getFixtureA().getBody());
+    const mb = bodyMeta.get(contact.getFixtureB().getBody());
+    const roundA = ma && (ma.kind === "ball" || ma.round);
+    const roundB = mb && (mb.kind === "ball" || mb.round);
+    if (roundA && roundB) contact.setRestitution(0.98);
+  });
+  ground = world.createBody();
+  track(ground, { kind: "level" });
+  addStaticSolid([[-0.5, -2], [0.4, -2], [0.4, 18], [-0.5, 18]], "#c9b48a");
+  addStaticSolid([[31.6, -2], [32.5, -2], [32.5, 18], [31.6, 18]], "#c9b48a");
+  for (const solid of def.solids || []) addStaticSolid(solid.pts, solid.color);
+  for (const wire of def.wires || []) addStaticWire(wire.pts, wire.color);
+  for (const d of def.decor || []) scenery.push({ kind: "line", pts: d.pts, color: d.color, width: d.width || 0.12 });
+  for (const box of def.boxes || []) makeBox(box);
+  for (const xy of def.pins || []) {
+    const host = hostAt(xy[0], xy[1]);
+    if (host) rememberPin(xy[0], xy[1], host, false);
+  }
+  for (const r of def.rockets || []) makeRocket(r);
+  for (const xy of def.stars || []) {
+    const body = world.createBody({ position: V(xy[0], xy[1]) });
+    body.createFixture(new planck.Circle(0.58), { isSensor: true, density: 0 });
+    const meta = track(body, { kind: "star", got: false });
+    stars.push(meta);
+  }
+  ball = world.createDynamicBody({
+    position: V(def.ball[0], def.ball[1]),
+    bullet: true,
+    linearDamping: 0.01,
+    angularDamping: 0.02,
+  });
+  ball.createFixture(new planck.Circle(BALL_R), {
+    density: 3.2,
+    friction: 0.12,
+    restitution: 0,
+  });
+  track(ball, { kind: "ball" });
+  mode = "play";
+}
+
+function handleContacts() {
+  const batch = contactQ.splice(0);
+  for (const [a, b] of batch) {
+    const ma = bodyMeta.get(a);
+    const mb = bodyMeta.get(b);
+    if (!ma || !mb) continue;
+    const star = ma.kind === "star" ? ma : mb.kind === "star" ? mb : null;
+    const isBall = ma.kind === "ball" || mb.kind === "ball";
+    if (star && isBall) star.got = true;
+    if (isBall && (dragBodyHot(a) || dragBodyHot(b))) stats.dragTrick = true;
+    const rocketMeta = ma.kind === "rocket" ? ma : mb.kind === "rocket" ? mb : null;
+    const other = rocketMeta === ma ? mb : rocketMeta === mb ? ma : null;
+    if (rocketMeta && other && other.kind !== "star" && other.body && other.body.isDynamic()) {
+      const rocket = rockets.find((r) => r.meta === rocketMeta);
+      ignite(rocket);
+    }
+  }
+}
+
+function step(dt) {
+  if (!world) return;
+  chaseDrag();
+  simTime += dt;
+  if (simTime > 0.35) {
+    for (const rocket of rockets) rocket.armed = true;
+  }
+  world.step(dt, 10, 8);
+  snapDrag();
+  handleContacts();
+  stepDragFresh(dt);
+  for (const rocket of rockets) {
+    if (rocket.mode === "fly") {
+      const angle = rocket.body.getAngle();
+      rocket.body.applyForceToCenter(V(Math.cos(angle) * 78, Math.sin(angle) * 78), true);
+      rocket.timer -= dt;
+      if (rocket.timer <= 0) {
+        rocket.mode = "gone";
+        rocket.wait = 0.7;
+        bodyMeta.delete(rocket.body);
+        world.destroyBody(rocket.body);
+        rocket.body = null;
+      }
+    } else if (rocket.mode === "gone") {
+      rocket.wait -= dt;
+      if (rocket.wait <= 0) {
+        const fresh = makeRocket({ x: rocket.x, y: rocket.y, a: rocket.a });
+        fresh.armed = true;
+        rockets.splice(rockets.indexOf(rocket), 1);
+      }
+    }
+  }
+  if (ball) {
+    const p = ball.getPosition();
+    if (p.y < -1.5 || p.x < -2 || p.x > 34 || p.y > 28) resetBall();
+  }
+  if (!won && stars.length && stars.every((s) => s.got)) {
+    won = true;
+    if (!stats.dragTrick) {
+      medals.elegant = stats.shapes === 1 && stats.nudges === 0;
+      medals.oldschool = stats.nudges === 0 && stats.userPins === 0 && stats.ropes === 0 && !stats.drewUnder;
+    }
+    if (levelDef && !levelDef.sandbox && !levelDef.custom) {
+      const store = progress();
+      const prev = store.cleared[levelDef.id] || {};
+      store.cleared[levelDef.id] = {
+        elegant: !!(prev.elegant || medals.elegant),
+        oldschool: !!(prev.oldschool || medals.oldschool),
+      };
+      saveJSON("crayon-progress", store);
+    }
+    if (!stats.dragTrick) burstConfetti();
+  }
+  stepConfetti(dt);
+}
+
+function burstConfetti() {
+  const origins = [];
+  for (const star of stars) {
+    if (!star.body) continue;
+    const p = star.body.getPosition();
+    origins.push({ x: p.x, y: p.y });
+  }
+  if (!origins.length) return;
+  const total = 20;
+  const pieces = [];
+  for (let i = 0; i < total; i++) {
+    const origin = origins[i % origins.length];
+    const pair = CONFETTI_PAIRS[i % CONFETTI_PAIRS.length];
+    const swap = ((i * 17) % 3) === 0;
+    const ang = Math.PI * (0.05 + ((i * 47) % 1000) / 1000 * 0.9);
+    const speed = 5 + ((i * 91) % 1000) / 1000 * 9;
+    const jitter = ((i * 13) % 100) / 100;
+    pieces.push({
+      ox: origin.x,
+      oy: origin.y,
+      x: origin.x,
+      y: origin.y,
+      vx: Math.cos(ang) * speed * (0.65 + jitter * 0.7),
+      vy: Math.abs(Math.sin(ang)) * speed + 3.5,
+      spin: (i % 628) / 100,
+      spinV: (1.4 + ((i * 37) % 50) / 12) * (i % 2 ? 1 : -1),
+      flip: ((i * 19) % 628) / 100,
+      flipV: (1.6 + ((i * 53) % 50) / 10) * (i % 3 ? 1 : -1),
+      w: 0.28 + ((i * 29) % 100) / 100 * 0.34,
+      h: 0.12 + ((i * 31) % 100) / 100 * 0.2,
+      front: swap ? pair[1] : pair[0],
+      back: swap ? pair[0] : pair[1],
+      delay: (i % 10) / 40,
+      age: 0,
+    });
+  }
+  confetti = pieces;
+}
+
+function stepConfetti(dt) {
+  if (!confetti.length) return;
+  const keep = [];
+  for (const c of confetti) {
+    c.age += dt;
+    if (c.delay > 0) {
+      c.delay -= dt;
+      keep.push(c);
+      continue;
+    }
+    c.vy -= 11 * dt;
+    c.vx *= Math.exp(-0.35 * dt);
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    c.spin += c.spinV * dt;
+    c.flip += c.flipV * dt;
+    if (c.age < 8 && c.y > -4) keep.push(c);
+  }
+  confetti = keep;
+}
+
+function drawConfetti() {
+  if (!confetti.length) return;
+  const scale = camScale();
+  for (const c of confetti) {
+    const p = worldToScreen(c.x, c.y);
+    const facing = Math.cos(c.flip);
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(c.spin);
+    ctx.scale(Math.max(0.05, Math.abs(facing)), 1);
+    ctx.fillStyle = facing >= 0 ? c.front : c.back;
+    const w = c.w * scale;
+    const h = c.h * scale;
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.strokeStyle = "rgba(36,24,12,0.45)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
+  }
+}
+
+function outlineWorld(meta) {
+  if (!meta || !meta.outline) return null;
+  return meta.outline.local.map((p) => {
+    const w = meta.body.getWorldPoint(V(p.x, p.y));
+    return { x: w.x, y: w.y };
+  });
+}
+
+function crayonPath(pts, color, width) {
+  if (!pts || pts.length < 2) return;
+  const scr = pts.map((p) => worldToScreen(p.x, p.y));
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = color;
+  const passes = 3;
+  for (let pass = 0; pass < passes; pass++) {
+    ctx.globalAlpha = pass === 0 ? 0.8 : 0.32;
+    ctx.lineWidth = Math.max(1.4, width * camScale() * (pass === 0 ? 1 : 0.62));
+    ctx.beginPath();
+    for (let i = 0; i < scr.length; i++) {
+      const jx = (hash(i, pass + 2) - 0.5) * 1.4;
+      const jy = (hash(i, pass + 5) - 0.5) * 1.4;
+      const x = scr[i].x + jx;
+      const y = scr[i].y + jy;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function crayonFill(pts, color) {
+  if (!pts || pts.length < 3) return;
+  const scr = pts.map((p) => worldToScreen(p.x, p.y));
+  ctx.save();
+  ctx.beginPath();
+  scr.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.28;
+  ctx.fill();
+  ctx.clip();
+  ctx.globalAlpha = 0.18;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  const bounds = scr.reduce((b, p) => ({
+    minX: Math.min(b.minX, p.x), maxX: Math.max(b.maxX, p.x),
+    minY: Math.min(b.minY, p.y), maxY: Math.max(b.maxY, p.y),
+  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+  for (let y = bounds.minY; y < bounds.maxY; y += 7) {
+    ctx.beginPath();
+    ctx.moveTo(bounds.minX - 4, y + (hash(y, 3) - 0.5) * 2);
+    ctx.lineTo(bounds.maxX + 4, y + 3);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawBall() {
+  if (!ball) return;
+  const p = ball.getPosition();
+  const s = worldToScreen(p.x, p.y);
+  const rad = BALL_R * camScale();
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.rotate(-ball.getAngle());
+  ctx.fillStyle = "#e23b32";
+  ctx.globalAlpha = 0.92;
+  ctx.beginPath();
+  ctx.arc(0, 0, rad, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#9d241c";
+  ctx.globalAlpha = 0.8;
+  ctx.lineWidth = Math.max(2, rad * 0.18);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.strokeStyle = "rgba(255,255,255,0.45)";
+  ctx.arc(-rad * 0.25, -rad * 0.2, rad * 0.72, Math.PI * 1.1, Math.PI * 1.7);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawStar(meta) {
+  const p = meta.body.getPosition();
+  const s = worldToScreen(p.x, p.y);
+  const wobble = meta.got ? 0.9 : 1 + Math.sin(simTime * 3 + p.x) * 0.06;
+  const r = 0.46 * camScale() * wobble;
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.rotate(meta.got ? 0 : simTime * 0.4);
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const ang = -Math.PI / 2 + i * Math.PI / 5;
+    const rad = i % 2 === 0 ? r : r * 0.46;
+    const x = Math.cos(ang) * rad;
+    const y = Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = meta.got ? "#c9a24a" : "#f2c14b";
+  ctx.globalAlpha = meta.got ? 0.55 : 0.95;
+  ctx.fill();
+  ctx.strokeStyle = "#a67820";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPin(pin) {
+  const p = pinWorld(pin);
+  const s = worldToScreen(p.x, p.y);
+  const r = 0.16 * camScale();
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.strokeStyle = "#24324a";
+  ctx.fillStyle = "#f4e6c6";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.rotate(simTime * 2);
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.72, 0.4, Math.PI * 1.7);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRope(draw) {
+  const pts = [];
+  for (const body of draw.bodies) {
+    if (!bodyMeta.has(body)) continue;
+    const p = body.getPosition();
+    pts.push({ x: p.x, y: p.y });
+  }
+  crayonPath(pts, draw.color || "#2b2b2b", 0.09);
+}
+
+function drawRocket(rocket) {
+  if (!rocket.body) return;
+  const pts = outlineWorld(rocket.meta);
+  if (!pts) return;
+  crayonFill(pts, "#d4533c");
+  crayonPath(pts.concat([pts[0]]), "#8d2b22", 0.1);
+  if (rocket.mode === "fly") {
+    const angle = rocket.body.getAngle();
+    const tail = rocket.body.getWorldPoint(V(-0.95, 0));
+    for (let i = 0; i < 4; i++) {
+      const len = 0.4 + hash(i, Math.floor(simTime * 20)) * 0.7;
+      const spread = (i - 1.5) * 0.12;
+      const tip = {
+        x: tail.x - Math.cos(angle + spread) * len,
+        y: tail.y - Math.sin(angle + spread) * len,
+      };
+      crayonPath([{ x: tail.x, y: tail.y }, tip], i % 2 ? "#f2c14b" : "#ef8b2c", 0.1);
+    }
+  }
+}
+
+function drawGeoGrid() {
+  const inset = viewInset();
+  const tl = screenToWorld(0, inset.top);
+  const br = screenToWorld(viewW, viewH - inset.bottom);
+  const minX = Math.min(tl.x, br.x);
+  const maxX = Math.max(tl.x, br.x);
+  const minY = Math.min(tl.y, br.y);
+  const maxY = Math.max(tl.y, br.y);
+  const x0 = Math.ceil(minX / GEO_GRID - 1e-6) * GEO_GRID;
+  const y0 = Math.ceil(minY / GEO_GRID - 1e-6) * GEO_GRID;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, inset.top, viewW, Math.max(0, viewH - inset.top - inset.bottom));
+  ctx.clip();
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = x0; x <= maxX + 1e-6; x += GEO_GRID) {
+    const a = worldToScreen(x, minY);
+    const b = worldToScreen(x, maxY);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  for (let y = y0; y <= maxY + 1e-6; y += GEO_GRID) {
+    const a = worldToScreen(minX, y);
+    const b = worldToScreen(maxX, y);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  ctx.strokeStyle = "rgba(43,43,43,0.12)";
+  ctx.stroke();
+  ctx.beginPath();
+  for (let x = x0; x <= maxX + 1e-6; x += GEO_GRID) {
+    if (Math.abs(x / GEO_GRID) % 2 > 0.1) continue;
+    const a = worldToScreen(x, minY);
+    const b = worldToScreen(x, maxY);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  for (let y = y0; y <= maxY + 1e-6; y += GEO_GRID) {
+    if (Math.abs(y / GEO_GRID) % 2 > 0.1) continue;
+    const a = worldToScreen(minX, y);
+    const b = worldToScreen(maxX, y);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  ctx.strokeStyle = "rgba(43,43,43,0.2)";
+  ctx.stroke();
+  ctx.restore();
+}
+
+function renderPlay() {
+  if (geoSnap) drawGeoGrid();
+  for (const item of scenery) {
+    if (item.kind === "poly") {
+      crayonFill(item.pts, item.color);
+      crayonPath(item.pts.concat([item.pts[0]]), item.color, item.width || 0.16);
+    } else crayonPath(item.pts, item.color, item.width || 0.14);
+  }
+  for (const rocket of rockets) drawRocket(rocket);
+  for (const draw of drawings) {
+    if (draw.kind === "rope") drawRope(draw);
+    else if (draw.kind === "blob" || draw.kind === "roller") {
+      const p = draw.body.getPosition();
+      const s = worldToScreen(p.x, p.y);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, draw.r * camScale(), 0, Math.PI * 2);
+      ctx.fillStyle = draw.color;
+      ctx.globalAlpha = 0.9;
+      ctx.fill();
+      ctx.restore();
+      crayonPath(circlePts(p.x, p.y, draw.r, 16), draw.color, 0.1);
+    } else if (draw.meta) {
+      const pts = outlineWorld(draw.meta);
+      if (!pts) continue;
+      if (draw.meta.outline && draw.meta.outline.closed) {
+        crayonFill(pts, draw.color);
+        crayonPath(pts.concat([pts[0]]), draw.color, 0.13);
+      } else crayonPath(pts, draw.color, THICK);
+    }
+  }
+  for (const pin of pins) drawPin(pin);
+  for (const star of stars) drawStar(star);
+  drawBall();
+  if (pointer && pointer.pts && pointer.pts.length) {
+    crayonPath(pointer.pts, COLORS[colorIndex], THICK);
+  }
+}
+
+function circlePts(x, y, r, n) {
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    pts.push({ x: x + Math.cos(a) * r, y: y + Math.sin(a) * r });
+  }
+  return pts;
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function button(x, y, w, h, label, onClick, opt) {
+  opt = opt || {};
+  ui.push({ x, y, w, h, onClick });
+  ctx.save();
+  roundRect(x, y, w, h, 12);
+  ctx.fillStyle = opt.on ? "rgba(60,127,214,0.28)" : "rgba(255,252,240,0.72)";
+  ctx.fill();
+  ctx.strokeStyle = opt.locked ? "#b7a88a" : "#5c4632";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = opt.locked ? "#8a7b64" : "#3a2a1c";
+  ctx.font = (opt.size || 18) + "px 'Segoe Print', 'Comic Sans MS', cursive";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+  ctx.restore();
+}
+
+function label(text, x, y, size, color, align) {
+  ctx.save();
+  ctx.fillStyle = color || "#3a2a1c";
+  ctx.font = size + "px 'Segoe Print', 'Comic Sans MS', cursive";
+  ctx.textAlign = align || "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+function drawHUD() {
+  if (!levelDef) return;
+  label(levelDef.name, 24, 16, 28);
+  label(levelDef.hint || "", 24, 50, 16, "#5c4632");
+  const got = stars.filter((s) => s.got).length;
+  label("Sterne " + got + "/" + stars.length, 24, 76, 16, "#8a5a20");
+  if (stats.shapes === 1 && stats.nudges === 0) label("bisher elegant", 150, 76, 16, "#3e9a48");
+  const sw = 22;
+  const geoW = 36;
+  const geoH = sw;
+  const geoX = viewW - 28 - COLORS.length * (sw + 8) - 10 - geoW;
+  const geoY = 18;
+  ui.push({
+    x: geoX, y: geoY, w: geoW, h: geoH,
+    onClick: () => { geoSnap = !geoSnap; },
+  });
+  ctx.save();
+  ctx.fillStyle = "rgba(255,252,240,0.92)";
+  ctx.fillRect(geoX, geoY, geoW, geoH);
+  ctx.strokeStyle = geoSnap ? "#2b2b2b" : "rgba(0,0,0,0.22)";
+  ctx.lineWidth = geoSnap ? 3 : 1;
+  const inset = geoSnap ? 1.5 : 0.5;
+  ctx.strokeRect(geoX + inset, geoY + inset, geoW - inset * 2, geoH - inset * 2);
+  const ax = geoX + 8;
+  const ay = geoY + geoH - 6;
+  const leg = 12;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(ax + leg, ay);
+  ctx.lineTo(ax, ay - leg);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(60,127,214,0.16)";
+  ctx.fill();
+  ctx.strokeStyle = "#2b2b2b";
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(ax + 3.2, ay);
+  ctx.lineTo(ax + 3.2, ay - 3.2);
+  ctx.lineTo(ax, ay - 3.2);
+  for (let i = 1; i <= 3; i++) {
+    const t = (i / 4) * leg;
+    ctx.moveTo(ax + t, ay);
+    ctx.lineTo(ax + t, ay - 2.4);
+  }
+  ctx.stroke();
+  ctx.restore();
+  for (let i = 0; i < COLORS.length; i++) {
+    const x = viewW - 28 - (COLORS.length - i) * (sw + 8);
+    const y = 18;
+    ui.push({
+      x, y, w: sw, h: sw,
+      onClick: () => { colorIndex = i; },
+    });
+    ctx.fillStyle = COLORS[i];
+    ctx.strokeStyle = i === colorIndex ? "#2b2b2b" : "rgba(0,0,0,0.2)";
+    ctx.lineWidth = i === colorIndex ? 3 : 1;
+    ctx.beginPath();
+    ctx.arc(x + sw / 2, y + sw / 2, sw / 2 - 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  label("Rad: Farbe    Rechtsklick: radiert    R: neu    M: Karte    H: Hilfe", 24, viewH - 32, 15, "#6b5844");
+  if (won) {
+    const w = 440;
+    const h = 220;
+    const x = (viewW - w) / 2;
+    const y = (viewH - h) / 2;
+    roundRect(x, y, w, h, 18);
+    ctx.fillStyle = "rgba(255,250,235,0.94)";
+    ctx.fill();
+    ctx.strokeStyle = "#5c4632";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    label("Stern gefangen", x + 36, y + 24, 32);
+    const bits = [];
+    if (stats.dragTrick) bits.push("Unerlaubtes Tricksen");
+    else {
+      if (medals.elegant) bits.push("Elegant");
+      if (medals.oldschool) bits.push("Old School");
+    }
+    label(bits.length ? bits.join("  ·  ") : "Ein Weg von vielen.", x + 36, y + 78, 20, stats.dragTrick ? "#a33b32" : "#3e9a48");
+    button(x + 30, y + 140, 110, 46, "Nochmal", () => buildLevel(levelDef));
+    button(x + 155, y + 140, 110, 46, "Karte", showMap);
+    const next = nextLevelId();
+    if (next) button(x + 280, y + 140, 130, 46, "Weiter", () => buildLevel(LEVELS[next]));
+  }
+}
+
+function nextLevelId() {
+  if (!levelDef || levelDef.custom || levelDef.sandbox) return null;
+  const i = ORDER.indexOf(levelDef.id);
+  if (i >= 0 && i < ORDER.length - 1) return ORDER[i + 1];
+  return null;
+}
+
+function ensureCradle() {
+  if (cradleWorld) return;
+  cradleWorld = new planck.World(V(0, -24));
+  cradleGround = cradleWorld.createBody();
+  cradleWorld.on("pre-solve", (contact) => {
+    contact.setRestitution(0.98);
+  });
+  const n = 5;
+  const r = 0.2;
+  const gap = 0.001;
+  const len = 1.15;
+  const anchorY = 0;
+  for (let i = 0; i < n; i++) {
+    const x = (i - (n - 1) / 2) * (r * 2 + gap);
+    const anchor = cradleWorld.createBody({ position: V(x, anchorY) });
+    const body = cradleWorld.createDynamicBody({
+      position: V(x, anchorY - len),
+      bullet: true,
+      linearDamping: 0.012,
+      angularDamping: 0.02,
+    });
+    body.createFixture(new planck.Circle(r), {
+      density: 3.2,
+      friction: 0.01,
+      restitution: 0,
+    });
+    cradleWorld.createJoint(new planck.RevoluteJoint({
+      bodyA: anchor,
+      bodyB: body,
+      localAnchorA: V(0, 0),
+      localAnchorB: V(0, len),
+      collideConnected: false,
+    }));
+    cradleBalls.push({
+      body,
+      anchorX: x,
+      anchorY,
+      len,
+      r,
+      side: i === 0 ? -1 : i === n - 1 ? 1 : 0,
+    });
+  }
+}
+
+function cradlePose(rec, ang) {
+  return {
+    x: rec.anchorX + Math.sin(ang) * rec.len,
+    y: rec.anchorY - Math.cos(ang) * rec.len,
+  };
+}
+
+function mapFrame() {
+  const cols = (viewW >= 860 || (viewW >= 700 && viewH < 780)) ? 2 : 1;
+  const margin = viewW < 520 ? 16 : 48;
+  const colGap = 16;
+  const cardW = cols === 1 ? Math.min(460, viewW - margin * 2) : Math.min(360, (viewW - margin * 2 - colGap) / 2);
+  const rows = Math.ceil(ISLANDS.length / cols);
+  const buttonTop = viewH - 58;
+  const limit = buttonTop - 8;
+  const compact = viewH < 720 || viewW < 520;
+  const titleY = compact ? 16 : 28;
+  const titleSize = compact ? 36 : 48;
+  const subY = titleY + (compact ? 40 : 56);
+  const wrapSub = viewW < 720;
+  const starY = subY + (wrapSub ? 40 : 0) + (compact ? 22 : 28);
+  const headerBottom = starY + 24;
+  const gridRight = margin + cols * cardW + (cols - 1) * colGap;
+  const sideRoom = viewW - gridRight;
+  const rowGap = 10;
+  const useSide = sideRoom >= 300 && viewH >= 640;
+  if (useSide) {
+    const cardsTop = Math.max(168, headerBottom);
+    const avail = limit - cardsTop;
+    let cardH = Math.floor((avail - (rows - 1) * rowGap) / rows);
+    cardH = Math.max(112, Math.min(156, cardH));
+    const cradle = {
+      x: gridRight + 20,
+      y: cardsTop,
+      w: Math.min(460, sideRoom - 36),
+      h: Math.min(400, Math.max(180, cardH * rows + rowGap * (rows - 1))),
+    };
+    return { cols, margin, colGap, cardW, rows, cardsTop, cardH, rowGap, cradle, side: true, titleY, titleSize, subY, starY, buttonTop, gridRight };
+  }
+  const minCard = 112;
+  const need = rows * minCard + (rows - 1) * rowGap;
+  let cradleH = Math.min(compact ? 124 : 158, Math.max(88, limit - need - headerBottom));
+  let cardsTop = headerBottom + cradleH + 6;
+  let avail = limit - cardsTop;
+  let cardH = Math.floor((avail - (rows - 1) * rowGap) / rows);
+  if (cardH < minCard) {
+    cradleH = Math.max(78, limit - need - headerBottom);
+    cardsTop = headerBottom + cradleH + 6;
+    avail = limit - cardsTop;
+    cardH = Math.floor((avail - (rows - 1) * rowGap) / rows);
+  }
+  cardH = Math.max(90, Math.min(156, cardH));
+  const cradle = {
+    x: margin,
+    y: headerBottom,
+    w: Math.max(160, Math.min(viewW - margin * 2, cardW * cols + colGap * (cols - 1))),
+    h: Math.max(78, cradleH),
+  };
+  return { cols, margin, colGap, cardW, rows, cardsTop, cardH, rowGap, cradle, side: false, titleY, titleSize, subY, starY, buttonTop, gridRight };
+}
+
+function cradleLayout() {
+  ensureCradle();
+  const frame = mapFrame();
+  const band = frame.cradle;
+  const r = cradleBalls[0].r;
+  const len = cradleBalls[0].len;
+  const span = cradleBalls[cradleBalls.length - 1].anchorX - cradleBalls[0].anchorX;
+  const worldW = span + (r + len * 0.92) * 2;
+  const worldH = len + r * 2 + 0.18;
+  const scale = Math.max(8, Math.min((band.w - 12) / worldW, (band.h - 28) / worldH));
+  return {
+    frame,
+    band,
+    scale,
+    originX: band.x + band.w / 2,
+    originY: band.y + 22,
+  };
+}
+
+function cradleToScreen(x, y, lay) {
+  const box = lay || cradleLayout();
+  return {
+    x: box.originX + x * box.scale,
+    y: box.originY - y * box.scale,
+  };
+}
+
+function screenToCradle(sx, sy) {
+  const lay = cradleLayout();
+  return {
+    x: (sx - lay.originX) / lay.scale,
+    y: (lay.originY - sy) / lay.scale,
+  };
+}
+
+function cradleArcGoal(rec, x, y) {
+  let ang = Math.atan2(x - rec.anchorX, -(y - rec.anchorY));
+  const maxA = 1.15;
+  if (rec.side < 0) ang = clamp(ang, -maxA, -0.02);
+  else ang = clamp(ang, 0.02, maxA);
+  return cradlePose(rec, ang);
+}
+
+function beginCradleDrag(rec) {
+  if (!rec || !rec.side || !cradleWorld || cradleWorld.isLocked()) return false;
+  endCradleDrag();
+  const body = rec.body;
+  const p = body.getPosition();
+  const joint = cradleWorld.createJoint(new planck.MouseJoint({
+    bodyA: cradleGround,
+    bodyB: body,
+    target: V(p.x, p.y),
+    maxForce: Math.max(30, body.getMass() * 260),
+    frequencyHz: 8,
+    dampingRatio: 1,
+    collideConnected: false,
+  }));
+  cradleDrag = { rec, joint, goal: { x: p.x, y: p.y } };
+  return true;
+}
+
+function endCradleDrag() {
+  if (!cradleDrag) return;
+  const drag = cradleDrag;
+  cradleDrag = null;
+  if (!cradleWorld || !drag.joint) return;
+  cradleWorld.destroyJoint(drag.joint);
+  drag.rec.body.setLinearVelocity(V(0, 0));
+  drag.rec.body.setAngularVelocity(0);
+  drag.rec.body.setAwake(true);
+}
+
+function stepCradle(dt) {
+  if (!cradleWorld) return;
+  if (cradleDrag && cradleDrag.joint) {
+    const goal = cradleArcGoal(cradleDrag.rec, cradleDrag.goal.x, cradleDrag.goal.y);
+    cradleDrag.joint.setTarget(V(goal.x, goal.y));
+  }
+  cradleWorld.step(dt, 12, 8);
+}
+
+function cradleBallAt(sx, sy) {
+  const lay = cradleLayout();
+  let best = null;
+  let bestD = 1e9;
+  for (const rec of cradleBalls) {
+    if (!rec.side) continue;
+    const p = rec.body.getPosition();
+    const s = cradleToScreen(p.x, p.y, lay);
+    const hit = Math.max(rec.r * lay.scale * 1.4, 18);
+    const d = Math.hypot(s.x - sx, s.y - sy);
+    if (d <= hit && d < bestD) {
+      best = rec;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
+function drawCradle() {
+  const lay = cradleLayout();
+  const band = lay.band;
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.fillStyle = "rgba(255,252,240,0.55)";
+  ctx.fill();
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  label("Zieh eine äußere Kugel zur Seite", band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
+  const first = cradleBalls[0];
+  const last = cradleBalls[cradleBalls.length - 1];
+  const a0 = cradleToScreen(first.anchorX, first.anchorY, lay);
+  const a1 = cradleToScreen(last.anchorX, last.anchorY, lay);
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(a0.x - 10, a0.y);
+  ctx.lineTo(a1.x + 10, a1.y);
+  ctx.stroke();
+  for (const rec of cradleBalls) {
+    const p = rec.body.getPosition();
+    const anchor = cradleToScreen(rec.anchorX, rec.anchorY, lay);
+    const s = cradleToScreen(p.x, p.y, lay);
+    ctx.strokeStyle = "#8d5a34";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(anchor.x, anchor.y);
+    ctx.lineTo(s.x, s.y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, Math.max(5, rec.r * lay.scale), 0, Math.PI * 2);
+    ctx.fillStyle = rec.side ? "#d94b3a" : "#3c7fd6";
+    ctx.fill();
+    ctx.strokeStyle = "#2b2b2b";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+function renderMap() {
+  const frame = mapFrame();
+  label("Crayon", frame.margin, frame.titleY, frame.titleSize);
+  if (viewW < 720) {
+    label("Male die Welt.", frame.margin, frame.subY, 16, "#5c4632");
+    label("Die Kugel muss jeden Stern berühren.", frame.margin, frame.subY + 20, 16, "#5c4632");
+  } else {
+    label("Male die Welt. Die rote Kugel muss jeden Stern berühren.", frame.margin, frame.subY, frame.titleSize > 40 ? 20 : 16, "#5c4632");
+  }
+  label("Sterne " + starCount() + " / " + ORDER.length, frame.margin, frame.starY, 18, "#8a5a20");
+  drawCradle();
+  const owned = starCount();
+  ISLANDS.forEach((island, i) => {
+    const col = i % frame.cols;
+    const row = Math.floor(i / frame.cols);
+    const x = frame.margin + col * (frame.cardW + frame.colGap);
+    const y = frame.cardsTop + row * (frame.cardH + frame.rowGap);
+    const open = owned >= island.need;
+    roundRect(x, y, frame.cardW, frame.cardH, 16);
+    ctx.fillStyle = open ? "rgba(255,252,240,0.65)" : "rgba(220,210,190,0.55)";
+    ctx.fill();
+    ctx.strokeStyle = "#5c4632";
+    ctx.stroke();
+    label(island.name, x + 16, y + 8, frame.cardH < 120 ? 18 : 24);
+    if (frame.cardH >= 118) {
+      label(open ? island.blurb : "noch " + (island.need - owned) + " Sterne", x + 16, y + 40, 15, "#6b5844");
+    }
+    island.levels.forEach((id, n) => {
+      const bx = x + 16 + (n % 4) * 62;
+      const by = y + frame.cardH - 40;
+      const done = progress().cleared[id];
+      button(bx, by, 56, 32, done ? "★" : String(n + 1), () => {
+        if (open) buildLevel(LEVELS[id]);
+      }, { locked: !open, size: 16 });
+    });
+  });
+  const actions = [
+    ["Schmierzettel", () => buildLevel(LEVELS.sandbox)],
+    ["Editor", openEditor],
+    ["Hilfe", () => { mode = "help"; }],
+  ];
+  const gapb = 10;
+  const rowW = Math.min(640, viewW - frame.margin * 2);
+  const bw = Math.floor((rowW - gapb * (actions.length - 1)) / actions.length);
+  let ax = frame.margin;
+  for (const [text, fn] of actions) {
+    button(ax, frame.buttonTop, bw, 42, text, fn, { size: bw < 150 ? 14 : 16 });
+    ax += bw + gapb;
+  }
+  const list = Object.values(customs());
+  if (list.length && frame.side) {
+    const y0 = frame.cradle.y + frame.cradle.h + 12;
+    if (y0 + 44 < frame.buttonTop) {
+      label("Eigene Zettel", frame.cradle.x, y0, 18);
+      list.slice(0, 4).forEach((doc, i) => {
+        button(frame.cradle.x, y0 + 28 + i * 48, Math.min(220, frame.cradle.w), 42, doc.name || "Ohne Titel", () => buildLevel(levelFromDoc(doc)), { size: 16 });
+      });
+    }
+  } else if (list.length && frame.gridRight + 250 < viewW) {
+    label("Eigene Zettel", frame.gridRight + 28, frame.cardsTop, 22);
+    list.slice(0, 6).forEach((doc, i) => {
+      button(frame.gridRight + 28, frame.cardsTop + 40 + i * 52, 220, 44, doc.name || "Ohne Titel", () => buildLevel(levelFromDoc(doc)), { size: 16 });
+    });
+  }
+}
+
+function renderHelp() {
+  label("So kritzelt es", 48, 36, 40);
+  const lines = [
+    "Linke Maustaste, Finger oder Stift: zeichnen. Loslassen erweckt den Strich.",
+    "Offene Linie: leichter, etwas federnder Draht. Geschlossene Fläche: schwerer Körper.",
+    "Ein runder Strich wird eine Kugel. Sie rollt und gibt ihren Schwung weiter.",
+    "Winziger Kreis auf einem Körper oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
+    "Zwei Nägel in derselben Fläche machen sie starr.",
+    "Linie von Nagel zu Nagel: Seil.",
+    "Klick in einen Gegenstand zieht ihn. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
+    "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
+    "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
+    "Klick auf die rote Kugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
+    "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
+    "Elegant: genau ein Gegenstand, ohne die Kugel anzuklicken. Nägel zählen nicht.",
+    "Old School: kein Schubs, kein eigener Nagel, kein Seil, nichts unter der Kugel.",
+    "Das Geodreieck neben den Farben lässt den Stift auf ein Raster einrasten.",
+    "Mausrad wählt die Farbe, Shift+Rad zoomt, mittlere Taste verschiebt das Blatt.",
+    "R setzt das Level zurück. M oder Esc öffnet die Karte.",
+  ];
+  const helpStep = Math.min(34, Math.max(20, Math.floor((viewH - 110 - 96) / lines.length)));
+  lines.forEach((line, i) => label(line, 48, 100 + i * helpStep, helpStep < 26 ? 15 : 18, "#3a2a1c"));
+  button(48, viewH - 84, 140, 48, "Karte", showMap);
+}
+
+function showMap() {
+  endDrag();
+  mode = "map";
+  namebox.style.display = "none";
+  world = null;
+  confetti = [];
+  ensureCradle();
+}
+
+function freshDoc() {
+  return {
+    id: "",
+    name: "Ohne Titel",
+    ball: [6, 2],
+    stars: [[24, 2.1]],
+    rockets: [],
+    pins: [],
+    strokes: [{
+      kind: "terrain",
+      color: "#3f8f55",
+      points: [[0, 0], [32, 0], [32, 1.3], [0, 1.3], [0, 0]],
+    }],
+  };
+}
+
+function openEditor() {
+  editorDoc = freshDoc();
+  editorTool = "terrain";
+  mode = "editor";
+  resetCam();
+  namebox.style.display = "block";
+  namebox.value = editorDoc.name;
+  namebox.style.left = "48px";
+  namebox.style.top = "20px";
+}
+
+function levelFromDoc(doc) {
+  const solids = [];
+  const wires = [];
+  const decor = [];
+  for (const stroke of doc.strokes || []) {
+    const raw = (stroke.points || []).map((p) => ({ x: p[0], y: p[1] }));
+    if (stroke.kind === "decor") {
+      const pts = dedupe(simplify(raw, 0.05));
+      if (pts.length >= 2) decor.push({ pts, color: stroke.color, width: 0.12 });
+      continue;
+    }
+    const tidy = tidyTerrain(raw);
+    if (tidy.length < 2) continue;
+    if (isClosedStroke(tidy)) {
+      const ring = dedupe(tidy.slice(0, -1));
+      if (ring.length >= 3 && !selfIntersects(ring, true) && Math.abs(signedArea(ring)) > 0.05) {
+        solids.push({ pts: ensureCCW(ring), color: stroke.color });
+        continue;
+      }
+    }
+    wires.push({ pts: tidy, color: stroke.color });
+  }
+  return {
+    id: doc.id || "custom",
+    name: doc.name || "Ohne Titel",
+    hint: "Eigenes Blatt. M bringt dich zurück.",
+    ball: doc.ball || [6, 2],
+    stars: doc.stars && doc.stars.length ? doc.stars : [[24, 2]],
+    solids, wires, decor,
+    pins: doc.pins || [],
+    rockets: doc.rockets || [],
+    custom: true,
+  };
+}
+
+function saveEditor() {
+  if (!editorDoc) return;
+  editorDoc.name = namebox.value || "Ohne Titel";
+  if (!editorDoc.id) editorDoc.id = "c" + Date.now();
+  const all = customs();
+  all[editorDoc.id] = editorDoc;
+  saveJSON("crayon-customs", all);
+}
+
+function renderEditor() {
+  if (!editorDoc) return;
+  if (strokeSnaps()) drawGeoGrid();
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  for (const stroke of editorDoc.strokes) {
+    const pts = stroke.points.map(([x, y]) => ({ x, y }));
+    if (stroke.kind === "terrain" && isClosedStroke(pts)) crayonFill(pts, stroke.color);
+    crayonPath(pts, stroke.color, stroke.kind === "decor" ? 0.1 : 0.16);
+  }
+  ctx.restore();
+  const b = editorDoc.ball;
+  const bs = worldToScreen(b[0], b[1]);
+  ctx.fillStyle = "#e23b32";
+  ctx.beginPath();
+  ctx.arc(bs.x, bs.y, BALL_R * camScale(), 0, Math.PI * 2);
+  ctx.fill();
+  for (const star of editorDoc.stars) {
+    const s = worldToScreen(star[0], star[1]);
+    ctx.fillStyle = "#f2c14b";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (const pin of editorDoc.pins) {
+    const s = worldToScreen(pin[0], pin[1]);
+    ctx.strokeStyle = "#24324a";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 7, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  for (const rocket of editorDoc.rockets) {
+    const s = worldToScreen(rocket.x, rocket.y);
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(-rocket.a);
+    ctx.fillStyle = "#d94b3a";
+    ctx.fillRect(-18, -8, 36, 16);
+    ctx.restore();
+  }
+  if (pointer && pointer.pts) crayonPath(pointer.pts, COLORS[colorIndex], THICK);
+  label("Editor", 48, 64, 28);
+  const tools = [
+    ["terrain", "Gelände"],
+    ["decor", "Deko"],
+    ["ball", "Kugel"],
+    ["star", "Stern"],
+    ["rocket", "Rakete"],
+    ["pin", "Nagel"],
+    ["erase", "Weg"],
+  ];
+  tools.forEach((tool, i) => {
+    button(24 + i * 112, viewH - 78, 104, 44, tool[1], () => { editorTool = tool[0]; }, { on: editorTool === tool[0], size: 16 });
+  });
+  button(viewW - 360, 70, 100, 42, "Test", () => {
+    saveEditor();
+    returnMode = "editor";
+    namebox.style.display = "none";
+    buildLevel(levelFromDoc(editorDoc));
+  }, { size: 16 });
+  button(viewW - 250, 70, 110, 42, "Speichern", saveEditor, { size: 16 });
+  button(viewW - 130, 70, 100, 42, "Karte", showMap, { size: 16 });
+}
+
+function render() {
+  ui = [];
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, viewW, viewH);
+  if (paper) {
+    const pat = ctx.createPattern(paper, "repeat");
+    ctx.fillStyle = pat;
+    ctx.fillRect(0, 0, viewW, viewH);
+  } else {
+    ctx.fillStyle = "#f4e6c6";
+    ctx.fillRect(0, 0, viewW, viewH);
+  }
+  ctx.fillStyle = "rgba(90,60,20,0.05)";
+  ctx.fillRect(0, 0, viewW, viewH);
+  if (mode === "map") renderMap();
+  else if (mode === "help") renderHelp();
+  else if (mode === "editor") renderEditor();
+  else {
+    renderPlay();
+    drawHUD();
+    drawConfetti();
+  }
+}
+
+function editorClick(worldPt) {
+  const doc = editorDoc;
+  if (editorTool === "ball") doc.ball = [worldPt.x, worldPt.y];
+  else if (editorTool === "star") doc.stars.push([worldPt.x, worldPt.y]);
+  else if (editorTool === "pin") doc.pins.push([worldPt.x, worldPt.y]);
+  else if (editorTool === "erase") {
+    const near = (arr, map) => {
+      let bi = -1;
+      let bd = 0.7;
+      arr.forEach((item, i) => {
+        const p = map(item);
+        const d = Math.hypot(p[0] - worldPt.x, p[1] - worldPt.y);
+        if (d < bd) { bd = d; bi = i; }
+      });
+      if (bi >= 0) arr.splice(bi, 1);
+      return bi >= 0;
+    };
+    if (near(doc.stars, (s) => s)) return;
+    if (near(doc.pins, (s) => s)) return;
+    if (near(doc.rockets, (s) => [s.x, s.y])) return;
+    for (let i = doc.strokes.length - 1; i >= 0; i--) {
+      const pts = doc.strokes[i].points;
+      for (const p of pts) {
+        if (Math.hypot(p[0] - worldPt.x, p[1] - worldPt.y) < 0.45) {
+          doc.strokes.splice(i, 1);
+          return;
+        }
+      }
+    }
+  }
+}
+
+function onPointerDown(e) {
+  if (e.button === 1) {
+    pointer = { pan: true, x: e.clientX, y: e.clientY, cx: cam.cx, cy: cam.cy };
+    return;
+  }
+  const hit = ui.find((b) => e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h);
+  if (hit) {
+    pointer = { ui: true };
+    hit.onClick();
+    return;
+  }
+  if (e.button === 2) {
+    const w = screenToWorld(e.clientX, e.clientY);
+    if (mode === "play") eraseAt(w.x, w.y);
+    if (mode === "editor") editorClick(w);
+    return;
+  }
+  if (mode === "help") return;
+  if (mode === "map") {
+    const rec = cradleBallAt(e.clientX, e.clientY);
+    if (rec && beginCradleDrag(rec)) {
+      cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
+      pointer = { id: e.pointerId, cradle: true };
+      canvas.setPointerCapture(e.pointerId);
+    }
+    return;
+  }
+  const w = screenToWorld(e.clientX, e.clientY);
+  if (mode === "editor" && editorTool !== "terrain" && editorTool !== "decor" && editorTool !== "rocket") {
+    editorClick(w);
+    pointer = { tap: true };
+    return;
+  }
+  const kind = mode === "play" ? pressKind(w.x, w.y) : "draw";
+  const ink = kind !== "drag" && strokeSnaps() ? snapDrawPoint(w) : w;
+  pointer = {
+    id: e.pointerId,
+    x: e.clientX,
+    y: e.clientY,
+    wx: w.x,
+    wy: w.y,
+    pts: kind === "drag" ? null : [{ x: ink.x, y: ink.y }],
+    moved: false,
+    rocket: mode === "editor" && editorTool === "rocket",
+    downT: performance.now(),
+    grab: null,
+  };
+  if (kind === "nudge") {
+    const bp = ball.getPosition();
+    pointer.onBall = true;
+    pointer.nudgeDir = nudgeDirFromClick(bp.x, w.x);
+  } else if (kind === "drag") {
+    pointer.grab = { x: w.x, y: w.y };
+    engageGrab(pointer.grab);
+  }
+  canvas.setPointerCapture(e.pointerId);
+}
+
+function pressKind(x, y) {
+  if (ball) {
+    const bp = ball.getPosition();
+    if (Math.hypot(bp.x - x, bp.y - y) < BALL_R * 1.3) return "nudge";
+  }
+  if (drawingAt(x, y)) return "drag";
+  return "draw";
+}
+
+function engageGrab(worldPt) {
+  if (!pointer || !pointer.grab || playDrag) return;
+  if (!beginDrag(pointer.grab.x, pointer.grab.y)) return;
+  moveDrag(worldPt.x, worldPt.y);
+  pointer.pts = null;
+  pointer.grab = null;
+  pointer.dragging = true;
+}
+
+function onPointerMove(e) {
+  if (!pointer) return;
+  if (pointer.pan) {
+    const s = camScale();
+    cam.cx = pointer.cx - (e.clientX - pointer.x) / s;
+    cam.cy = pointer.cy + (e.clientY - pointer.y) / s;
+    return;
+  }
+  if (pointer.cradle) {
+    cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
+    return;
+  }
+  const w = screenToWorld(e.clientX, e.clientY);
+  pointer.wx = w.x;
+  pointer.wy = w.y;
+  if (pointer.dragging && playDrag) {
+    moveDrag(w.x, w.y);
+    pointer.moved = true;
+    return;
+  }
+  if (pointer.grab) {
+    engageGrab(w);
+    return;
+  }
+  if (!pointer.pts) return;
+  const ink = strokeSnaps() ? snapDrawPoint(w) : w;
+  const last = pointer.pts[pointer.pts.length - 1];
+  if (Math.hypot(ink.x - last.x, ink.y - last.y) > 0.04) {
+    pointer.pts.push({ x: ink.x, y: ink.y });
+    pointer.moved = true;
+  }
+}
+
+function onPointerUp(e) {
+  if (!pointer) return;
+  const current = pointer;
+  pointer = null;
+  if (current.dragging || playDrag || current.grab) {
+    endDrag();
+    return;
+  }
+  if (current.cradle) {
+    endCradleDrag();
+    return;
+  }
+  if (current.pan || current.ui || current.tap) return;
+  const w = screenToWorld(e.clientX, e.clientY);
+  if (mode === "editor" && current.rocket) {
+    const a = Math.atan2(w.y - current.pts[0].y, w.x - current.pts[0].x);
+    editorDoc.rockets.push({ x: current.pts[0].x, y: current.pts[0].y, a: current.moved ? a : 0 });
+    return;
+  }
+  if (!current.moved) {
+    const now = performance.now();
+    if (mode === "play" && now - lastTap < 320) eraseAt(w.x, w.y);
+    lastTap = now;
+    if (mode === "play" && current.onBall) doNudge(current.nudgeDir);
+    return;
+  }
+  if (mode === "play") commitStroke(current.pts, COLORS[colorIndex]);
+  if (mode === "editor" && (editorTool === "terrain" || editorTool === "decor")) {
+    const shaped = editorTool === "terrain" ? tidyTerrain(current.pts) : current.pts;
+    editorDoc.strokes.push({
+      kind: editorTool === "decor" ? "decor" : "terrain",
+      color: COLORS[colorIndex],
+      points: shaped.map((p) => [p.x, p.y]),
+    });
+  }
+}
+
+function boot() {
+  makePaper();
+  resize();
+  window.addEventListener("resize", resize);
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointercancel", () => {
+    pointer = null;
+    endDrag();
+    endCradleDrag();
+  });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (e.shiftKey) cam.zoom = clamp(cam.zoom * (e.deltaY > 0 ? 0.92 : 1.08), 0.55, 2.4);
+    else colorIndex = (colorIndex + (e.deltaY > 0 ? 1 : COLORS.length - 1)) % COLORS.length;
+  }, { passive: false });
+  window.addEventListener("keydown", (e) => {
+    if (e.target === namebox) return;
+    if (e.key === "r" || e.key === "R") {
+      if (mode === "play" && levelDef) buildLevel(levelDef);
+    } else if (e.key === "m" || e.key === "M" || e.key === "Escape") {
+      if (returnMode === "editor" && editorDoc && mode === "play") {
+        endDrag();
+        mode = "editor";
+        world = null;
+        namebox.style.display = "block";
+        returnMode = "map";
+      } else showMap();
+    } else if (e.key === "h" || e.key === "H") mode = "help";
+    else if (e.key >= "1" && e.key <= "8") colorIndex = Number(e.key) - 1;
+    else if (e.key === "0") resetCam();
+  });
+  const params = new URLSearchParams(location.search);
+  if (params.get("test") === "bounce") runBounceProbe();
+  else if (params.get("test") === "1") runTests();
+  else if (params.get("shot")) {
+    const id = params.get("shot");
+    if (id === "feier") {
+      buildLevel(LEVELS["ein-klotz"]);
+      for (const star of stars) star.got = true;
+    } else if (LEVELS[id]) buildLevel(LEVELS[id]);
+    else showMap();
+  } else showMap();
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    if (pointer && pointer.grab && !pointer.dragging) {
+      const at = pointer.wx == null ? pointer.grab : { x: pointer.wx, y: pointer.wy };
+      engageGrab(at);
+    }
+    if (mode === "play") {
+      let acc = dt;
+      while (acc > 0) {
+        const h = Math.min(acc, 1 / 60);
+        step(h);
+        acc -= h;
+      }
+    } else if (mode === "map") {
+      let acc = dt;
+      while (acc > 0) {
+        const h = Math.min(acc, 1 / 60);
+        stepCradle(h);
+        acc -= h;
+      }
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+function bodyKE(body) {
+  const v = body.getLinearVelocity();
+  const w = body.getAngularVelocity();
+  const I = body.getInertia();
+  return 0.5 * body.getMass() * (v.x * v.x + v.y * v.y) + 0.5 * I * w * w;
+}
+
+// Diagnose, kein Spielfeature. Nur ?test=bounce. Vor dem eigentlichen Fix entfernen.
+function runBounceProbe() {
+  const lines = [];
+  function drop(name, pts) {
+    buildLevel(LEVELS["ein-klotz"]);
+    const pad = makeBox({ x: 16, y: 3.2, hw: 2.2, hh: 0.35, color: "#3c7fd6" });
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    commitStroke(pts, "#d94b3a");
+    const drawn = drawings.filter((d) => d.body && d.body !== pad && d.body.isDynamic());
+    const body = drawn.length ? drawn[drawn.length - 1].body : null;
+    if (!body) {
+      lines.push("INFO " + name + " no body kind " + drawings.map((d) => d.kind).join(","));
+      return;
+    }
+    let fixtures = 0;
+    let minAlt = Infinity;
+    for (let f = body.getFixtureList(); f; f = f.getNext()) {
+      fixtures++;
+      const shape = f.getShape();
+      if (shape.m_vertices && shape.m_count >= 3) {
+        for (let i = 0; i < shape.m_count; i++) {
+          const a = shape.m_vertices[i];
+          const b = shape.m_vertices[(i + 1) % shape.m_count];
+          const c = shape.m_vertices[(i + 2) % shape.m_count];
+          const base = Math.hypot(b.x - a.x, b.y - a.y);
+          const area2 = Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+          if (base > 1e-6) minAlt = Math.min(minAlt, area2 / base);
+        }
+      }
+    }
+    const mass = body.getMass();
+    const I = body.getInertia();
+    const lc = body.getLocalCenter();
+    let r2 = 0;
+    for (let f = body.getFixtureList(); f; f = f.getNext()) {
+      const shape = f.getShape();
+      if (!shape.m_vertices) continue;
+      for (let i = 0; i < shape.m_count; i++) {
+        const v = shape.m_vertices[i];
+        r2 = Math.max(r2, v.x * v.x + v.y * v.y);
+      }
+    }
+    const ke0 = bodyKE(body) + bodyKE(pad);
+    let keHit = ke0;
+    let armed = false;
+    let maxKe = ke0;
+    let maxSpeed = 0;
+    for (let i = 0; i < 180; i++) {
+      step(1 / 60);
+      const ke = bodyKE(body) + bodyKE(pad);
+      const vb = body.getLinearVelocity();
+      const vp = pad.getLinearVelocity();
+      const speed = Math.max(Math.hypot(vb.x, vb.y), Math.hypot(vp.x, vp.y));
+      if (!armed && body.getPosition().y < 6.2) {
+        armed = true;
+        keHit = ke;
+      }
+      if (armed) {
+        maxKe = Math.max(maxKe, ke);
+        maxSpeed = Math.max(maxSpeed, speed);
+      }
+    }
+    const ratio = maxKe / Math.max(keHit, 1e-6);
+    lines.push(
+      "INFO " + name +
+      " fixtures " + fixtures +
+      " mass " + mass.toFixed(3) +
+      " I " + I.toExponential(3) +
+      " I/(m r2) " + (I / Math.max(mass * r2, 1e-9)).toExponential(3) +
+      " lc " + lc.x.toFixed(3) + "," + lc.y.toFixed(3) +
+      " alt " + (minAlt === Infinity ? "-" : minAlt.toFixed(4)) +
+      " keHit " + keHit.toFixed(2) +
+      " maxKe " + maxKe.toFixed(2) +
+      " ratio " + ratio.toFixed(1) +
+      " maxV " + maxSpeed.toFixed(1)
+    );
+  }
+  function dropSolid(name, pts, angle) {
+    buildLevel(LEVELS["ein-klotz"]);
+    const pad = makeBox({ x: 16, y: 3.2, hw: 2.4, hh: 0.35, color: "#3c7fd6" });
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    const draw = spawnSolid(pts, { color: "#d94b3a" });
+    const body = draw && draw.body;
+    if (!body) {
+      lines.push("INFO " + name + " rejected");
+      return;
+    }
+    if (angle) body.setTransform(body.getPosition(), angle);
+    const mass = body.getMass();
+    const I = body.getInertia();
+    let fixtures = 0;
+    let shortEdge = Infinity;
+    for (let f = body.getFixtureList(); f; f = f.getNext()) {
+      fixtures++;
+      const shape = f.getShape();
+      if (!shape.m_vertices) continue;
+      for (let i = 0; i < shape.m_count; i++) {
+        const a = shape.m_vertices[i];
+        const b = shape.m_vertices[(i + 1) % shape.m_count];
+        shortEdge = Math.min(shortEdge, Math.hypot(b.x - a.x, b.y - a.y));
+      }
+    }
+    let keHit = 0;
+    let armed = false;
+    let maxKe = 0;
+    let maxSpeed = 0;
+    for (let i = 0; i < 200; i++) {
+      step(1 / 60);
+      const ke = bodyKE(body) + bodyKE(pad);
+      const vb = body.getLinearVelocity();
+      const vp = pad.getLinearVelocity();
+      const speed = Math.max(Math.hypot(vb.x, vb.y), Math.hypot(vp.x, vp.y), Math.abs(body.getAngularVelocity()));
+      if (!armed && body.getPosition().y < 7) {
+        armed = true;
+        keHit = ke;
+      }
+      if (armed) {
+        maxKe = Math.max(maxKe, ke);
+        maxSpeed = Math.max(maxSpeed, speed);
+      }
+    }
+    lines.push(
+      "INFO " + name +
+      " fixtures " + fixtures +
+      " mass " + mass.toFixed(3) +
+      " I " + I.toExponential(2) +
+      " short " + shortEdge.toFixed(3) +
+      " keHit " + keHit.toFixed(1) +
+      " maxKe " + maxKe.toFixed(1) +
+      " ratio " + (maxKe / Math.max(keHit, 1e-4)).toFixed(1) +
+      " maxV " + maxSpeed.toFixed(1) +
+      " endY " + body.getPosition().y.toFixed(2)
+    );
+  }
+  dropSolid("sliver", [
+    { x: 14, y: 9 }, { x: 14.04, y: 9.01 }, { x: 20, y: 12 },
+  ]);
+  dropSolid("sliver-tip", [
+    { x: 15, y: 10 }, { x: 15.05, y: 10.02 }, { x: 18, y: 8.2 },
+  ], 0.4);
+  dropSolid("notch", [
+    { x: 13, y: 8 }, { x: 19, y: 8 }, { x: 19, y: 11 }, { x: 16.02, y: 11 },
+    { x: 16, y: 8.4 }, { x: 15.96, y: 11 }, { x: 13, y: 11 },
+  ]);
+  dropSolid("saw", [
+    { x: 12, y: 8 }, { x: 12.4, y: 11 }, { x: 12.7, y: 8.05 }, { x: 13.1, y: 10.8 },
+    { x: 13.4, y: 8.02 }, { x: 13.8, y: 11.2 }, { x: 14.1, y: 8.04 }, { x: 14.6, y: 10.5 },
+    { x: 15, y: 8.1 }, { x: 18, y: 8.2 }, { x: 18, y: 9.2 }, { x: 12, y: 9.1 },
+  ]);
+  testlog.style.display = "block";
+  testlog.textContent = lines.join("\n");
+  document.title = "PROBE";
+}
+
+function runTests() {
+  const lines = [];
+  function check(name, cond) {
+    lines.push((cond ? "PASS " : "FAIL ") + name);
+  }
+  try {
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 3.7, y: 2.5 }, { x: 5.2, y: 2.5 }, { x: 5.2, y: 4.8 }, { x: 3.7, y: 4.8 }, { x: 3.7, y: 2.5 },
+    ], "#3c7fd6");
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const b1 = ball.getPosition();
+    check("klotz moves ball", b1.x > 7.5 || stars.every((s) => s.got));
+
+    buildLevel(LEVELS["die-luecke"]);
+    let maxAlone = ball.getPosition().x;
+    doNudge(1);
+    for (let i = 0; i < 220; i++) {
+      step(1 / 60);
+      maxAlone = Math.max(maxAlone, ball.getPosition().x);
+    }
+    check("one nudge does not clear the gap", maxAlone < 18);
+
+    buildLevel(LEVELS["die-luecke"]);
+    commitStroke([
+      { x: 6.2, y: 5.1 }, { x: 9, y: 5.24 }, { x: 13, y: 5.02 },
+      { x: 17, y: 5.2 }, { x: 21, y: 5.05 }, { x: 24.4, y: 5.14 },
+    ], "#8d5a34");
+    const bridge = drawings.find((d) => d.kind === "wire");
+    check("wobbly bridge straightens", !!bridge && bridge.meta.outline.local.length === 2);
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    const by0 = bridge ? bridge.body.getPosition().y : -1;
+    doNudge(1);
+    let climbed = false;
+    for (let i = 0; i < 240; i++) {
+      step(1 / 60);
+      const p = ball.getPosition();
+      if (p.x > 12 && p.y > 4.6) climbed = true;
+    }
+    check("bridge stays up", !!bridge && bridge.body.getPosition().y > 3);
+    check("one nudge climbs the bridge", climbed);
+    lines.push("INFO bridge y0 " + by0.toFixed(2) + " y " + (bridge ? bridge.body.getPosition().y.toFixed(2) : "none") + " ball " + ball.getPosition().x.toFixed(2) + "," + ball.getPosition().y.toFixed(2) + " nudges " + stats.nudges);
+
+    buildLevel(LEVELS["der-nagel"]);
+    const before = ball.getPosition().x;
+    commitStroke([
+      { x: 0.7, y: 14.0 }, { x: 16.8, y: 14.0 }, { x: 16.8, y: 15.4 }, { x: 0.7, y: 15.4 }, { x: 0.7, y: 14.0 },
+    ], "#3c7fd6");
+    check("hammer pinned", drawings.some((d) => d.kind === "solid"));
+    for (let i = 0; i < 220; i++) step(1 / 60);
+    check("hammer shoves ball", ball.getPosition().x > before + 1.2 || stars.every((s) => s.got));
+
+    buildLevel(LEVELS["zwei-naegel"]);
+    commitStroke([
+      { x: 11.3, y: 4.72 }, { x: 20.7, y: 4.72 }, { x: 20.7, y: 5.38 }, { x: 11.3, y: 5.38 }, { x: 11.3, y: 4.72 },
+    ], "#c9854a");
+    const board = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const y0 = board ? board.body.getPosition().y : 0;
+    for (let i = 0; i < 150; i++) step(1 / 60);
+    check("two pins hold the board", !!board && board.body.getPosition().y > y0 - 0.8);
+
+    buildLevel(LEVELS["das-seil"]);
+    const pa = pins[0];
+    const pb = pins[1];
+    const aw = pinWorld(pa);
+    const bw = pinWorld(pb);
+    commitStroke([aw, bw], "#2b2b2b");
+    const rope = drawings.find((d) => d.kind === "rope");
+    check("rope created", !!rope);
+    for (let i = 0; i < 120; i++) step(1 / 60);
+    if (rope) {
+      const mid = rope.bodies[Math.floor(rope.bodies.length / 2)].getPosition();
+      check("rope sags", mid.y < Math.min(aw.y, bw.y) - 0.45);
+    } else lines.push("FAIL rope sags");
+
+    buildLevel(LEVELS["zuendung"]);
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    const rx = rockets[0].body.getPosition().x;
+    commitStroke([
+      { x: 5.4, y: 3.1 }, { x: 7.0, y: 3.1 }, { x: 7.0, y: 4.6 }, { x: 5.4, y: 4.6 }, { x: 5.4, y: 3.1 },
+    ], "#8d5a34");
+    for (let i = 0; i < 150; i++) step(1 / 60);
+    const rocket = rockets.find((r) => r.mode === "fly" || r.mode === "gone" || (r.body && r.body.getPosition().x > rx + 0.8));
+    check("rocket launches", !!rocket);
+
+    buildLevel(LEVELS["ein-strich"]);
+    commitStroke([
+      { x: 4.0, y: 2.3 }, { x: 6.45, y: 2.3 }, { x: 6.45, y: 5.4 }, { x: 4.0, y: 5.4 }, { x: 4.0, y: 2.3 },
+    ], "#3c7fd6");
+    for (let i = 0; i < 220; i++) step(1 / 60);
+    lines.push("INFO elegant ball " + ball.getPosition().x.toFixed(2) + " won " + won + " shapes " + stats.shapes + " nudges " + stats.nudges + " stars " + stars.filter((s) => s.got).length);
+    check("elegant flag", won && medals.elegant);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 10, y: 4 }, { x: 10, y: 6 }, { x: 8, y: 6 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const n = drawings.length;
+    eraseAt(9, 5);
+    check("erase removes drawing", drawings.length === n - 1);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const fall = [];
+    for (let i = 0; i <= 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      fall.push({ x: 16 + Math.cos(a) * 0.2, y: 10 + Math.sin(a) * 0.2 });
+    }
+    commitStroke(fall, "#7a4fbf");
+    const blob = drawings.find((d) => d.kind === "blob");
+    check("free circle is a body", !!blob);
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    check("free circle falls", blob && blob.body.getPosition().y < 8.5);
+
+    buildLevel(LEVELS.sandbox);
+    check("sandbox loads", !!ball && stars.length === 1);
+    buildLevel(LEVELS.werkstatt);
+    check("workshop has two stars and a rocket", stars.length === 2 && rockets.length === 1);
+    buildLevel(LEVELS.flaschenzug);
+    check("pulley level has basket and crate pins", pins.length >= 2);
+
+    function interiors(draw) {
+      return interiorAngles(draw.meta.outline.local).map((a) => a * 180 / Math.PI);
+    }
+    function near90(angs) {
+      return angs.every((a) => Math.abs(a - 90) < 2);
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 10, y: 3.82 }, { x: 12, y: 4.08 },
+      { x: 12.15, y: 5.5 }, { x: 11.9, y: 7 },
+      { x: 10, y: 7.16 }, { x: 8.1, y: 6.9 },
+      { x: 7.85, y: 5.4 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const quad = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const quadAng = quad ? interiors(quad) : [];
+    check("wobbly quad becomes a right rectangle", !!quad && quad.meta.outline.local.length === 4 && near90(quadAng));
+    lines.push("INFO quad corners " + (quad ? quad.meta.outline.local.length : 0) + " angles " + quadAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const tilt = 25 * Math.PI / 180;
+    const tc = Math.cos(tilt);
+    const ts = Math.sin(tilt);
+    const around = (x, y) => ({ x: 18 + x * tc - y * ts, y: 8 + x * ts + y * tc });
+    const tilted = [
+      around(-1.5, -0.7), around(0, -0.86), around(1.5, -0.66),
+      around(1.62, 0), around(1.45, 0.72),
+      around(0, 0.84), around(-1.55, 0.68), around(-1.62, 0),
+    ];
+    tilted.push(tilted[0]);
+    commitStroke(tilted, "#ef8b2c");
+    const tquad = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const tAng = tquad ? interiors(tquad) : [];
+    let edgeAng = 0;
+    if (tquad) {
+      const p = tquad.meta.outline.local;
+      let best = -1;
+      for (let i = 0; i < p.length; i++) {
+        const q = p[(i + 1) % p.length];
+        const len = Math.hypot(q.x - p[i].x, q.y - p[i].y);
+        if (len > best) {
+          best = len;
+          edgeAng = Math.atan2(q.y - p[i].y, q.x - p[i].x) * 180 / Math.PI;
+        }
+      }
+    }
+    let lineAng = Math.abs(edgeAng) % 180;
+    if (lineAng > 90) lineAng = 180 - lineAng;
+    const tiltOk = Math.min(Math.abs(lineAng - 25), Math.abs(lineAng - 65)) < 8;
+    check("tilted quad stays tilted and square", !!tquad && tquad.meta.outline.local.length === 4 && near90(tAng) && tiltOk);
+    lines.push("INFO tilt edge " + edgeAng.toFixed(1) + " angles " + tAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 14, y: 6 }, { x: 15.2, y: 6.32 }, { x: 16.4, y: 6.1 },
+      { x: 15.55, y: 7.15 }, { x: 15.1, y: 8.2 }, { x: 14.35, y: 7.05 }, { x: 14, y: 6 },
+    ], "#3e9a48");
+    const tri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const triAng = tri ? interiors(tri) : [];
+    check("wobbly triangle straightens to three corners", !!tri && tri.meta.outline.local.length === 3);
+    check("non-right triangle stays non-right", triAng.length === 3 && triAng.every((a) => Math.abs(a - 90) > 15));
+    lines.push("INFO tri angles " + triAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 20, y: 6 }, { x: 21.5, y: 6.4 }, { x: 23.1, y: 6.22 },
+      { x: 21.55, y: 7.05 }, { x: 20.3, y: 8.15 }, { x: 20.18, y: 7.05 }, { x: 20, y: 6 },
+    ], "#7a4fbf");
+    const right = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const rightAng = right ? interiors(right) : [];
+    check("near-right triangle snaps one corner to 90", !!right && right.meta.outline.local.length === 3 && rightAng.some((a) => Math.abs(a - 90) < 2));
+    lines.push("INFO right angles " + rightAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 6, y: 9 }, { x: 9, y: 9.15 }, { x: 10.5, y: 11.1 }, { x: 8.1, y: 13 }, { x: 5.3, y: 11.2 }, { x: 6, y: 9 },
+    ], "#d94b3a");
+    const pent = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("pentagon does not snap to a rectangle", !!pent && pent.meta.outline.local.length >= 5);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 4, y: 10 }, { x: 7, y: 11.6 }, { x: 10, y: 10.2 }, { x: 13, y: 12.1 }, { x: 16, y: 9.4 },
+    ], "#8d5a34");
+    const curve = drawings.find((d) => d.kind === "wire");
+    check("curved line stays curved", !!curve && curve.meta.outline.local.length >= 4);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 15, y: 3.2 }, { x: 18, y: 3.2 }, { x: 18, y: 4.8 }, { x: 15, y: 4.8 }, { x: 15, y: 3.2 },
+    ], "#3c7fd6");
+    for (let i = 0; i < 100; i++) step(1 / 60);
+    commitStroke([
+      { x: 15.3, y: 7 }, { x: 17.7, y: 7 }, { x: 17.7, y: 8.5 }, { x: 15.3, y: 8.5 }, { x: 15.3, y: 7 },
+    ], "#ef8b2c");
+    const stack = drawings.filter((d) => d.kind === "solid" && !d.preset);
+    const top = stack[stack.length - 1];
+    let flew = false;
+    for (let i = 0; i < 160; i++) {
+      step(1 / 60);
+      if (top && top.body.getPosition().y > 11) flew = true;
+    }
+    const vend = top ? top.body.getLinearVelocity() : { x: 0, y: 9 };
+    check("stacked boxes settle", !!top && !flew && Math.abs(vend.y) < 0.6 && top.body.getPosition().y < 7);
+    lines.push("INFO stack y " + (top ? top.body.getPosition().y.toFixed(2) : "none") + " vy " + vend.y.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 4.1, y: 4.2 }, { x: 6.3, y: 4.2 }, { x: 6.3, y: 5.7 }, { x: 4.1, y: 5.7 }, { x: 4.1, y: 4.2 },
+    ], "#8d5a34");
+    let ballFlew = false;
+    for (let i = 0; i < 140; i++) {
+      step(1 / 60);
+      if (ball.getPosition().y > 6) ballFlew = true;
+    }
+    const bv = ball.getLinearVelocity();
+    check("box on the ball does not launch it", !ballFlew && Math.abs(bv.y) < 1.5);
+    lines.push("INFO ball drop y " + ball.getPosition().y.toFixed(2) + " vy " + bv.y.toFixed(2));
+
+    const edited = levelFromDoc({
+      name: "Snap",
+      ball: [6, 2],
+      stars: [[24, 2]],
+      strokes: [
+        {
+          kind: "terrain",
+          color: "#3f8f55",
+          points: [[8, 4], [10, 3.8], [12, 4.1], [12.2, 6.9], [10, 7.2], [7.9, 6.8], [8, 4]],
+        },
+        {
+          kind: "terrain",
+          color: "#8d5a34",
+          points: [[2, 3], [6, 3.15], [10, 2.9], [14, 3.1]],
+        },
+      ],
+    });
+    const editorAng = edited.solids.length ? interiorAngles(edited.solids[0].pts).map((a) => a * 180 / Math.PI) : [];
+    check("editor quad snaps", edited.solids.length === 1 && edited.solids[0].pts.length === 4 && near90(editorAng));
+    check("editor line snaps", edited.wires.length === 1 && edited.wires[0].pts.length === 2);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    const starPos = stars[0].body.getPosition();
+    check("confetti has twenty pieces", confetti.length === 20);
+    check("confetti rectangles have two colors", confetti.length === 20 && confetti.every((c) => c.front !== c.back));
+    check("confetti rotates", confetti.every((c) => c.spinV !== 0 && c.flipV !== 0));
+    check("confetti starts at the star", confetti.every((c) => Math.hypot(c.ox - starPos.x, c.oy - starPos.y) < 0.02));
+    let turned = false;
+    const spin0 = confetti[0] ? confetti[0].spin : 0;
+    const flip0 = confetti[0] ? confetti[0].flip : 0;
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    if (confetti[0] && (Math.abs(confetti[0].spin - spin0) > 0.2 || Math.abs(confetti[0].flip - flip0) > 0.2)) turned = true;
+    check("confetti keeps turning", turned);
+
+    buildLevel(LEVELS.werkstatt);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    const used = new Set(confetti.map((c) => c.ox.toFixed(2) + "," + c.oy.toFixed(2)));
+    check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length === 20);
+    check("click on the left half pushes left", nudgeDirFromClick(5, 4.7) === -1);
+    check("click on the right half pushes right", nudgeDirFromClick(5, 5.2) === 1);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    for (let i = 0; i < 10; i++) step(1 / 60);
+    const half = ball.getPosition().x;
+    doNudge(nudgeDirFromClick(half, half - 0.05));
+    step(1 / 60);
+    check("left half click accelerates left", ball.getLinearVelocity().x < -2);
+    buildLevel(LEVELS["ein-klotz"]);
+    for (let i = 0; i < 10; i++) step(1 / 60);
+    const halfR = ball.getPosition().x;
+    doNudge(nudgeDirFromClick(halfR, halfR + 0.05));
+    step(1 / 60);
+    check("right half click accelerates right", ball.getLinearVelocity().x > 2);
+
+    function ring(cx, cy, r) {
+      const pts = [];
+      for (let i = 0; i <= 18; i++) {
+        const a = (i / 18) * Math.PI * 2;
+        const wob = 1 + 0.045 * Math.sin(a * 3);
+        pts.push({ x: cx + Math.cos(a) * r * wob, y: cy + Math.sin(a) * r * wob });
+      }
+      return pts;
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(12, 6, 0.72), "#3c7fd6");
+    const one = drawings.find((d) => d.kind === "roller");
+    const shape = one && one.body.getFixtureList().getShape();
+    check("wobbly circle becomes a roller", !!one && Math.abs(one.r - 0.72) < 0.08 && shape && shape.m_type === "circle");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const cradleR = 0.4;
+    const cradleY = 1.3 + cradleR + 0.04;
+    const xs = [8, 8.84, 9.68];
+    for (const x of xs) commitStroke(ring(x, cradleY, cradleR), "#ef8b2c");
+    const row = drawings.filter((d) => d.kind === "roller").sort((a, b) => a.body.getPosition().x - b.body.getPosition().x);
+    check("cradle has three rollers", row.length === 3);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    row[0].body.setLinearVelocity(V(5.5, 0));
+    row[0].body.setAwake(true);
+    for (let i = 0; i < 100; i++) step(1 / 60);
+    const v0 = row[0].body.getLinearVelocity().x;
+    const v2 = row[2].body.getLinearVelocity().x;
+    check("cradle passes the shove to the far ball", v2 > 2.2 && v2 > v0 + 1);
+    lines.push("INFO cradle v " + v0.toFixed(2) + " " + row[1].body.getLinearVelocity().x.toFixed(2) + " " + v2.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(3.5, 1.66, 0.34), "#7a4fbf");
+    const hitter = drawings.find((d) => d.kind === "roller");
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    const ballX0 = ball.getPosition().x;
+    hitter.body.setLinearVelocity(V(6, 0));
+    hitter.body.setAwake(true);
+    for (let i = 0; i < 80; i++) step(1 / 60);
+    check("roller gives its shove to the red ball", ball.getPosition().x > ballX0 + 1.2);
+
+    function cornerDepth(host, x, y) {
+      const meta = bodyMeta.get(host);
+      if (!meta || !meta.outline || !meta.outline.closed) return 0;
+      const worldPts = meta.outline.local.map((p) => {
+        const w = host.getWorldPoint(V(p.x, p.y));
+        return { x: w.x, y: w.y };
+      });
+      if (!pointInPoly(x, y, worldPts)) return 0;
+      let best = Infinity;
+      for (let i = 0; i < worldPts.length; i++) {
+        const a = worldPts[i];
+        const b = worldPts[(i + 1) % worldPts.length];
+        best = Math.min(best, distPointSeg(x, y, a.x, a.y, b.x, b.y));
+      }
+      return best;
+    }
+    function pairOverlap(a, b) {
+      const ca = bodyCorners(a);
+      const cb = bodyCorners(b);
+      let worst = 0;
+      for (const p of ca) worst = Math.max(worst, cornerDepth(b, p.x, p.y));
+      for (const p of cb) worst = Math.max(worst, cornerDepth(a, p.x, p.y));
+      return worst;
+    }
+    function bodyCorners(body) {
+      const meta = bodyMeta.get(body);
+      return meta.outline.local.map((p) => {
+        const w = body.getWorldPoint(V(p.x, p.y));
+        return { x: w.x, y: w.y };
+      });
+    }
+    function floorSink(body) {
+      let worst = 0;
+      for (const p of bodyCorners(body)) {
+        if (p.y < 1.3) worst = Math.max(worst, 1.3 - p.y);
+      }
+      return worst;
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 1.5, 0.16), "#2b2b2b");
+    const nail = pins.find((p) => p.userMade);
+    check("small circle on the floor is a ground nail", !!nail && nail.body === ground);
+    check("ground nail is not a loose ball", !drawings.some((d) => d.kind === "blob" || d.kind === "roller"));
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 5, 0.16), "#7a4fbf");
+    check("small circle in the air stays loose", drawings.some((d) => d.kind === "blob") && !pins.some((p) => p.userMade));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 1.5, 0.16), "#2b2b2b");
+    const floorNail = pins.find((p) => p.userMade);
+    const hung = makeBox({ x: 9.3, y: 3.4, hw: 0.45, hh: 0.45, color: "#8d5a34" });
+    const boxPin = rememberPin(9.3, 3.4, hung, true);
+    const anchorRope = spawnRope(floorNail, boxPin, [{ x: 8, y: 1.5 }, { x: 9.3, y: 3.4 }], "#3c7fd6");
+    check("rope anchors to a floor nail", !!anchorRope && anchorRope.kind === "rope");
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    const nailAt = pinWorld(floorNail);
+    world.setGravity(V(0, 0));
+    hung.setTransform(V(nailAt.x + 3, nailAt.y + 2.4), 0);
+    hung.setLinearVelocity(V(0, 0));
+    hung.setAngularVelocity(0);
+    hung.setAwake(true);
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const pulledIn = Math.hypot(hung.getPosition().x - nailAt.x, hung.getPosition().y - nailAt.y);
+    world.setGravity(V(0, -24));
+    check("floor nail pulls the box back", pulledIn < 2.4);
+    lines.push("INFO anchor dist " + pulledIn.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const wide = makeBox({ x: 8, y: 5, hw: 1.6, hh: 0.9, color: "#3c7fd6" });
+    for (let i = 0; i < 8; i++) step(1 / 60);
+    const boxMid = wide.getPosition();
+    check("the middle of a box is a drag", pressKind(boxMid.x, boxMid.y) === "drag");
+    check("empty paper is a stroke", pressKind(boxMid.x + 4, boxMid.y + 3) === "draw");
+    check("press on the ball is a nudge", pressKind(ball.getPosition().x, ball.getPosition().y) === "nudge");
+    const inkBefore = stats.shapes;
+    check("press in the middle grabs at once", beginDrag(boxMid.x, boxMid.y));
+    moveDrag(boxMid.x + 1.4, boxMid.y);
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    endDrag();
+    check("a grab does not leave a stroke", stats.shapes === inkBefore && !playDrag);
+    const quick = makeBox({ x: 22, y: 8, hw: 0.4, hh: 0.4, color: "#ef8b2c" });
+    check("fast grab starts", beginDrag(22, 8));
+    moveDrag(28, 11);
+    step(1 / 60);
+    const qp = quick.getPosition();
+    lines.push("INFO fast drag " + qp.x.toFixed(2) + "," + qp.y.toFixed(2));
+    check("a dragged box keeps up with a fast cursor", Math.hypot(qp.x - 28, qp.y - 11) < 0.35);
+    endDrag();
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    const geoA = snapDrawPoint({ x: 8.21, y: 4.19 });
+    const geoB = snapDrawPoint({ x: 10.18, y: 4.22 });
+    const geoDiag = snapDrawPoint({ x: 8.74, y: 4.74 });
+    check("geodreieck snaps a stroke onto the half-meter grid", geoA.x === 8 && geoA.y === 4 && geoB.x === 10 && geoB.y === 4);
+    check("a diagonal lands on a grid point", geoDiag.x === 8.5 && geoDiag.y === 4.5);
+    const walk = [];
+    for (let x = 8; x <= 10; x += 0.5) walk.push({ x, y: 4 });
+    for (let y = 4.5; y <= 6; y += 0.5) walk.push({ x: 10, y });
+    for (let x = 9.5; x >= 8; x -= 0.5) walk.push({ x, y: 6 });
+    for (let y = 5.5; y >= 4; y -= 0.5) walk.push({ x: 8, y });
+    commitStroke(walk, "#3c7fd6");
+    const gridBox = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("a grid square becomes a body", !!gridBox && gridBox.meta.outline.local.length === 4);
+    const geoHold = makeBox({ x: 22.2, y: 12.2, hw: 0.4, hh: 0.4, color: "#ef8b2c" });
+    check("grab uses the raw cursor while the geodreieck is on", pressKind(geoHold.getPosition().x, geoHold.getPosition().y) === "drag");
+    check("empty paper still draws while the geodreieck is on", pressKind(26.2, 14.2) === "draw");
+    geoSnap = false;
+    const freePt = snapDrawPoint({ x: 8.21, y: 4.19 });
+    check("without the geodreieck the point stays put", freePt.x === 8.21 && freePt.y === 4.19);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const lower = makeBox({ x: 14, y: 2.1, hw: 0.75, hh: 0.75, color: "#3c7fd6" });
+    const upper = makeBox({ x: 14, y: 6.4, hw: 0.75, hh: 0.75, color: "#ef8b2c" });
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    const shapesBefore = stats.shapes;
+    const nudgesBefore = stats.nudges;
+    check("drag can grab the upper box", beginDrag(upper.getPosition().x, upper.getPosition().y));
+    let worstHit = 0;
+    for (let i = 0; i < 120; i++) {
+      moveDrag(14, 2.1);
+      step(1 / 60);
+      worstHit = Math.max(worstHit, pairOverlap(upper, lower), floorSink(upper), floorSink(lower));
+    }
+    check("drag does not push boxes through each other or the floor", worstHit < 0.08);
+    lines.push("INFO drag overlap " + worstHit.toFixed(3));
+    endDrag();
+    check("drag counts as neither shape nor nudge", stats.shapes === shapesBefore && stats.nudges === nudgesBefore);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const base = makeBox({ x: 20, y: 2.1, hw: 0.7, hh: 0.7, color: "#3e9a48" });
+    const pile = makeBox({ x: 24, y: 6, hw: 0.7, hh: 0.7, color: "#e6b423" });
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    beginDrag(pile.getPosition().x, pile.getPosition().y);
+    for (let i = 0; i < 140; i++) {
+      moveDrag(base.getPosition().x, base.getPosition().y + 1.7);
+      step(1 / 60);
+    }
+    endDrag();
+    for (let i = 0; i < 160; i++) step(1 / 60);
+    const stackedGap = pile.getPosition().y - base.getPosition().y;
+    const stackedOverlap = pairOverlap(pile, base);
+    check("released box stacks on the other", stackedGap > 1.2 && stackedGap < 2.2 && stackedOverlap < 0.08 && Math.abs(pile.getPosition().x - base.getPosition().x) < 0.45);
+    lines.push("INFO stack gap " + stackedGap.toFixed(2) + " overlap " + stackedOverlap.toFixed(3));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const slab = makeBox({ x: 10, y: 6, hw: 1.2, hh: 0.35, color: "#3c7fd6" });
+    for (let i = 0; i < 5; i++) step(1 / 60);
+    const grip = slab.getWorldPoint(V(1.0, 0.22));
+    check("corner grab starts", beginDrag(grip.x, grip.y));
+    for (let i = 0; i < 300; i++) {
+      moveDrag(grip.x, grip.y);
+      step(1 / 60);
+    }
+    const held = slab.getWorldPoint(V(1.0, 0.22));
+    const com = slab.getPosition();
+    const hangX = com.x - held.x;
+    const hangY = com.y - held.y;
+    check("grab point stays under the cursor", Math.hypot(held.x - grip.x, held.y - grip.y) < 0.25);
+    check("weight hangs below the grab", hangY < -0.85 && Math.abs(hangX) < 0.16);
+    lines.push("INFO hang " + hangX.toFixed(2) + "," + hangY.toFixed(2));
+    endDrag();
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const pusher = makeBox({ x: 3.1, y: 2.3, hw: 0.4, hh: 0.4, color: "#d94b3a" });
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    const shoveX0 = ball.getPosition().x;
+    beginDrag(pusher.getPosition().x, pusher.getPosition().y);
+    for (let i = 0; i < 120; i++) {
+      const bp = ball.getPosition();
+      moveDrag(bp.x, bp.y);
+      step(1 / 60);
+    }
+    lines.push("INFO shove ball " + ball.getPosition().x.toFixed(2) + " box " + pusher.getPosition().x.toFixed(2) + " trick " + stats.dragTrick);
+    check("a dragged body can shove the ball", ball.getPosition().x > shoveX0 + 0.35);
+    check("dragging a body into the ball is a trick", stats.dragTrick);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    check("a trick still solves the level", won);
+    check("a trick skips confetti", confetti.length === 0);
+    endDrag();
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const rested = makeBox({ x: 18, y: 3.2, hw: 0.4, hh: 0.4, color: "#3e9a48" });
+    for (let i = 0; i < 15; i++) step(1 / 60);
+    beginDrag(rested.getPosition().x, rested.getPosition().y);
+    for (let i = 0; i < 30; i++) {
+      moveDrag(18, 3.4);
+      step(1 / 60);
+    }
+    endDrag();
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    check("a settled drag is not yet a trick", !stats.dragTrick);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    check("a settled drag still gets confetti", won && confetti.length === 20);
+
+    ensureCradle();
+    for (let i = 0; i < 40; i++) stepCradle(1 / 60);
+    const outer = cradleBalls[0];
+    const far = cradleBalls[cradleBalls.length - 1];
+    const mid = cradleBalls[2];
+    check("cradle drag grabs an outer ball", beginCradleDrag(outer));
+    const pulled = cradlePose(outer, -0.95);
+    let cradleOverlap = 0;
+    for (let i = 0; i < 50; i++) {
+      cradleDrag.goal = pulled;
+      stepCradle(1 / 60);
+      for (let a = 0; a < cradleBalls.length; a++) {
+        for (let b = a + 1; b < cradleBalls.length; b++) {
+          const pa = cradleBalls[a].body.getPosition();
+          const pb = cradleBalls[b].body.getPosition();
+          const gap = Math.hypot(pa.x - pb.x, pa.y - pb.y) - cradleBalls[a].r - cradleBalls[b].r;
+          if (gap < -cradleOverlap) cradleOverlap = -gap;
+        }
+      }
+    }
+    const raised = outer.body.getPosition().x < outer.anchorX - 0.35;
+    endCradleDrag();
+    const released = Math.hypot(outer.body.getLinearVelocity().x, outer.body.getLinearVelocity().y);
+    let farSwing = 0;
+    let midSwing = 0;
+    for (let i = 0; i < 220; i++) {
+      stepCradle(1 / 60);
+      farSwing = Math.max(farSwing, Math.abs(far.body.getPosition().x - far.anchorX));
+      midSwing = Math.max(midSwing, Math.abs(mid.body.getPosition().x - mid.anchorX));
+      for (let a = 0; a < cradleBalls.length; a++) {
+        for (let b = a + 1; b < cradleBalls.length; b++) {
+          const pa = cradleBalls[a].body.getPosition();
+          const pb = cradleBalls[b].body.getPosition();
+          const gap = Math.hypot(pa.x - pb.x, pa.y - pb.y) - 0.4;
+          if (gap < -cradleOverlap) cradleOverlap = -gap;
+        }
+      }
+    }
+    check("outer cradle ball can be pulled aside", raised);
+    check("released cradle ball starts from rest", released < 0.35);
+    check("map cradle sends the swing to the far ball", farSwing > 0.42 && midSwing < farSwing * 0.55);
+    check("cradle balls do not overlap", cradleOverlap < 0.06);
+    lines.push("INFO cradle swing far " + farSwing.toFixed(2) + " mid " + midSwing.toFixed(2) + " overlap " + cradleOverlap.toFixed(3));
+  } catch (err) {
+    lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
+  }
+  const fail = lines.some((line) => line.startsWith("FAIL"));
+  testlog.style.display = "block";
+  testlog.textContent = lines.join("\n");
+  document.title = fail ? "FAIL" : "PASS";
+}
+
+window.__crayon = {
+  start: (id) => buildLevel(LEVELS[id]),
+  stroke: (pts) => commitStroke(pts),
+  erase: eraseAt,
+  step: (sec) => { for (let t = 0; t < sec; t += 1 / 60) step(1 / 60); },
+  ball: () => ball && ball.getPosition(),
+  levels: () => Object.keys(LEVELS),
+};
+
+boot();
