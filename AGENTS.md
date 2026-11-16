@@ -18,6 +18,7 @@
 - **Verankern, Farbe:** Ein verankerter Körper nimmt die Farbe des Bodens an, an dem er direkt oder über die Kette hängt. Der Verbindungsstrich bleibt in der ursprünglichen Gegenstandsfarbe. Nach dem Lösen bekommen der Körper und seine Abhängigen ihre eigene Farbe zurück.
 - **Nagel-Zug:** Ein an einem Nagel befestigter Körper bleibt beim Ziehen am Nagel und dreht sich nur um ihn. Sitzt er an zwei Nägeln (Schloss), bewegt er sich nicht.
 - **Nagel-Motor:** Ein kurzer Linksklick auf einen Nagel schaltet zyklisch: aus (freier Drehpunkt) → links (gegen den Uhrzeigersinn) → rechts (im Uhrzeigersinn) → aus. Die Drehzahl ist 90°/s, also 4 s pro Umdrehung. Der Zustand ist als Pfeil am Nagel sichtbar. Der Motor zählt nicht als Tricksen. Schwellwerte stehen als `NAIL_*`-Konstanten in `src/game.js`.
+- **Abprall:** Eine Kugel prallt von Flächen und festen Körpern gedämpft ab (Restitution `BALL_RESTITUTION`, 0,4). Kugel gegen Kugel bleibt fast elastisch. Drähte bleiben unelastisch, damit Stege und Rampen befahrbar bleiben. Unter `VELOCITY_THRESHOLD` (2,2 m/s, passend zu g=24) bleibt der Stoß unelastisch, damit die Kugel auf dem Boden zur Ruhe kommt und nicht zittert.
 - Schwellwerte fürs Verankern stehen als `ANCHOR_*`-Konstanten in `src/game.js`.
 
 ## Quellen und Build
