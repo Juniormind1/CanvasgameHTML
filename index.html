@@ -1419,17 +1419,11 @@ function clampDragGoal(body, goal) {
   let cy = origin.y;
   let dx = goal.x - cx;
   let dy = goal.y - cy;
-  let len = Math.hypot(dx, dy);
-  const maxStep = 0.32;
-  if (len > maxStep) {
-    dx *= maxStep / len;
-    dy *= maxStep / len;
-  }
   // Other bodies stop 1.2 cm short. The quest ball is pressed 5 cm so the
   // contact solver actually shoves it; that shove is the drag trick.
   const skinOut = 0.012;
   const skinBall = -0.05;
-  for (let slide = 0; slide < 2; slide++) {
+  for (let slide = 0; slide < 4; slide++) {
     const seg = Math.hypot(dx, dy);
     if (seg < 1e-4) break;
     const dirx = dx / seg;
@@ -1476,6 +1470,24 @@ function chaseDrag() {
     x: playDrag.goal.x + offx,
     y: playDrag.goal.y + offy,
   });
+  playDrag.joint.setTarget(V(clamped.x - offx, clamped.y - offy));
+}
+
+function snapDrag() {
+  if (!playDrag || !playDrag.body) return;
+  const body = playDrag.body;
+  const anchor = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+  const com = body.getPosition();
+  const offx = com.x - anchor.x;
+  const offy = com.y - anchor.y;
+  const clamped = clampDragGoal(body, {
+    x: playDrag.goal.x + offx,
+    y: playDrag.goal.y + offy,
+  });
+  body.setTransform(V(clamped.x, clamped.y), body.getAngle());
+  const spin = body.getAngularVelocity();
+  body.setLinearVelocity(V(-spin * offy, spin * offx));
+  body.setAwake(true);
   playDrag.joint.setTarget(V(clamped.x - offx, clamped.y - offy));
 }
 
@@ -1750,6 +1762,7 @@ function step(dt) {
     for (const rocket of rockets) rocket.armed = true;
   }
   world.step(dt, 10, 8);
+  snapDrag();
   handleContacts();
   stepDragFresh(dt);
   for (const rocket of rockets) {
@@ -3349,6 +3362,14 @@ function runTests() {
     for (let i = 0; i < 20; i++) step(1 / 60);
     endDrag();
     check("a grab does not leave a stroke", stats.shapes === inkBefore && !playDrag);
+    const quick = makeBox({ x: 22, y: 8, hw: 0.4, hh: 0.4, color: "#ef8b2c" });
+    check("fast grab starts", beginDrag(22, 8));
+    moveDrag(28, 11);
+    step(1 / 60);
+    const qp = quick.getPosition();
+    lines.push("INFO fast drag " + qp.x.toFixed(2) + "," + qp.y.toFixed(2));
+    check("a dragged box keeps up with a fast cursor", Math.hypot(qp.x - 28, qp.y - 11) < 0.35);
+    endDrag();
 
     buildLevel(LEVELS["ein-klotz"]);
     const lower = makeBox({ x: 14, y: 2.1, hw: 0.75, hh: 0.75, color: "#3c7fd6" });
