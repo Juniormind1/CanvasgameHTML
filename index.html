@@ -109,6 +109,11 @@ let pointer = null;
 let lastTap = 0;
 let paper = null;
 let confetti = [];
+let playDrag = null;
+let cradleWorld = null;
+let cradleGround = null;
+let cradleBalls = [];
+let cradleDrag = null;
 
 const CONFETTI_PAIRS = [
   ["#e23b32", "#f6e27a"],
@@ -838,6 +843,7 @@ function resetCam() {
 function V(x, y) { return planck.Vec2(x, y); }
 
 function clearWorld() {
+  endDrag();
   world = null;
   ground = null;
   ball = null;
@@ -940,7 +946,8 @@ function hostAt(x, y) {
   for (let i = geometry.length - 1; i >= 0; i--) {
     const g = geometry[i];
     if (g.closed) {
-      if (distToPoly(x, y, g.pts) <= 0.2) return ground;
+      // The center of a tiny loop sits just above the surface it is drawn on.
+      if (distToPoly(x, y, g.pts) <= 0.48) return ground;
     } else if (distToWire(x, y, g.pts) <= 0.24) return ground;
   }
   for (const r of rockets) {
@@ -1351,6 +1358,161 @@ function eraseAt(x, y) {
   return false;
 }
 
+function drawingAt(x, y) {
+  for (let i = drawings.length - 1; i >= 0; i--) {
+    const d = drawings[i];
+    if (d.kind === "rope" || !d.body || !d.meta) continue;
+    if (!d.body.isDynamic()) continue;
+    if (containsMeta(d.meta, x, y)) return d;
+  }
+  return null;
+}
+
+function supportAlong(body, dx, dy) {
+  const len = Math.hypot(dx, dy) || 1;
+  const wx = dx / len;
+  const wy = dy / len;
+  const ang = body.getAngle();
+  const c = Math.cos(ang);
+  const s = Math.sin(ang);
+  const lx = c * wx + s * wy;
+  const ly = -s * wx + c * wy;
+  let best = 0.02;
+  for (let f = body.getFixtureList(); f; f = f.getNext()) {
+    const shape = f.getShape();
+    if (shape.m_type === "circle") {
+      const p = shape.m_p || { x: 0, y: 0 };
+      best = Math.max(best, p.x * lx + p.y * ly + shape.m_radius);
+    } else if (shape.m_vertices && shape.m_count) {
+      for (let i = 0; i < shape.m_count; i++) {
+        const v = shape.m_vertices[i];
+        best = Math.max(best, v.x * lx + v.y * ly);
+      }
+    }
+  }
+  return best;
+}
+
+function rayBlock(body, x1, y1, x2, y2) {
+  let best = null;
+  const dirx = x2 - x1;
+  const diry = y2 - y1;
+  world.rayCast(V(x1, y1), V(x2, y2), (fixture, point, normal, fraction) => {
+    const other = fixture.getBody();
+    if (other === body || fixture.isSensor()) return -1;
+    const meta = bodyMeta.get(other);
+    if (meta && (meta.kind === "star" || meta.kind === "rope")) return -1;
+    const nx = normal.x;
+    const ny = normal.y;
+    if (nx * dirx + ny * diry > 0) return -1;
+    if (!best || fraction < best.fraction) best = { fraction, nx, ny };
+    return Math.max(fraction, 1e-5);
+  });
+  return best;
+}
+
+function clampDragGoal(body, goal) {
+  const origin = body.getPosition();
+  let cx = origin.x;
+  let cy = origin.y;
+  let dx = goal.x - cx;
+  let dy = goal.y - cy;
+  let len = Math.hypot(dx, dy);
+  const maxStep = 0.32;
+  if (len > maxStep) {
+    dx *= maxStep / len;
+    dy *= maxStep / len;
+  }
+  const skin = 0.012;
+  for (let slide = 0; slide < 2; slide++) {
+    const seg = Math.hypot(dx, dy);
+    if (seg < 1e-4) break;
+    const dirx = dx / seg;
+    const diry = dy / seg;
+    const support = supportAlong(body, dirx, diry);
+    const cast = support + seg + skin;
+    const hit = rayBlock(body, cx, cy, cx + dirx * cast, cy + diry * cast);
+    if (!hit) {
+      cx += dx;
+      cy += dy;
+      break;
+    }
+    const allow = hit.fraction * cast - support - skin;
+    const stepLen = Math.min(seg, Math.max(allow, 0));
+    if (allow < 0) {
+      cx += dirx * allow;
+      cy += diry * allow;
+    } else {
+      cx += dirx * stepLen;
+      cy += diry * stepLen;
+    }
+    if (allow >= seg - 1e-4) break;
+    const nx = hit.nx;
+    const ny = hit.ny;
+    const leftx = dx - dirx * Math.max(allow, 0);
+    const lefty = dy - diry * Math.max(allow, 0);
+    const into = leftx * nx + lefty * ny;
+    if (into >= 0) break;
+    dx = leftx - nx * into;
+    dy = lefty - ny * into;
+  }
+  return { x: cx, y: cy };
+}
+
+function chaseDrag() {
+  if (!playDrag || !world || !playDrag.joint) return;
+  const goal = clampDragGoal(playDrag.body, playDrag.goal);
+  playDrag.joint.setTarget(V(goal.x, goal.y));
+}
+
+function beginDrag(x, y) {
+  if (!world || world.isLocked()) return false;
+  const draw = drawingAt(x, y);
+  if (!draw) return false;
+  endDrag();
+  const body = draw.body;
+  const wasBullet = body.isBullet();
+  body.setBullet(true);
+  body.setAwake(true);
+  const mass = Math.max(0.2, body.getMass());
+  const p = body.getPosition();
+  const joint = world.createJoint(new planck.MouseJoint({
+    bodyA: ground,
+    bodyB: body,
+    target: V(p.x, p.y),
+    maxForce: mass * 160,
+    frequencyHz: 7,
+    dampingRatio: 1,
+    collideConnected: true,
+  }));
+  playDrag = {
+    body,
+    joint,
+    wasBullet,
+    goal: { x, y },
+  };
+  return true;
+}
+
+function moveDrag(x, y) {
+  if (!playDrag) return;
+  playDrag.goal.x = x;
+  playDrag.goal.y = y;
+}
+
+function endDrag() {
+  if (!playDrag) return;
+  const drag = playDrag;
+  playDrag = null;
+  if (!world || !drag.joint) return;
+  world.destroyJoint(drag.joint);
+  if (!drag.body) return;
+  drag.body.setLinearVelocity(V(0, 0));
+  drag.body.setAngularVelocity(0);
+  drag.body.setBullet(drag.wasBullet);
+  drag.body.setAwake(true);
+}
+
 function nudgeDirFromClick(ballX, clickX) {
   return clickX >= ballX ? 1 : -1;
 }
@@ -1542,6 +1704,7 @@ function handleContacts() {
 
 function step(dt) {
   if (!world) return;
+  chaseDrag();
   simTime += dt;
   if (simTime > 0.35) {
     for (const rocket of rockets) rocket.armed = true;
@@ -1973,36 +2136,282 @@ function nextLevelId() {
   return null;
 }
 
-function renderMap() {
-  label("Crayon", 48, 36, 54);
-  label("Male die Welt. Die rote Kugel muss jeden Stern berühren.", 48, 100, 20, "#5c4632");
-  label("Sterne " + starCount() + " / " + ORDER.length, 48, 134, 18, "#8a5a20");
-  const owned = starCount();
-  const cols = viewW < 860 ? 1 : 2;
-  const gap = 16;
+function ensureCradle() {
+  if (cradleWorld) return;
+  cradleWorld = new planck.World(V(0, -24));
+  cradleGround = cradleWorld.createBody();
+  cradleWorld.on("pre-solve", (contact) => {
+    contact.setRestitution(0.98);
+  });
+  const n = 5;
+  const r = 0.2;
+  const gap = 0.001;
+  const len = 1.15;
+  const anchorY = 0;
+  for (let i = 0; i < n; i++) {
+    const x = (i - (n - 1) / 2) * (r * 2 + gap);
+    const anchor = cradleWorld.createBody({ position: V(x, anchorY) });
+    const body = cradleWorld.createDynamicBody({
+      position: V(x, anchorY - len),
+      bullet: true,
+      linearDamping: 0.012,
+      angularDamping: 0.02,
+    });
+    body.createFixture(new planck.Circle(r), {
+      density: 3.2,
+      friction: 0.01,
+      restitution: 0,
+    });
+    cradleWorld.createJoint(new planck.RevoluteJoint({
+      bodyA: anchor,
+      bodyB: body,
+      localAnchorA: V(0, 0),
+      localAnchorB: V(0, len),
+      collideConnected: false,
+    }));
+    cradleBalls.push({
+      body,
+      anchorX: x,
+      anchorY,
+      len,
+      r,
+      side: i === 0 ? -1 : i === n - 1 ? 1 : 0,
+    });
+  }
+}
+
+function cradlePose(rec, ang) {
+  return {
+    x: rec.anchorX + Math.sin(ang) * rec.len,
+    y: rec.anchorY - Math.cos(ang) * rec.len,
+  };
+}
+
+function mapFrame() {
+  const cols = (viewW >= 860 || (viewW >= 700 && viewH < 780)) ? 2 : 1;
   const margin = viewW < 520 ? 16 : 48;
-  const cardW = cols === 1 ? Math.min(460, viewW - margin * 2) : Math.min(360, (viewW - margin * 2 - gap) / 2);
+  const colGap = 16;
+  const cardW = cols === 1 ? Math.min(460, viewW - margin * 2) : Math.min(360, (viewW - margin * 2 - colGap) / 2);
   const rows = Math.ceil(ISLANDS.length / cols);
-  const avail = viewH - 168 - 78;
-  const cardH = Math.max(118, Math.min(156, Math.floor((avail - (rows - 1) * gap) / rows)));
+  const buttonTop = viewH - 58;
+  const limit = buttonTop - 8;
+  const compact = viewH < 720 || viewW < 520;
+  const titleY = compact ? 16 : 28;
+  const titleSize = compact ? 36 : 48;
+  const subY = titleY + (compact ? 40 : 56);
+  const wrapSub = viewW < 720;
+  const starY = subY + (wrapSub ? 40 : 0) + (compact ? 22 : 28);
+  const headerBottom = starY + 24;
+  const gridRight = margin + cols * cardW + (cols - 1) * colGap;
+  const sideRoom = viewW - gridRight;
+  const rowGap = 10;
+  const useSide = sideRoom >= 300 && viewH >= 640;
+  if (useSide) {
+    const cardsTop = Math.max(168, headerBottom);
+    const avail = limit - cardsTop;
+    let cardH = Math.floor((avail - (rows - 1) * rowGap) / rows);
+    cardH = Math.max(112, Math.min(156, cardH));
+    const cradle = {
+      x: gridRight + 20,
+      y: cardsTop,
+      w: Math.min(460, sideRoom - 36),
+      h: Math.min(400, Math.max(180, cardH * rows + rowGap * (rows - 1))),
+    };
+    return { cols, margin, colGap, cardW, rows, cardsTop, cardH, rowGap, cradle, side: true, titleY, titleSize, subY, starY, buttonTop, gridRight };
+  }
+  const minCard = 112;
+  const need = rows * minCard + (rows - 1) * rowGap;
+  let cradleH = Math.min(compact ? 124 : 158, Math.max(88, limit - need - headerBottom));
+  let cardsTop = headerBottom + cradleH + 6;
+  let avail = limit - cardsTop;
+  let cardH = Math.floor((avail - (rows - 1) * rowGap) / rows);
+  if (cardH < minCard) {
+    cradleH = Math.max(78, limit - need - headerBottom);
+    cardsTop = headerBottom + cradleH + 6;
+    avail = limit - cardsTop;
+    cardH = Math.floor((avail - (rows - 1) * rowGap) / rows);
+  }
+  cardH = Math.max(90, Math.min(156, cardH));
+  const cradle = {
+    x: margin,
+    y: headerBottom,
+    w: Math.max(160, Math.min(viewW - margin * 2, cardW * cols + colGap * (cols - 1))),
+    h: Math.max(78, cradleH),
+  };
+  return { cols, margin, colGap, cardW, rows, cardsTop, cardH, rowGap, cradle, side: false, titleY, titleSize, subY, starY, buttonTop, gridRight };
+}
+
+function cradleLayout() {
+  ensureCradle();
+  const frame = mapFrame();
+  const band = frame.cradle;
+  const r = cradleBalls[0].r;
+  const len = cradleBalls[0].len;
+  const span = cradleBalls[cradleBalls.length - 1].anchorX - cradleBalls[0].anchorX;
+  const worldW = span + (r + len * 0.92) * 2;
+  const worldH = len + r * 2 + 0.18;
+  const scale = Math.max(8, Math.min((band.w - 12) / worldW, (band.h - 28) / worldH));
+  return {
+    frame,
+    band,
+    scale,
+    originX: band.x + band.w / 2,
+    originY: band.y + 22,
+  };
+}
+
+function cradleToScreen(x, y, lay) {
+  const box = lay || cradleLayout();
+  return {
+    x: box.originX + x * box.scale,
+    y: box.originY - y * box.scale,
+  };
+}
+
+function screenToCradle(sx, sy) {
+  const lay = cradleLayout();
+  return {
+    x: (sx - lay.originX) / lay.scale,
+    y: (lay.originY - sy) / lay.scale,
+  };
+}
+
+function cradleArcGoal(rec, x, y) {
+  let ang = Math.atan2(x - rec.anchorX, -(y - rec.anchorY));
+  const maxA = 1.15;
+  if (rec.side < 0) ang = clamp(ang, -maxA, -0.02);
+  else ang = clamp(ang, 0.02, maxA);
+  return cradlePose(rec, ang);
+}
+
+function beginCradleDrag(rec) {
+  if (!rec || !rec.side || !cradleWorld || cradleWorld.isLocked()) return false;
+  endCradleDrag();
+  const body = rec.body;
+  const p = body.getPosition();
+  const joint = cradleWorld.createJoint(new planck.MouseJoint({
+    bodyA: cradleGround,
+    bodyB: body,
+    target: V(p.x, p.y),
+    maxForce: Math.max(30, body.getMass() * 260),
+    frequencyHz: 8,
+    dampingRatio: 1,
+    collideConnected: false,
+  }));
+  cradleDrag = { rec, joint, goal: { x: p.x, y: p.y } };
+  return true;
+}
+
+function endCradleDrag() {
+  if (!cradleDrag) return;
+  const drag = cradleDrag;
+  cradleDrag = null;
+  if (!cradleWorld || !drag.joint) return;
+  cradleWorld.destroyJoint(drag.joint);
+  drag.rec.body.setLinearVelocity(V(0, 0));
+  drag.rec.body.setAngularVelocity(0);
+  drag.rec.body.setAwake(true);
+}
+
+function stepCradle(dt) {
+  if (!cradleWorld) return;
+  if (cradleDrag && cradleDrag.joint) {
+    const goal = cradleArcGoal(cradleDrag.rec, cradleDrag.goal.x, cradleDrag.goal.y);
+    cradleDrag.joint.setTarget(V(goal.x, goal.y));
+  }
+  cradleWorld.step(dt, 12, 8);
+}
+
+function cradleBallAt(sx, sy) {
+  const lay = cradleLayout();
+  let best = null;
+  let bestD = 1e9;
+  for (const rec of cradleBalls) {
+    if (!rec.side) continue;
+    const p = rec.body.getPosition();
+    const s = cradleToScreen(p.x, p.y, lay);
+    const hit = Math.max(rec.r * lay.scale * 1.4, 18);
+    const d = Math.hypot(s.x - sx, s.y - sy);
+    if (d <= hit && d < bestD) {
+      best = rec;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
+function drawCradle() {
+  const lay = cradleLayout();
+  const band = lay.band;
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.fillStyle = "rgba(255,252,240,0.55)";
+  ctx.fill();
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  label("Zieh eine äußere Kugel zur Seite", band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
+  const first = cradleBalls[0];
+  const last = cradleBalls[cradleBalls.length - 1];
+  const a0 = cradleToScreen(first.anchorX, first.anchorY, lay);
+  const a1 = cradleToScreen(last.anchorX, last.anchorY, lay);
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(a0.x - 10, a0.y);
+  ctx.lineTo(a1.x + 10, a1.y);
+  ctx.stroke();
+  for (const rec of cradleBalls) {
+    const p = rec.body.getPosition();
+    const anchor = cradleToScreen(rec.anchorX, rec.anchorY, lay);
+    const s = cradleToScreen(p.x, p.y, lay);
+    ctx.strokeStyle = "#8d5a34";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(anchor.x, anchor.y);
+    ctx.lineTo(s.x, s.y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, Math.max(5, rec.r * lay.scale), 0, Math.PI * 2);
+    ctx.fillStyle = rec.side ? "#d94b3a" : "#3c7fd6";
+    ctx.fill();
+    ctx.strokeStyle = "#2b2b2b";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+function renderMap() {
+  const frame = mapFrame();
+  label("Crayon", frame.margin, frame.titleY, frame.titleSize);
+  if (viewW < 720) {
+    label("Male die Welt.", frame.margin, frame.subY, 16, "#5c4632");
+    label("Die Kugel muss jeden Stern berühren.", frame.margin, frame.subY + 20, 16, "#5c4632");
+  } else {
+    label("Male die Welt. Die rote Kugel muss jeden Stern berühren.", frame.margin, frame.subY, frame.titleSize > 40 ? 20 : 16, "#5c4632");
+  }
+  label("Sterne " + starCount() + " / " + ORDER.length, frame.margin, frame.starY, 18, "#8a5a20");
+  drawCradle();
+  const owned = starCount();
   ISLANDS.forEach((island, i) => {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-    const x = margin + col * (cardW + gap);
-    const y = 168 + row * (cardH + 14);
+    const col = i % frame.cols;
+    const row = Math.floor(i / frame.cols);
+    const x = frame.margin + col * (frame.cardW + frame.colGap);
+    const y = frame.cardsTop + row * (frame.cardH + frame.rowGap);
     const open = owned >= island.need;
-    roundRect(x, y, cardW, cardH, 16);
+    roundRect(x, y, frame.cardW, frame.cardH, 16);
     ctx.fillStyle = open ? "rgba(255,252,240,0.65)" : "rgba(220,210,190,0.55)";
     ctx.fill();
     ctx.strokeStyle = "#5c4632";
     ctx.stroke();
-    label(island.name, x + 16, y + 12, 24);
-    label(open ? island.blurb : "noch " + (island.need - owned) + " Sterne", x + 16, y + 46, 15, "#6b5844");
+    label(island.name, x + 16, y + 8, frame.cardH < 120 ? 18 : 24);
+    if (frame.cardH >= 118) {
+      label(open ? island.blurb : "noch " + (island.need - owned) + " Sterne", x + 16, y + 40, 15, "#6b5844");
+    }
     island.levels.forEach((id, n) => {
       const bx = x + 16 + (n % 4) * 62;
-      const by = y + 78 + Math.floor(n / 4) * 40;
+      const by = y + frame.cardH - 40;
       const done = progress().cleared[id];
-      button(bx, by, 56, 34, done ? "★" : String(n + 1), () => {
+      button(bx, by, 56, 32, done ? "★" : String(n + 1), () => {
         if (open) buildLevel(LEVELS[id]);
       }, { locked: !open, size: 16 });
     });
@@ -2013,20 +2422,26 @@ function renderMap() {
     ["Hilfe", () => { mode = "help"; }],
   ];
   const gapb = 10;
-  const rowW = Math.min(640, viewW - margin * 2);
+  const rowW = Math.min(640, viewW - frame.margin * 2);
   const bw = Math.floor((rowW - gapb * (actions.length - 1)) / actions.length);
-  let ax = margin;
-  const ay = viewH - 58;
+  let ax = frame.margin;
   for (const [text, fn] of actions) {
-    button(ax, ay, bw, 42, text, fn, { size: bw < 150 ? 14 : 16 });
+    button(ax, frame.buttonTop, bw, 42, text, fn, { size: bw < 150 ? 14 : 16 });
     ax += bw + gapb;
   }
   const list = Object.values(customs());
-  const gridRight = margin + cols * cardW + (cols - 1) * gap;
-  if (list.length && gridRight + 250 < viewW) {
-    label("Eigene Zettel", gridRight + 28, 168, 22);
+  if (list.length && frame.side) {
+    const y0 = frame.cradle.y + frame.cradle.h + 12;
+    if (y0 + 44 < frame.buttonTop) {
+      label("Eigene Zettel", frame.cradle.x, y0, 18);
+      list.slice(0, 4).forEach((doc, i) => {
+        button(frame.cradle.x, y0 + 28 + i * 48, Math.min(220, frame.cradle.w), 42, doc.name || "Ohne Titel", () => buildLevel(levelFromDoc(doc)), { size: 16 });
+      });
+    }
+  } else if (list.length && frame.gridRight + 250 < viewW) {
+    label("Eigene Zettel", frame.gridRight + 28, frame.cardsTop, 22);
     list.slice(0, 6).forEach((doc, i) => {
-      button(gridRight + 28, 208 + i * 52, 220, 44, doc.name || "Ohne Titel", () => buildLevel(levelFromDoc(doc)), { size: 16 });
+      button(frame.gridRight + 28, frame.cardsTop + 40 + i * 52, 220, 44, doc.name || "Ohne Titel", () => buildLevel(levelFromDoc(doc)), { size: 16 });
     });
   }
 }
@@ -2037,9 +2452,11 @@ function renderHelp() {
     "Linke Maustaste, Finger oder Stift: zeichnen. Loslassen erweckt den Strich.",
     "Offene Linie: leichter, etwas federnder Draht. Geschlossene Fläche: schwerer Körper.",
     "Ein runder Strich wird eine Kugel. Sie rollt und gibt ihren Schwung weiter.",
-    "Winziger Kreis auf etwas Festem: Nagel. Daran dreht sich, was du darüber malst.",
+    "Winziger Kreis auf einem Körper oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
     "Linie von Nagel zu Nagel: Seil.",
+    "Kurz stillhalten, dann ziehen: der Gegenstand folgt, bleibt undurchdringlich und lässt sich stapeln.",
+    "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
     "Klick auf die rote Kugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
     "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
     "Elegant: genau ein Gegenstand, ohne die Kugel anzuklicken. Nägel zählen nicht.",
@@ -2047,15 +2464,18 @@ function renderHelp() {
     "Mausrad wählt die Farbe, Shift+Rad zoomt, mittlere Taste verschiebt das Blatt.",
     "R setzt das Level zurück. M oder Esc öffnet die Karte.",
   ];
-  lines.forEach((line, i) => label(line, 48, 110 + i * 34, 18, "#3a2a1c"));
+  const helpStep = Math.min(34, Math.max(20, Math.floor((viewH - 110 - 96) / lines.length)));
+  lines.forEach((line, i) => label(line, 48, 100 + i * helpStep, helpStep < 26 ? 15 : 18, "#3a2a1c"));
   button(48, viewH - 84, 140, 48, "Karte", showMap);
 }
 
 function showMap() {
+  endDrag();
   mode = "map";
   namebox.style.display = "none";
   world = null;
   confetti = [];
+  ensureCradle();
 }
 
 function freshDoc() {
@@ -2265,7 +2685,16 @@ function onPointerDown(e) {
     if (mode === "editor") editorClick(w);
     return;
   }
-  if (mode === "help" || mode === "map") return;
+  if (mode === "help") return;
+  if (mode === "map") {
+    const rec = cradleBallAt(e.clientX, e.clientY);
+    if (rec && beginCradleDrag(rec)) {
+      cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
+      pointer = { id: e.pointerId, cradle: true };
+      canvas.setPointerCapture(e.pointerId);
+    }
+    return;
+  }
   const w = screenToWorld(e.clientX, e.clientY);
   if (mode === "editor" && editorTool !== "terrain" && editorTool !== "decor" && editorTool !== "rocket") {
     editorClick(w);
@@ -2279,13 +2708,38 @@ function onPointerDown(e) {
     pts: [{ x: w.x, y: w.y }],
     moved: false,
     rocket: mode === "editor" && editorTool === "rocket",
+    downT: performance.now(),
+    grab: null,
   };
   if (mode === "play" && ball) {
     const bp = ball.getPosition();
     pointer.onBall = Math.hypot(bp.x - w.x, bp.y - w.y) < BALL_R * 1.3;
     pointer.nudgeDir = nudgeDirFromClick(bp.x, w.x);
   }
+  if (mode === "play" && !pointer.onBall) {
+    const draw = drawingAt(w.x, w.y);
+    if (draw) pointer.grab = { x: w.x, y: w.y };
+  }
   canvas.setPointerCapture(e.pointerId);
+}
+
+function engageGrab(worldPt) {
+  if (!pointer || !pointer.grab || playDrag) return;
+  const held = performance.now() - pointer.downT;
+  const moved = Math.hypot(worldPt.x - pointer.grab.x, worldPt.y - pointer.grab.y);
+  if (moved > 0.2) {
+    pointer.grab = null;
+    return;
+  }
+  if (held < 260) return;
+  if (!beginDrag(pointer.grab.x, pointer.grab.y)) {
+    pointer.grab = null;
+    return;
+  }
+  moveDrag(worldPt.x, worldPt.y);
+  pointer.pts = null;
+  pointer.grab = null;
+  pointer.dragging = true;
 }
 
 function onPointerMove(e) {
@@ -2296,8 +2750,19 @@ function onPointerMove(e) {
     cam.cy = pointer.cy + (e.clientY - pointer.y) / s;
     return;
   }
-  if (!pointer.pts) return;
+  if (pointer.cradle) {
+    cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
+    return;
+  }
   const w = screenToWorld(e.clientX, e.clientY);
+  if (pointer.dragging && playDrag) {
+    moveDrag(w.x, w.y);
+    pointer.moved = true;
+    return;
+  }
+  engageGrab(w);
+  if (pointer.dragging) return;
+  if (!pointer.pts) return;
   const last = pointer.pts[pointer.pts.length - 1];
   if (Math.hypot(w.x - last.x, w.y - last.y) > 0.04) {
     pointer.pts.push(w);
@@ -2309,6 +2774,14 @@ function onPointerUp(e) {
   if (!pointer) return;
   const current = pointer;
   pointer = null;
+  if (current.dragging || playDrag) {
+    endDrag();
+    return;
+  }
+  if (current.cradle) {
+    endCradleDrag();
+    return;
+  }
   if (current.pan || current.ui || current.tap) return;
   const w = screenToWorld(e.clientX, e.clientY);
   if (mode === "editor" && current.rocket) {
@@ -2341,7 +2814,11 @@ function boot() {
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerup", onPointerUp);
-  canvas.addEventListener("pointercancel", () => { pointer = null; });
+  canvas.addEventListener("pointercancel", () => {
+    pointer = null;
+    endDrag();
+    endCradleDrag();
+  });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
@@ -2354,6 +2831,7 @@ function boot() {
       if (mode === "play" && levelDef) buildLevel(levelDef);
     } else if (e.key === "m" || e.key === "M" || e.key === "Escape") {
       if (returnMode === "editor" && editorDoc && mode === "play") {
+        endDrag();
         mode = "editor";
         world = null;
         namebox.style.display = "block";
@@ -2377,11 +2855,19 @@ function boot() {
   function frame(now) {
     const dt = Math.min(0.033, (now - last) / 1000);
     last = now;
+    if (pointer && pointer.grab && !pointer.dragging) engageGrab(pointer.grab);
     if (mode === "play") {
       let acc = dt;
       while (acc > 0) {
         const h = Math.min(acc, 1 / 60);
         step(h);
+        acc -= h;
+      }
+    } else if (mode === "map") {
+      let acc = dt;
+      while (acc > 0) {
+        const h = Math.min(acc, 1 / 60);
+        stepCradle(h);
         acc -= h;
       }
     }
@@ -2713,6 +3199,152 @@ function runTests() {
     hitter.body.setAwake(true);
     for (let i = 0; i < 80; i++) step(1 / 60);
     check("roller gives its shove to the red ball", ball.getPosition().x > ballX0 + 1.2);
+
+    function cornerDepth(host, x, y) {
+      const meta = bodyMeta.get(host);
+      if (!meta || !meta.outline || !meta.outline.closed) return 0;
+      const worldPts = meta.outline.local.map((p) => {
+        const w = host.getWorldPoint(V(p.x, p.y));
+        return { x: w.x, y: w.y };
+      });
+      if (!pointInPoly(x, y, worldPts)) return 0;
+      let best = Infinity;
+      for (let i = 0; i < worldPts.length; i++) {
+        const a = worldPts[i];
+        const b = worldPts[(i + 1) % worldPts.length];
+        best = Math.min(best, distPointSeg(x, y, a.x, a.y, b.x, b.y));
+      }
+      return best;
+    }
+    function pairOverlap(a, b) {
+      const ca = bodyCorners(a);
+      const cb = bodyCorners(b);
+      let worst = 0;
+      for (const p of ca) worst = Math.max(worst, cornerDepth(b, p.x, p.y));
+      for (const p of cb) worst = Math.max(worst, cornerDepth(a, p.x, p.y));
+      return worst;
+    }
+    function bodyCorners(body) {
+      const meta = bodyMeta.get(body);
+      return meta.outline.local.map((p) => {
+        const w = body.getWorldPoint(V(p.x, p.y));
+        return { x: w.x, y: w.y };
+      });
+    }
+    function floorSink(body) {
+      let worst = 0;
+      for (const p of bodyCorners(body)) {
+        if (p.y < 1.3) worst = Math.max(worst, 1.3 - p.y);
+      }
+      return worst;
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 1.5, 0.16), "#2b2b2b");
+    const nail = pins.find((p) => p.userMade);
+    check("small circle on the floor is a ground nail", !!nail && nail.body === ground);
+    check("ground nail is not a loose ball", !drawings.some((d) => d.kind === "blob" || d.kind === "roller"));
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 5, 0.16), "#7a4fbf");
+    check("small circle in the air stays loose", drawings.some((d) => d.kind === "blob") && !pins.some((p) => p.userMade));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 1.5, 0.16), "#2b2b2b");
+    const floorNail = pins.find((p) => p.userMade);
+    const hung = makeBox({ x: 9.3, y: 3.4, hw: 0.45, hh: 0.45, color: "#8d5a34" });
+    const boxPin = rememberPin(9.3, 3.4, hung, true);
+    const anchorRope = spawnRope(floorNail, boxPin, [{ x: 8, y: 1.5 }, { x: 9.3, y: 3.4 }], "#3c7fd6");
+    check("rope anchors to a floor nail", !!anchorRope && anchorRope.kind === "rope");
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    const nailAt = pinWorld(floorNail);
+    world.setGravity(V(0, 0));
+    hung.setTransform(V(nailAt.x + 3, nailAt.y + 2.4), 0);
+    hung.setLinearVelocity(V(0, 0));
+    hung.setAngularVelocity(0);
+    hung.setAwake(true);
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const pulledIn = Math.hypot(hung.getPosition().x - nailAt.x, hung.getPosition().y - nailAt.y);
+    world.setGravity(V(0, -24));
+    check("floor nail pulls the box back", pulledIn < 2.4);
+    lines.push("INFO anchor dist " + pulledIn.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const lower = makeBox({ x: 14, y: 2.1, hw: 0.75, hh: 0.75, color: "#3c7fd6" });
+    const upper = makeBox({ x: 14, y: 6.4, hw: 0.75, hh: 0.75, color: "#ef8b2c" });
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    const shapesBefore = stats.shapes;
+    const nudgesBefore = stats.nudges;
+    check("drag can grab the upper box", beginDrag(upper.getPosition().x, upper.getPosition().y));
+    let worstHit = 0;
+    for (let i = 0; i < 120; i++) {
+      moveDrag(14, 2.1);
+      step(1 / 60);
+      worstHit = Math.max(worstHit, pairOverlap(upper, lower), floorSink(upper), floorSink(lower));
+    }
+    check("drag does not push boxes through each other or the floor", worstHit < 0.08);
+    lines.push("INFO drag overlap " + worstHit.toFixed(3));
+    endDrag();
+    check("drag counts as neither shape nor nudge", stats.shapes === shapesBefore && stats.nudges === nudgesBefore);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const base = makeBox({ x: 20, y: 2.1, hw: 0.7, hh: 0.7, color: "#3e9a48" });
+    const pile = makeBox({ x: 24, y: 6, hw: 0.7, hh: 0.7, color: "#e6b423" });
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    beginDrag(pile.getPosition().x, pile.getPosition().y);
+    for (let i = 0; i < 140; i++) {
+      moveDrag(base.getPosition().x, base.getPosition().y + 1.7);
+      step(1 / 60);
+    }
+    endDrag();
+    for (let i = 0; i < 160; i++) step(1 / 60);
+    const stackedGap = pile.getPosition().y - base.getPosition().y;
+    const stackedOverlap = pairOverlap(pile, base);
+    check("released box stacks on the other", stackedGap > 1.2 && stackedGap < 2.2 && stackedOverlap < 0.08 && Math.abs(pile.getPosition().x - base.getPosition().x) < 0.45);
+    lines.push("INFO stack gap " + stackedGap.toFixed(2) + " overlap " + stackedOverlap.toFixed(3));
+
+    ensureCradle();
+    for (let i = 0; i < 40; i++) stepCradle(1 / 60);
+    const outer = cradleBalls[0];
+    const far = cradleBalls[cradleBalls.length - 1];
+    const mid = cradleBalls[2];
+    check("cradle drag grabs an outer ball", beginCradleDrag(outer));
+    const pulled = cradlePose(outer, -0.95);
+    let cradleOverlap = 0;
+    for (let i = 0; i < 50; i++) {
+      cradleDrag.goal = pulled;
+      stepCradle(1 / 60);
+      for (let a = 0; a < cradleBalls.length; a++) {
+        for (let b = a + 1; b < cradleBalls.length; b++) {
+          const pa = cradleBalls[a].body.getPosition();
+          const pb = cradleBalls[b].body.getPosition();
+          const gap = Math.hypot(pa.x - pb.x, pa.y - pb.y) - cradleBalls[a].r - cradleBalls[b].r;
+          if (gap < -cradleOverlap) cradleOverlap = -gap;
+        }
+      }
+    }
+    const raised = outer.body.getPosition().x < outer.anchorX - 0.35;
+    endCradleDrag();
+    const released = Math.hypot(outer.body.getLinearVelocity().x, outer.body.getLinearVelocity().y);
+    let farSwing = 0;
+    let midSwing = 0;
+    for (let i = 0; i < 220; i++) {
+      stepCradle(1 / 60);
+      farSwing = Math.max(farSwing, Math.abs(far.body.getPosition().x - far.anchorX));
+      midSwing = Math.max(midSwing, Math.abs(mid.body.getPosition().x - mid.anchorX));
+      for (let a = 0; a < cradleBalls.length; a++) {
+        for (let b = a + 1; b < cradleBalls.length; b++) {
+          const pa = cradleBalls[a].body.getPosition();
+          const pb = cradleBalls[b].body.getPosition();
+          const gap = Math.hypot(pa.x - pb.x, pa.y - pb.y) - 0.4;
+          if (gap < -cradleOverlap) cradleOverlap = -gap;
+        }
+      }
+    }
+    check("outer cradle ball can be pulled aside", raised);
+    check("released cradle ball starts from rest", released < 0.35);
+    check("map cradle sends the swing to the far ball", farSwing > 0.42 && midSwing < farSwing * 0.55);
+    check("cradle balls do not overlap", cradleOverlap < 0.06);
+    lines.push("INFO cradle swing far " + farSwing.toFixed(2) + " mid " + midSwing.toFixed(2) + " overlap " + cradleOverlap.toFixed(3));
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }

@@ -2,15 +2,17 @@
 
 Eigenes Browser-Rätsel im Stil von Crayon Physics: eine HTML-Datei, Physik im Browser, ohne Ton.
 
-**[Im Browser spielen](https://juniormind1.github.io/CanvasgameHTML/)**
+<a href="https://juniormind1.github.io/CanvasgameHTML/" target="_blank" rel="noopener noreferrer"><strong>Im Browser spielen</strong></a>
 
-Der Link öffnet das spielbare `index.html` als eigene Seite.
+Der Link öffnet das spielbare `index.html` in einem neuen Tab.
 
 Lokal geht dieselbe Datei über `index.html`. Gezeichnete Striche werden zu Körpern. Die rote Kugel muss die Sterne berühren.
 
 - Offene Linie: Draht. Geschlossene Fläche: schwerer Körper.
 - Runder Strich: rollende Kugel, gibt ihren Schwung weiter.
-- Kleiner Kreis auf einem Körper: Nagel. Linie von Nagel zu Nagel: Seil.
+- Kleiner Kreis auf einem Körper oder auf dem Boden: Nagel. Linie von Nagel zu Nagel: Seil.
+- Kurz stillhalten und ziehen verschiebt einen Gegenstand. Er bleibt undurchdringlich und lässt sich stapeln.
+- Auf der Karte hängt ein Kugelstoßpendel. Eine äußere Kugel zur Seite ziehen und loslassen.
 - Rechtsklick radiert. Klick auf die Kugel schubst sie.
 - Rakete startet, wenn etwas auf sie fällt.
 - Karte, 13 Level, Schmierzettel und ein Editor. Fortschritt bleibt lokal im Browser.
