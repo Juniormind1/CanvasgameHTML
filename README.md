@@ -4,7 +4,7 @@ Eigenes Browser-Rätsel im Stil von Crayon Physics: eine HTML-Datei, Physik im B
 
 <a href="https://juniormind1.github.io/CanvasgameHTML/" target="_blank" rel="noopener noreferrer"><strong>Im Browser spielen</strong></a>
 
-Der Link öffnet das spielbare `index.html` in einem neuen Tab.
+Der Link führt zum spielbaren `index.html`. GitHub entfernt `target="_blank"` aus der README, deshalb öffnet er im selben Tab.
 
 Lokal geht dieselbe Datei über `index.html`. Gezeichnete Striche werden zu Körpern. Die rote Kugel muss die Sterne berühren.
 
