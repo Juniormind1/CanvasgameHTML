@@ -2302,7 +2302,10 @@ function ensureCradle() {
   cradleWorld = new planck.World(V(0, -24));
   cradleGround = cradleWorld.createBody();
   cradleWorld.on("pre-solve", (contact) => {
-    contact.setRestitution(0.98);
+    // Planck merges touching balls into one block; resolveCradleHits handles ball hits instead.
+    const a = contact.getFixtureA().getBody();
+    const b = contact.getFixtureB().getBody();
+    if (cradleBalls.some((rec) => rec.body === a) && cradleBalls.some((rec) => rec.body === b)) contact.setEnabled(false);
   });
   const n = 5;
   const r = 0.2;
@@ -2474,13 +2477,53 @@ function endCradleDrag() {
   drag.rec.body.setAwake(true);
 }
 
+const CRADLE_SUBSTEPS = 8;
+
+// Newton's cradle hits between neighbouring balls: swap the normal velocity of
+// approaching pairs, sweeping alternately from both sides so a hit runs through the row.
+function resolveCradleHits(h) {
+  const e = 1;
+  const n = cradleBalls.length;
+  for (let pass = 0; pass < 2 * n; pass++) {
+    let hit = false;
+    const forward = pass % 2 === 0;
+    for (let k = 0; k < n - 1; k++) {
+      const i = forward ? k : n - 2 - k;
+      const A = cradleBalls[i].body;
+      const B = cradleBalls[i + 1].body;
+      const pa = A.getPosition();
+      const pb = B.getPosition();
+      const dx = pb.x - pa.x;
+      const dy = pb.y - pa.y;
+      const dist = Math.hypot(dx, dy) || 1e-9;
+      const nx = dx / dist;
+      const ny = dy / dist;
+      const va = A.getLinearVelocity();
+      const vb = B.getLinearVelocity();
+      const vrel = (va.x - vb.x) * nx + (va.y - vb.y) * ny;
+      const gap = dist - cradleBalls[i].r - cradleBalls[i + 1].r;
+      if (vrel > 1e-4 && gap < vrel * h + 0.002) {
+        const j = 0.5 * (1 + e) * vrel;
+        A.setLinearVelocity(V(va.x - j * nx, va.y - j * ny));
+        B.setLinearVelocity(V(vb.x + j * nx, vb.y + j * ny));
+        hit = true;
+      }
+    }
+    if (!hit) break;
+  }
+}
+
 function stepCradle(dt) {
   if (!cradleWorld) return;
   if (cradleDrag && cradleDrag.joint) {
     const goal = cradleArcGoal(cradleDrag.rec, cradleDrag.goal.x, cradleDrag.goal.y);
     cradleDrag.joint.setTarget(V(goal.x, goal.y));
   }
-  cradleWorld.step(dt, 12, 8);
+  const h = dt / CRADLE_SUBSTEPS;
+  for (let q = 0; q < CRADLE_SUBSTEPS; q++) {
+    cradleWorld.step(h, 12, 8);
+    resolveCradleHits(h);
+  }
 }
 
 function cradleBallAt(sx, sy) {
@@ -3696,10 +3739,19 @@ function runTests() {
     const released = Math.hypot(outer.body.getLinearVelocity().x, outer.body.getLinearVelocity().y);
     let farSwing = 0;
     let midSwing = 0;
-    for (let i = 0; i < 220; i++) {
+    const halfSwing = Math.PI * Math.sqrt(far.len / 24);
+    const swingWins = [];
+    for (let i = 0; i < Math.ceil(10 * halfSwing * 60); i++) {
       stepCradle(1 / 60);
       farSwing = Math.max(farSwing, Math.abs(far.body.getPosition().x - far.anchorX));
       midSwing = Math.max(midSwing, Math.abs(mid.body.getPosition().x - mid.anchorX));
+      const w = Math.floor((i + 1) / 60 / halfSwing);
+      if (!swingWins[w]) swingWins[w] = { mid: 0, out: 0 };
+      for (let b = 0; b < cradleBalls.length; b++) {
+        const d = Math.abs(cradleBalls[b].body.getPosition().x - cradleBalls[b].anchorX);
+        if (b === 0 || b === cradleBalls.length - 1) swingWins[w].out = Math.max(swingWins[w].out, d);
+        else swingWins[w].mid = Math.max(swingWins[w].mid, d);
+      }
       for (let a = 0; a < cradleBalls.length; a++) {
         for (let b = a + 1; b < cradleBalls.length; b++) {
           const pa = cradleBalls[a].body.getPosition();
@@ -3713,6 +3765,9 @@ function runTests() {
     check("released cradle ball starts from rest", released < 0.35);
     check("map cradle sends the swing to the far ball", farSwing > 0.42 && midSwing < farSwing * 0.55);
     check("cradle balls do not overlap", cradleOverlap < 0.06);
+    const swingWorst = swingWins.slice(0, 10).reduce((m, w) => Math.max(m, w.mid / Math.max(w.out, 1e-6)), 0);
+    check("cradle middle balls stay calm for 10 half swings", swingWins.length >= 10 && swingWorst < 0.1);
+    lines.push("INFO cradle mid/outer worst " + swingWorst.toFixed(3) + " over " + Math.min(10, swingWins.length) + " half swings");
     lines.push("INFO cradle swing far " + farSwing.toFixed(2) + " mid " + midSwing.toFixed(2) + " overlap " + cradleOverlap.toFixed(3));
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
