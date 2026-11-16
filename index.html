@@ -70,6 +70,7 @@ const VIEW_H = 18;
 const BALL_R = 0.34;
 const THICK = 0.16;
 const COLORS = ["#d94b3a", "#ef8b2c", "#e6b423", "#3e9a48", "#3c7fd6", "#7a4fbf", "#8d5a34", "#2b2b2b"];
+const GEO_GRID = 0.5;
 
 if (typeof planck !== "undefined" && planck.Settings) planck.Settings.velocityThreshold = 2.2;
 
@@ -83,6 +84,7 @@ let viewW = 800;
 let viewH = 450;
 const cam = { cx: 16, cy: 9, zoom: 1 };
 let colorIndex = 4;
+let geoSnap = false;
 let mode = "map";
 let ui = [];
 let world = null;
@@ -833,6 +835,20 @@ function screenToWorld(x, y) {
     x: cam.cx + (x - c.x) / s,
     y: cam.cy - (y - c.y) / s,
   };
+}
+
+function snapDrawPoint(p) {
+  if (!geoSnap) return { x: p.x, y: p.y };
+  return {
+    x: Math.round(p.x / GEO_GRID) * GEO_GRID,
+    y: Math.round(p.y / GEO_GRID) * GEO_GRID,
+  };
+}
+
+function strokeSnaps() {
+  if (!geoSnap) return false;
+  if (mode === "play") return true;
+  return mode === "editor" && (editorTool === "terrain" || editorTool === "decor");
 }
 
 function resetCam() {
@@ -2053,7 +2069,58 @@ function drawRocket(rocket) {
   }
 }
 
+function drawGeoGrid() {
+  const inset = viewInset();
+  const tl = screenToWorld(0, inset.top);
+  const br = screenToWorld(viewW, viewH - inset.bottom);
+  const minX = Math.min(tl.x, br.x);
+  const maxX = Math.max(tl.x, br.x);
+  const minY = Math.min(tl.y, br.y);
+  const maxY = Math.max(tl.y, br.y);
+  const x0 = Math.ceil(minX / GEO_GRID - 1e-6) * GEO_GRID;
+  const y0 = Math.ceil(minY / GEO_GRID - 1e-6) * GEO_GRID;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, inset.top, viewW, Math.max(0, viewH - inset.top - inset.bottom));
+  ctx.clip();
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = x0; x <= maxX + 1e-6; x += GEO_GRID) {
+    const a = worldToScreen(x, minY);
+    const b = worldToScreen(x, maxY);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  for (let y = y0; y <= maxY + 1e-6; y += GEO_GRID) {
+    const a = worldToScreen(minX, y);
+    const b = worldToScreen(maxX, y);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  ctx.strokeStyle = "rgba(43,43,43,0.12)";
+  ctx.stroke();
+  ctx.beginPath();
+  for (let x = x0; x <= maxX + 1e-6; x += GEO_GRID) {
+    if (Math.abs(x / GEO_GRID) % 2 > 0.1) continue;
+    const a = worldToScreen(x, minY);
+    const b = worldToScreen(x, maxY);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  for (let y = y0; y <= maxY + 1e-6; y += GEO_GRID) {
+    if (Math.abs(y / GEO_GRID) % 2 > 0.1) continue;
+    const a = worldToScreen(minX, y);
+    const b = worldToScreen(maxX, y);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  ctx.strokeStyle = "rgba(43,43,43,0.2)";
+  ctx.stroke();
+  ctx.restore();
+}
+
 function renderPlay() {
+  if (geoSnap) drawGeoGrid();
   for (const item of scenery) {
     if (item.kind === "poly") {
       crayonFill(item.pts, item.color);
@@ -2146,6 +2213,45 @@ function drawHUD() {
   label("Sterne " + got + "/" + stars.length, 24, 76, 16, "#8a5a20");
   if (stats.shapes === 1 && stats.nudges === 0) label("bisher elegant", 150, 76, 16, "#3e9a48");
   const sw = 22;
+  const geoW = 36;
+  const geoH = sw;
+  const geoX = viewW - 28 - COLORS.length * (sw + 8) - 10 - geoW;
+  const geoY = 18;
+  ui.push({
+    x: geoX, y: geoY, w: geoW, h: geoH,
+    onClick: () => { geoSnap = !geoSnap; },
+  });
+  ctx.save();
+  ctx.fillStyle = "rgba(255,252,240,0.92)";
+  ctx.fillRect(geoX, geoY, geoW, geoH);
+  ctx.strokeStyle = geoSnap ? "#2b2b2b" : "rgba(0,0,0,0.22)";
+  ctx.lineWidth = geoSnap ? 3 : 1;
+  const inset = geoSnap ? 1.5 : 0.5;
+  ctx.strokeRect(geoX + inset, geoY + inset, geoW - inset * 2, geoH - inset * 2);
+  const ax = geoX + 8;
+  const ay = geoY + geoH - 6;
+  const leg = 12;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(ax + leg, ay);
+  ctx.lineTo(ax, ay - leg);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(60,127,214,0.16)";
+  ctx.fill();
+  ctx.strokeStyle = "#2b2b2b";
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(ax + 3.2, ay);
+  ctx.lineTo(ax + 3.2, ay - 3.2);
+  ctx.lineTo(ax, ay - 3.2);
+  for (let i = 1; i <= 3; i++) {
+    const t = (i / 4) * leg;
+    ctx.moveTo(ax + t, ay);
+    ctx.lineTo(ax + t, ay - 2.4);
+  }
+  ctx.stroke();
+  ctx.restore();
   for (let i = 0; i < COLORS.length; i++) {
     const x = viewW - 28 - (COLORS.length - i) * (sw + 8);
     const y = 18;
@@ -2521,6 +2627,7 @@ function renderHelp() {
     "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
     "Elegant: genau ein Gegenstand, ohne die Kugel anzuklicken. Nägel zählen nicht.",
     "Old School: kein Schubs, kein eigener Nagel, kein Seil, nichts unter der Kugel.",
+    "Das Geodreieck neben den Farben lässt den Stift auf ein Raster einrasten.",
     "Mausrad wählt die Farbe, Shift+Rad zoomt, mittlere Taste verschiebt das Blatt.",
     "R setzt das Level zurück. M oder Esc öffnet die Karte.",
   ];
@@ -2611,6 +2718,7 @@ function saveEditor() {
 
 function renderEditor() {
   if (!editorDoc) return;
+  if (strokeSnaps()) drawGeoGrid();
   ctx.save();
   ctx.globalAlpha = 0.35;
   for (const stroke of editorDoc.strokes) {
@@ -2762,13 +2870,14 @@ function onPointerDown(e) {
     return;
   }
   const kind = mode === "play" ? pressKind(w.x, w.y) : "draw";
+  const ink = kind !== "drag" && strokeSnaps() ? snapDrawPoint(w) : w;
   pointer = {
     id: e.pointerId,
     x: e.clientX,
     y: e.clientY,
     wx: w.x,
     wy: w.y,
-    pts: kind === "drag" ? null : [{ x: w.x, y: w.y }],
+    pts: kind === "drag" ? null : [{ x: ink.x, y: ink.y }],
     moved: false,
     rocket: mode === "editor" && editorTool === "rocket",
     downT: performance.now(),
@@ -2828,9 +2937,10 @@ function onPointerMove(e) {
     return;
   }
   if (!pointer.pts) return;
+  const ink = strokeSnaps() ? snapDrawPoint(w) : w;
   const last = pointer.pts[pointer.pts.length - 1];
-  if (Math.hypot(w.x - last.x, w.y - last.y) > 0.04) {
-    pointer.pts.push(w);
+  if (Math.hypot(ink.x - last.x, ink.y - last.y) > 0.04) {
+    pointer.pts.push({ x: ink.x, y: ink.y });
     pointer.moved = true;
   }
 }
@@ -3370,6 +3480,28 @@ function runTests() {
     lines.push("INFO fast drag " + qp.x.toFixed(2) + "," + qp.y.toFixed(2));
     check("a dragged box keeps up with a fast cursor", Math.hypot(qp.x - 28, qp.y - 11) < 0.35);
     endDrag();
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    const geoA = snapDrawPoint({ x: 8.21, y: 4.19 });
+    const geoB = snapDrawPoint({ x: 10.18, y: 4.22 });
+    const geoDiag = snapDrawPoint({ x: 8.74, y: 4.74 });
+    check("geodreieck snaps a stroke onto the half-meter grid", geoA.x === 8 && geoA.y === 4 && geoB.x === 10 && geoB.y === 4);
+    check("a diagonal lands on a grid point", geoDiag.x === 8.5 && geoDiag.y === 4.5);
+    const walk = [];
+    for (let x = 8; x <= 10; x += 0.5) walk.push({ x, y: 4 });
+    for (let y = 4.5; y <= 6; y += 0.5) walk.push({ x: 10, y });
+    for (let x = 9.5; x >= 8; x -= 0.5) walk.push({ x, y: 6 });
+    for (let y = 5.5; y >= 4; y -= 0.5) walk.push({ x: 8, y });
+    commitStroke(walk, "#3c7fd6");
+    const gridBox = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("a grid square becomes a body", !!gridBox && gridBox.meta.outline.local.length === 4);
+    const geoHold = makeBox({ x: 22.2, y: 12.2, hw: 0.4, hh: 0.4, color: "#ef8b2c" });
+    check("grab uses the raw cursor while the geodreieck is on", pressKind(geoHold.getPosition().x, geoHold.getPosition().y) === "drag");
+    check("empty paper still draws while the geodreieck is on", pressKind(26.2, 14.2) === "draw");
+    geoSnap = false;
+    const freePt = snapDrawPoint({ x: 8.21, y: 4.19 });
+    check("without the geodreieck the point stays put", freePt.x === 8.21 && freePt.y === 4.19);
 
     buildLevel(LEVELS["ein-klotz"]);
     const lower = makeBox({ x: 14, y: 2.1, hw: 0.75, hh: 0.75, color: "#3c7fd6" });

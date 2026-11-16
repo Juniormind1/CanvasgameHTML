@@ -12,6 +12,7 @@ Lokal geht dieselbe Datei über `index.html`. Gezeichnete Striche werden zu Kör
 - Runder Strich: rollende Kugel, gibt ihren Schwung weiter.
 - Kleiner Kreis auf einem Körper oder auf dem Boden: Nagel. Linie von Nagel zu Nagel: Seil.
 - Klick in einen Gegenstand zieht ihn. Er bleibt schwer, dreht sich unter den Finger und lässt sich stapeln.
+- Das Geodreieck neben den Farben rastet den Stift auf ein Raster ein. Anfassen und Schubsen bleiben frei.
 - Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level ohne Konfetti.
 - Auf der Karte hängt ein Kugelstoßpendel. Eine äußere Kugel zur Seite ziehen und loslassen.
 - Rechtsklick radiert. Klick auf die Kugel schubst sie.
