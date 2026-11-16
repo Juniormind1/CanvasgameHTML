@@ -6,8 +6,12 @@ const BALL_R = 0.34;
 const THICK = 0.16;
 const COLORS = ["#d94b3a", "#ef8b2c", "#e6b423", "#3e9a48", "#3c7fd6", "#7a4fbf", "#8d5a34", "#2b2b2b"];
 const GEO_GRID = 0.5;
+const BALL_RESTITUTION = 0.4;
+// Unter dieser Relativgeschwindigkeit bleibt der Stoß unelastisch (Ruhekontakt).
+// 2.2 passt zur Gravitation g=24, damit die Kugel auf dem Boden nicht zittert.
+const VELOCITY_THRESHOLD = 2.2;
 
-if (typeof planck !== "undefined" && planck.Settings) planck.Settings.velocityThreshold = 2.2;
+if (typeof planck !== "undefined" && planck.Settings) planck.Settings.velocityThreshold = VELOCITY_THRESHOLD;
 
 const canvas = document.getElementById("view");
 const ctx = canvas.getContext("2d");
@@ -2165,6 +2169,10 @@ function resetBall() {
   ball.setAwake(true);
 }
 
+function isWireMeta(meta) {
+  return !!(meta && meta.outline && meta.outline.closed === false);
+}
+
 function buildLevel(def) {
   clearWorld();
   levelDef = def;
@@ -2179,6 +2187,9 @@ function buildLevel(def) {
     const roundA = ma && (ma.kind === "ball" || ma.round);
     const roundB = mb && (mb.kind === "ball" || mb.round);
     if (roundA && roundB) contact.setRestitution(0.98);
+    else if ((roundA || roundB) && !isWireMeta(ma) && !isWireMeta(mb)) {
+      contact.setRestitution(BALL_RESTITUTION);
+    }
   });
   ground = world.createBody();
   track(ground, { kind: "level" });
@@ -4615,6 +4626,32 @@ function runTests() {
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWoff = nailMotBox.body.getAngularVelocity();
     check("an off nail joint is not driven", Math.abs(nailWoff) < 1.0);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    addStaticSolid([
+      { x: 20, y: 1.3 }, { x: 21.4, y: 1.3 }, { x: 21.4, y: 10 }, { x: 20, y: 10 },
+    ], "#3c7fd6");
+    ball.setTransform(V(12, 5), 0);
+    ball.setLinearVelocity(V(16, 0));
+    ball.setAngularVelocity(0);
+    let bounceVin = 0;
+    let bounceVout = 0;
+    let bounceHit = false;
+    for (let i = 0; i < 90; i++) {
+      const bounceVx = ball.getLinearVelocity().x;
+      if (!bounceHit && bounceVx > 6) bounceVin = bounceVx;
+      step(1 / 60);
+      const bounceVx2 = ball.getLinearVelocity().x;
+      if (!bounceHit && bounceVin > 6 && bounceVx2 < 0) {
+        bounceHit = true;
+        bounceVout = bounceVx2;
+      }
+    }
+    lines.push("INFO bounce vin=" + bounceVin.toFixed(2) + " vout=" + bounceVout.toFixed(2));
+    check("ball bounces off a wall with damped speed", bounceHit && bounceVin > 10 && bounceVout < 0 && Math.abs(bounceVout) > bounceVin * 0.15 && Math.abs(bounceVout) < bounceVin * 0.75);
+    for (let i = 0; i < 240; i++) step(1 / 60);
+    const bounceRest = ball.getLinearVelocity();
+    check("ball comes to rest after the bounce without jitter", Math.hypot(bounceRest.x, bounceRest.y) < 0.4 && ball.getPosition().y < 2.2 && ball.getPosition().x < 20);
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }
