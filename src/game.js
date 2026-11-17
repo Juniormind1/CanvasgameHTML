@@ -4,6 +4,8 @@ const VIEW_W = 32;
 const VIEW_H = 18;
 const BALL_R = 0.34;
 const THICK = 0.16;
+const PEN_PRESS_MIN = 0.5;                    // Dickenfaktor bei Stiftdruck 0
+const PEN_PRESS_MAX = 2.5;                    // Dickenfaktor bei Stiftdruck 1
 // Farbe folgt dem Material. Der Spieler wählt keine Farbe.
 const MAT = {
   steel: "#8b939e",
@@ -1007,6 +1009,8 @@ const TUNE_SPEC = [
   { group: "Griff", key: "dragMaxV", label: "Zieltempo", min: 8, max: 40, step: 1, def: DRAG_MAX_V, fmt: (v) => Number(v).toFixed(0) + " m/s" },
   { group: "Griff", key: "grabEdge", label: "Randzone", min: 0.15, max: 0.80, step: 0.05, def: GRAB_EDGE, fmt: (v) => Number(v).toFixed(2) + " m" },
   { group: "Griff", key: "grabAdopt", label: "Nachgreifen ab", min: 0.4, max: 2.0, step: 0.05, def: GRAB_ADOPT, fmt: (v) => Number(v).toFixed(2) + " m" },
+  { group: "Stift", key: "penThickMin", label: "Dicke bei leichtem Druck", min: 0.3, max: 1.0, step: 0.05, def: PEN_PRESS_MIN, fmt: (v) => Number(v).toFixed(2) + " ×" },
+  { group: "Stift", key: "penThickMax", label: "Dicke bei festem Druck", min: 1.2, max: 4.0, step: 0.1, def: PEN_PRESS_MAX, fmt: (v) => Number(v).toFixed(1) + " ×" },
 ];
 const TUNE_BY_KEY = {};
 for (const spec of TUNE_SPEC) TUNE_BY_KEY[spec.key] = spec;
@@ -1876,9 +1880,45 @@ function spawnSolid(pts, opt) {
   return draw;
 }
 
+function pointerPressure(ev) {
+  if (!ev || ev.pointerType !== "pen") return null;
+  if (typeof ev.pressure !== "number" || !isFinite(ev.pressure)) return 0.5;
+  return Math.max(0, Math.min(1, ev.pressure));
+}
+
+function thickFromPressure(pressure) {
+  const lo = tuneCode("penThickMin", PEN_PRESS_MIN);
+  const hi = tuneCode("penThickMax", PEN_PRESS_MAX);
+  const p = Math.max(0, Math.min(1, pressure));
+  return THICK * (lo + p * (hi - lo));
+}
+
+function inkPoint(x, y, ev) {
+  const pt = { x, y };
+  const raw = pointerPressure(ev);
+  if (raw == null) return pt;
+  const prev = pointer && pointer.penP;
+  const smooth = prev == null ? raw : prev * 0.65 + raw * 0.35;
+  if (pointer) pointer.penP = smooth;
+  pt.thick = thickFromPressure(smooth);
+  return pt;
+}
+
+function strokeThickness(pts) {
+  const thicks = (pts || []).map((p) => p.thick).filter((t) => t > 0).sort((a, b) => a - b);
+  if (!thicks.length) return THICK;
+  const mid = thicks.length >> 1;
+  const med = thicks.length % 2 ? thicks[mid] : 0.5 * (thicks[mid - 1] + thicks[mid]);
+  const lo = THICK * tuneCode("penThickMin", PEN_PRESS_MIN);
+  const hi = THICK * tuneCode("penThickMax", PEN_PRESS_MAX);
+  return Math.max(lo, Math.min(hi, med));
+}
+
 function spawnWire(pts, opt) {
   const clean = dedupe(pts);
   if (clean.length < 2) return null;
+  const thick = opt && opt.thick > 0 ? opt.thick : THICK;
+  const half = thick / 2;
   let ox = 0;
   let oy = 0;
   for (const p of clean) { ox += p.x; oy += p.y; }
@@ -1892,7 +1932,7 @@ function spawnWire(pts, opt) {
   const fopt = fixtureOpt({ density: opt.density || 2.1, friction: 0.62, restitution: 0 });
   let made = 0;
   for (const p of clean) {
-    body.createFixture(new planck.Circle(V(p.x - ox, p.y - oy), THICK / 2), fopt);
+    body.createFixture(new planck.Circle(V(p.x - ox, p.y - oy), half), fopt);
     made++;
   }
   for (let i = 0; i < clean.length - 1; i++) {
@@ -1901,7 +1941,7 @@ function spawnWire(pts, opt) {
     const len = Math.hypot(b.x - a.x, b.y - a.y);
     if (len < 0.05) continue;
     const localCenter = V((a.x + b.x) / 2 - ox, (a.y + b.y) / 2 - oy);
-    const shape = new planck.Box(len / 2, THICK / 2, localCenter, Math.atan2(b.y - a.y, b.x - a.x));
+    const shape = new planck.Box(len / 2, half, localCenter, Math.atan2(b.y - a.y, b.x - a.x));
     body.createFixture(shape, fopt);
     made++;
   }
@@ -1912,8 +1952,8 @@ function spawnWire(pts, opt) {
   const local = clean.map((p) => ({ x: p.x - ox, y: p.y - oy }));
   const meta = track(body, {
     kind: "draw",
-    thick: THICK,
-    outline: { local, closed: false, color: MAT.wire, width: THICK, fixed: false },
+    thick,
+    outline: { local, closed: false, color: MAT.wire, width: thick, fixed: false },
   });
   const draw = { kind: "wire", body, meta, color: MAT.wire };
   drawings.push(draw);
@@ -2710,7 +2750,7 @@ function commitStrokeApply(drawnPts, rawInk) {
     if (solid) return solid;
     return spawnWire(pts.concat([{ x: pts[0].x, y: pts[0].y }]), {});
   }
-  if (!closed) return spawnWire(straightenOpen(pts), {});
+  if (!closed) return spawnWire(straightenOpen(pts), { thick: strokeThickness((drawnPts && drawnPts.some((p) => p.thick)) ? drawnPts : ink) });
   return spawnWire(pts, {});
 }
 
@@ -3702,6 +3742,13 @@ function outlineWorld(meta) {
 
 function crayonPath(pts, color, width) {
   if (!pts || pts.length < 2) return;
+  if (width === "live") {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const w = pts[i].thick || pts[i + 1].thick || THICK;
+      crayonPath([pts[i], pts[i + 1]], color, w);
+    }
+    return;
+  }
   const scr = pts.map((p) => worldToScreen(p.x, p.y));
   ctx.save();
   ctx.lineCap = "round";
@@ -4044,7 +4091,7 @@ function renderPlay() {
       if (draw.meta.outline && draw.meta.outline.closed) {
         crayonFill(pts, draw.color);
         crayonPath(pts.concat([pts[0]]), draw.color, 0.13);
-      } else crayonPath(pts, draw.color, THICK);
+      } else crayonPath(pts, draw.color, (draw.meta && draw.meta.thick) || THICK);
     }
   }
   drawAnchorLinks();
@@ -4052,7 +4099,7 @@ function renderPlay() {
   for (const star of stars) drawStar(star);
   drawBall();
   if (pointer && pointer.pts && pointer.pts.length) {
-    crayonPath(pointer.pts, MAT.ink, THICK);
+    crayonPath(pointer.pts, MAT.ink, pointer.pts.some((p) => p.thick) ? "live" : THICK);
   }
 }
 
@@ -4985,6 +5032,7 @@ function renderHelp() {
   const lines = [
     "Linke Maustaste, Finger oder Stift: zeichnen. Loslassen erweckt den Strich.",
     "Offene Linie: leichter, etwas federnder Draht. Geschlossene Fläche: schwerer Körper.",
+    "Mit dem Stift bestimmt der Druck die Dicke offener Drähte: fester Druck macht sie breiter und schwerer. Maus und Finger behalten die Standarddicke.",
     "Ein runder Strich wird eine Kugel. Sie rollt und gibt ihren Schwung weiter.",
     "Winziger Kreis in der Fläche eines Körpers oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
@@ -5129,7 +5177,7 @@ function renderEditor() {
     ctx.fillRect(-18, -8, 36, 16);
     ctx.restore();
   }
-  if (pointer && pointer.pts) crayonPath(pointer.pts, MAT.ink, THICK);
+  if (pointer && pointer.pts) crayonPath(pointer.pts, MAT.ink, pointer.pts.some((p) => p.thick) ? "live" : THICK);
   label("Editor", 48, 64, 28);
   const tools = [
     ["terrain", "Gelände"],
@@ -5263,7 +5311,7 @@ function onPointerDown(e) {
     y: e.clientY,
     wx: w.x,
     wy: w.y,
-    pts: kind === "drag" ? null : [{ x: ink.x, y: ink.y }],
+    pts: kind === "drag" ? null : [inkPoint(ink.x, ink.y, e)],
     moved: false,
     rocket: mode === "editor" && editorTool === "rocket",
     downT: performance.now(),
@@ -5400,7 +5448,7 @@ function onPointerMove(e) {
   const ink = w;
   const last = pointer.pts[pointer.pts.length - 1];
   if (Math.hypot(ink.x - last.x, ink.y - last.y) > 0.04) {
-    pointer.pts.push({ x: ink.x, y: ink.y });
+    pointer.pts.push(inkPoint(ink.x, ink.y, e));
     pointer.moved = true;
   }
   if (mode === "play") {
@@ -7259,6 +7307,42 @@ function runTests() {
     buildLevel(LEVELS["ein-klotz"]);
     const matWire = commitStroke([{ x: 8, y: 4 }, { x: 14, y: 6 }, { x: 18, y: 5.2 }], "#00ff00");
     check("drawn wire is dark wood even if a color is passed", !!matWire && matWire.kind === "wire" && matWire.color === MAT.wire);
+
+    function strokeOpenWire(x0, y0, x1, y1, evExtra, pointerId) {
+      const a = worldToScreen(x0, y0);
+      const b = worldToScreen(x1, y1);
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      const base = { button: 0, pointerId };
+      const ev = evExtra || {};
+      onPointerDown(Object.assign({ clientX: a.x, clientY: a.y }, base, ev));
+      onPointerMove(Object.assign({ clientX: midX, clientY: midY }, base, ev));
+      onPointerMove(Object.assign({ clientX: b.x, clientY: b.y }, base, ev));
+      const previewLive = !!(pointer && pointer.pts && pointer.pts.some((pt) => pt.thick));
+      onPointerUp(Object.assign({ clientX: b.x, clientY: b.y }, base, ev));
+      pointer = null;
+      endDrag();
+      const draw = drawings[drawings.length - 1];
+      return { draw, previewLive };
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    const lightPen = strokeOpenWire(20, 8, 24, 8, { pointerType: "pen", pressure: 0.2 }, 900);
+    const heavyPen = strokeOpenWire(20, 10, 24, 10, { pointerType: "pen", pressure: 0.9 }, 901);
+    const mouseWire = strokeOpenWire(20, 12, 24, 12, { pointerType: "mouse", pressure: 0.9 }, 902);
+    const touchWire = strokeOpenWire(20, 6, 24, 6, { pointerType: "touch", pressure: 0.9 }, 903);
+    const lightThick = lightPen.draw && lightPen.draw.meta ? lightPen.draw.meta.thick : 0;
+    const heavyThick = heavyPen.draw && heavyPen.draw.meta ? heavyPen.draw.meta.thick : 0;
+    const mouseThick = mouseWire.draw && mouseWire.draw.meta ? mouseWire.draw.meta.thick : 0;
+    const touchThick = touchWire.draw && touchWire.draw.meta ? touchWire.draw.meta.thick : 0;
+    const lightMass = lightPen.draw && lightPen.draw.body ? lightPen.draw.body.getMass() : 0;
+    const heavyMass = heavyPen.draw && heavyPen.draw.body ? heavyPen.draw.body.getMass() : 0;
+    lines.push("INFO pen-thick light " + lightThick.toFixed(3) + " heavy " + heavyThick.toFixed(3) + " mouse " + mouseThick.toFixed(3) + " masses " + lightMass.toFixed(3) + "," + heavyMass.toFixed(3));
+    check("a light pen stroke makes a thinner wire", !!lightPen.draw && lightPen.draw.kind === "wire" && lightThick < THICK - 0.005);
+    check("a heavy pen stroke makes a thicker wire", !!heavyPen.draw && heavyPen.draw.kind === "wire" && heavyThick > THICK + 0.05);
+    check("a heavier pen wire is heavier", heavyMass > lightMass * 1.4);
+    check("a mouse stroke keeps the default thickness", !!mouseWire.draw && mouseWire.draw.kind === "wire" && Math.abs(mouseThick - THICK) < 0.001);
+    check("touch pressure does not change wire thickness", !!touchWire.draw && touchWire.draw.kind === "wire" && Math.abs(touchThick - THICK) < 0.001);
+    check("pen preview shows pressure while drawing", lightPen.previewLive && heavyPen.previewLive && !mouseWire.previewLive);
     buildLevel(LEVELS["ein-klotz"]);
     tinyNail(10, 1.42);
     tinyNail(16, 1.42);
