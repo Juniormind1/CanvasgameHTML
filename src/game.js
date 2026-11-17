@@ -678,8 +678,10 @@ function straightenOpen(pts) {
 // Vorschau bleibt der Rohzug. Nach dem Loslassen wird zuerst der Ellipsen-
 // bzw. Kreis-Fit auf den Rohpunkten geprüft (Hauptachsen per Kovarianz/PCA).
 // Residuum ist die relative Streuung der elliptischen Radien (CV-artig)
-// unter ELLIPSE_MAX_CV. Fast kreisförmige Achsen (b/a >= ELLIPSE_CIRCLE_RATIO)
-// bleiben ein Kreis. Erst wenn keine Ellipse/kein Kreis entsteht, rastet
+// unter ELLIPSE_MAX_CV. Eine Ellipse entsteht erst, wenn die Achsen um mehr
+// als (1 - ELLIPSE_CIRCLE_RATIO)*a + ELLIPSE_EXTRA_GAP (eine Rasterweite)
+// auseinanderliegen, sonst ein Kreis mit r=(a+b)/2. Erst wenn keine
+// Ellipse/kein Kreis entsteht, rastet
 // die fertige Form auf das Raster ein (Geraden, rechte Winkel). 3- und
 // 4-Ecke nach dieser Aufräumung bleiben Vielecke. Ohne Geodreieck nur
 // Kreise, Felsbrocken bleiben eckig.
@@ -693,7 +695,8 @@ const CIRCLE_MAX_R = 4;
 const CIRCLE_MIN_PTS = 5;
 const CIRCLE_CLOSE = 0.7;                     // Enden dürfen so weit offen sein
 const ELLIPSE_MAX_CV = 0.12;                  // Residuum am Ellipsenrand, analog zu CIRCLE_MAX_CV
-const ELLIPSE_CIRCLE_RATIO = 0.85;            // b/a, darüber Kreis statt Ellipse
+const ELLIPSE_CIRCLE_RATIO = 0.85;            // Anteil: Ellipse braucht a-b > (1-ratio)*a + ELLIPSE_EXTRA_GAP
+const ELLIPSE_EXTRA_GAP = GEO_GRID;           // Zusatzabstand der Radien, 1 Rasterweite (0,5 m)
 const ELLIPSE_PHYS_VERTS = 16;                // Physik-Polygon; über maxPolygonVertices wird zerlegt
 
 
@@ -711,6 +714,7 @@ const TUNE_SPEC = [
   { group: "Kreis", key: "maxR", label: "Max. Radius", min: 1, max: 8, step: 0.2, def: CIRCLE_MAX_R, fmt: (v) => v.toFixed(1) + " m" },
   { group: "Ellipse (Geodreieck)", key: "ellMaxCv", label: "Ellipsen-Residuum", min: 0.02, max: 0.30, step: 0.005, def: ELLIPSE_MAX_CV, fmt: (v) => (v * 100).toFixed(1) + " %" },
   { group: "Ellipse (Geodreieck)", key: "ellCircleRatio", label: "Kreisgrenze b/a", min: 0.30, max: 0.98, step: 0.01, def: ELLIPSE_CIRCLE_RATIO, fmt: (v) => v.toFixed(2) },
+  { group: "Ellipse (Geodreieck)", key: "ellExtraGap", label: "Zusatzabstand der Radien", min: 0, max: 3, step: 0.25, def: 1, fmt: (v) => Number(v).toFixed(2) + " Raster (" + (Number(v) * GEO_GRID).toFixed(2) + " m)", toCode: (d) => d * GEO_GRID },
   { group: "Ellipse (Geodreieck)", key: "rightTol", label: "90°-Toleranz", min: 2, max: 25, step: 1, def: CIRCLE_RIGHT_TOL * 180 / Math.PI, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Ellipse (Geodreieck)", key: "ellVerts", label: "Physik-Ecken", min: 8, max: 24, step: 1, def: ELLIPSE_PHYS_VERTS, int: true },
   { group: "Vieleck / Dreieck", key: "simplify", label: "Vereinfachen", min: 0.01, max: 0.12, step: 0.005, def: 0.045, fmt: (v) => v.toFixed(3) + " m" },
@@ -813,7 +817,7 @@ function refreshTuneReadout() {
   lines.push("Zuletzt: " + info.kindName + (info.geo ? "  (Geodreieck an)" : "  (Geodreieck aus)"));
   if (info.circ) lines.push("Kreis-CV: " + (info.circ.cv * 100).toFixed(1) + " %   r=" + info.circ.r.toFixed(2) + " m");
   if (info.ell) {
-    lines.push("Ellipsen-CV: " + (info.ell.cv * 100).toFixed(1) + " %   a=" + info.ell.a.toFixed(2) + "  b=" + info.ell.b.toFixed(2) + "  b/a=" + (info.ell.b / info.ell.a).toFixed(2));
+    lines.push("Ellipsen-CV: " + (info.ell.cv * 100).toFixed(1) + " %   a=" + info.ell.a.toFixed(2) + "  b=" + info.ell.b.toFixed(2) + "  a-b=" + (info.ell.a - info.ell.b).toFixed(2) + "  b/a=" + (info.ell.b / info.ell.a).toFixed(2));
     lines.push("Drehwinkel: " + (info.ell.angle * 180 / Math.PI).toFixed(1) + "°");
   }
   if (info.verts) {
@@ -965,6 +969,7 @@ function mountTunePanel() {
       cvEllipse: lastTuneInfo.ell ? lastTuneInfo.ell.cv : null,
       a: lastTuneInfo.ell ? lastTuneInfo.ell.a : null,
       b: lastTuneInfo.ell ? lastTuneInfo.ell.b : null,
+      ab: lastTuneInfo.ell ? lastTuneInfo.ell.a - lastTuneInfo.ell.b : null,
       winkel: lastTuneInfo.ell ? lastTuneInfo.ell.angle : null,
       ecken: lastTuneInfo.verts,
       innenwinkel: lastTuneInfo.angs,
@@ -1190,13 +1195,19 @@ function ellipseFromPoints(pts) {
   return { kind: "ellipse", x: c.x, y: c.y, a, b, angle, cv, r: 0.5 * (a + b) };
 }
 
+function ellipseAxesAreRound(a, b) {
+  const ratio = tuneCode("ellCircleRatio", ELLIPSE_CIRCLE_RATIO);
+  const extra = tuneCode("ellExtraGap", ELLIPSE_EXTRA_GAP);
+  return !(a - b > (1 - ratio) * a + extra);
+}
+
 function tryMakeCircle(pts) {
   if (strokeSnaps()) {
     const ring = closedRing(pts);
     if (!ring || ring.length < tuneCode("minPts", CIRCLE_MIN_PTS) || Math.abs(signedArea(ring)) < 0.05) return null;
     const ell = ellipseFromPoints(ring);
     if (!ell || ell.cv >= tuneCode("ellMaxCv", ELLIPSE_MAX_CV)) return null;
-    if (ell.b / ell.a >= tuneCode("ellCircleRatio", ELLIPSE_CIRCLE_RATIO)) {
+    if (ellipseAxesAreRound(ell.a, ell.b)) {
       return { kind: "circle", x: ell.x, y: ell.y, r: 0.5 * (ell.a + ell.b), cv: ell.cv };
     }
     return ell;
@@ -5353,10 +5364,10 @@ function runTests() {
 
     buildLevel(LEVELS["ein-klotz"]);
     geoSnap = true;
+    // 1:1,5 bei a=2,1 / b=1,4: a-b=0,7 liegt unter 0,15*a + 1 Rasterweite (0,815), daher Kreis.
     playDrawWorld(handEllipse(16, 7, 2.1, 1.4, 0, 56, 0.06, 11, false), 702);
     geoSnap = false;
-    const geoHand15 = drawings.find((d) => d.kind === "ellipse");
-    check("pointer-drawn 1:1.5 oval with geodreieck is an ellipse", !!geoHand15 && geoHand15.a / geoHand15.b > 1.2 && geoHand15.a / geoHand15.b < 1.9);
+    check("pointer-drawn mid-size 1:1.5 oval with geodreieck is a circle", !!drawings.find((d) => d.kind === "roller") && !drawings.some((d) => d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     geoSnap = true;
@@ -5370,9 +5381,27 @@ function runTests() {
     geoSnap = false;
     check("sparse jittered oval with geodreieck is an ellipse", !!drawings.find((d) => d.kind === "ellipse"));
 
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 3.0, 2.2, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const nearRoundGap = drawings.find((d) => d.kind === "roller");
+    check("near-round 3-by-2.2 oval becomes a circle", !!nearRoundGap && !drawings.some((d) => d.kind === "ellipse") && Math.abs(nearRoundGap.r - 2.6) < 0.15);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 3.0, 1.8, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const clearGapEll = drawings.find((d) => d.kind === "ellipse");
+    check("3-by-1.8 oval stays an ellipse", !!clearGapEll && Math.abs(clearGapEll.a - 3) < 0.15 && Math.abs(clearGapEll.b - 1.8) < 0.12);
+
     let geoHits = 0;
     let geoTotal = 0;
+    let geoEllHits = 0;
+    let geoCircHits = 0;
     const geoCases = [
+      // Die vier nahezu runden Fälle (a-b unter 0,15*a + Rasterweite) sollen Kreise werden,
+      // zählen in der Quote aber weiter als erkannt (Ellipse oder Kreis, nicht Vieleck).
       [1.8, 1.2, 0, 64, 0.04, 1, false],
       [2.0, 1.0, 15, 48, 0.05, 2, false],
       [2.1, 0.7, 0, 40, 0.05, 3, false],
@@ -5393,10 +5422,12 @@ function runTests() {
       const raw = handEllipse(16, 7, ra, rb, deg * Math.PI / 180, n, wob, seed, gap);
       finishPlayStroke(raw, raw);
       geoSnap = false;
+      if (drawings.some((d) => d.kind === "ellipse")) geoEllHits += 1;
+      if (drawings.some((d) => d.kind === "roller")) geoCircHits += 1;
       if (drawings.some((d) => d.kind === "ellipse" || d.kind === "roller")) geoHits += 1;
     }
-    lines.push("INFO geo hand-ellipse " + geoHits + "/" + geoTotal);
-    check("most hand-drawn ovals with geodreieck become ellipses", geoHits >= 10);
+    lines.push("INFO geo hand-ellipse " + geoHits + "/" + geoTotal + " (ellipses " + geoEllHits + ", circles " + geoCircHits + ")");
+    check("most hand-drawn ovals with geodreieck become ellipses or circles", geoHits >= 10);
 
     buildLevel(LEVELS["ein-klotz"]);
     geoSnap = true;
@@ -5457,6 +5488,12 @@ function runTests() {
     commitStroke(ellipseStroke(16, 7, 2.0, 1.0, 0, 32), "#7a4fbf");
     geoSnap = false;
     check("lower b/a threshold turns a 1:2 oval into a circle", !!drawings.find((d) => d.kind === "roller") && !drawings.some((d) => d.kind === "ellipse"));
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    tuneVals = { ellExtraGap: 0 };
+    commitStroke(ellipseStroke(16, 7, 3.0, 2.2, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    check("zero extra radius gap keeps a 3-by-2.2 oval an ellipse", !!drawings.find((d) => d.kind === "ellipse") && !drawings.some((d) => d.kind === "roller"));
     tuneOn = tunePrevOn;
     tuneVals = tunePrevVals;
     try {
