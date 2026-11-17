@@ -8,7 +8,7 @@ Der Link führt zum spielbaren `index.html`. GitHub entfernt `target="_blank"` a
 
 Lokal geht dieselbe Datei über `index.html`. Gezeichnete Striche werden zu Körpern. Die rote Kugel muss die Sterne berühren.
 
-Quelle ist `src/game.js`. `src/planck.min.js` ist Planck.js 1.4.2. `py -3 src/assemble.py` schreibt `index.html` neu.
+Quelle sind die Dateien unter `src/game/`. `src/assemble.py` fügt sie in fester Reihenfolge mit `src/planck.min.js` (Planck.js 1.4.2) zu einer `index.html` zusammen. `index.html` nicht von Hand ändern.
 
 - Offene Linie: Draht. Geschlossene Fläche: schwerer Körper.
 - Runder Strich: rollende Kugel, gibt ihren Schwung weiter.
