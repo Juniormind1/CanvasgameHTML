@@ -7,7 +7,7 @@
 - **Bedienung nur über intuitive Mausgesten.** Was der Spieler zeichnet oder anfasst, soll sich von selbst erklären.
 - **Abwechslung kommt aus gutem Leveldesign**, nicht aus immer mehr Werkzeugen oder Objekttypen.
 - Vorschläge für neue Bedienelemente (Buttons, Menüs, Modi) vorher mit dem Nutzer klären.
-- **Ausnahme Parameter-Bildschirm:** Nur über den Entwicklungs-Link `?tune=1`. Im normalen Spiel gibt es keine Werkzeugleiste. Der Schirm hat Schieberegler für Kreis-, Ellipsen-, Vieleck- und Dreieckerkennung (unter anderem `CIRCLE_MAX_CV`, `ELLIPSE_MAX_CV`, Kreisgrenze `b/a`, Zusatzabstand der Radien `ELLIPSE_EXTRA_GAP`, Ecken- und Aufräumwerte, Rechtwinkel-Toleranz `rightCorner`, Parallel- und Symmetrie-Toleranz für Vierecke) sowie für das Seilschneiden (Spitzenwinkel, Senkrecht-Toleranz, Mindesttempo). Änderungen gelten nur in diesem Modus und werden in `localStorage` gemerkt; ohne `?tune=1` gelten immer die Konstanten in `src/game/` (Vorgaben unter anderem in `00-config.js`, `20-formerkennung.js`, `25-tune-panel.js` und `40-seile.js`). Der Schirm selbst steht in `src/game/25-tune-panel.js`. Zurücksetzen stellt die Vorgaben wieder her, Kopieren liefert die aktuellen Werte plus die Messung des letzten Zugs als JSON.
+- **Ausnahme Parameter-Bildschirm:** Nur über den Entwicklungs-Link `?tune=1`. Im normalen Spiel gibt es keine Werkzeugleiste. Der Schirm hat Schieberegler für Kreis-, Ellipsen-, Vieleck- und Dreieckerkennung (unter anderem `CIRCLE_MAX_CV`, `ELLIPSE_MAX_CV`, Kreisgrenze `b/a`, Zusatzabstand der Radien `ELLIPSE_EXTRA_GAP`, Ecken- und Aufräumwerte, Rechtwinkel-Toleranz `rightCorner`, Parallel- und Symmetrie-Toleranz für Vierecke) sowie für das Seilschneiden (Spitzenwinkel, Senkrecht-Toleranz, Mindesttempo). Änderungen gelten nur in diesem Modus und werden in `localStorage` gemerkt; ohne `?tune=1` gelten immer die Konstanten in `src/game/` (Vorgaben unter anderem in `00-config.js`, `20-formerkennung.js`, `25-tune-panel.js` und `40-seile.js`). Der Schirm selbst steht in `src/game/25-tune-panel.js`. Zurücksetzen stellt die Vorgaben wieder her, Kopieren liefert die aktuellen Werte plus die Messung des letzten Zugs als JSON. Unter „Zettel“ liegen die Knöpfe „Zettel kopieren“ und „Laden“ für den Spielstand (siehe unten).
 
 ## Gesten im Spiel
 
@@ -59,13 +59,21 @@
   - `75-tribok.js` — Tribok auf der Titelkarte (`ensureTrebuchet`, `trebWorld`)
   - `80-karte-editor.js` — Titelkarte, Hilfe, Editor, `render`
   - `85-eingabe.js` — Maus, Stift, Griffzonen (`tryAdoptCenterGrab`)
-  - `90-takt.js` — feste 1/60-s-Schritte (`FIXED_DT`), `boot()`
+  - `88-szene.js` — Szenenzettel (Export/Import, `CGZ1:`/`CGJ1:`)
+  - `90-takt.js` — feste 1/60-s-Schritte (`FIXED_DT`), `boot()`, `?scene=` und `?pause=1`
   - `95-tests.js` — automatische Tests `?test=1`
   - `99-start.js` — `window.__crayon` und Aufruf von `boot()`
 - Die Nummerierung folgt der Ladereihenfolge, nicht einer thematischen Umordnung. Funktionen bleiben an ihrem bisherigen Platz, auch wenn ein Thema (etwa Formerkennung und Tune-Panel) in aufeinanderfolgenden Dateien liegt. Neue Dateien nur so einfügen, dass die Verkettung das bisherige Verhalten ergibt.
 - `src/planck.min.js` ist Planck.js 1.4.2 (Kontaktlöser).
 - `index.html` wird mit `py -3 src/assemble.py` (Linux: `python3 src/assemble.py`) erzeugt – nie von Hand ändern.
 - `src/readlog.py PFAD-ZUM-DUMP` liest ein Testlog.
+- `tools/scene.py [decode] ZETTEL [AUSGABE.json]` macht aus einem Zettel-Text lesbares JSON. `tools/scene.py shot ZETTEL [AUSGABE.png] [--pause]` öffnet denselben Zettel headless und speichert ein Bild (langer Text wird in die Seite eingebettet, nicht in die URL).
+
+## Problem melden per Zettel
+
+- Ein Schmierzettel, der ein Problem zeigt, lebt nur im Browser des Spielers. Damit er reproduzierbar hier ankommt: `?tune=1` öffnen, den Stand herstellen, im Parameter-Bildschirm „Zettel kopieren“ drücken und den Text hier herschicken. Der Assistent lädt ihn mit `?scene=…` (kurze Texte) oder über „Zettel einfügen“ und „Laden“ imselben Panel (Hauptweg, auch bei langen Texten) bzw. mit `tools/scene.py`.
+- Format: JSON mit Versionsfeld `v: 1` (Level-Id, Modus, Körper inkl. Form/Lage/Geschwindigkeit/Material, Nägel, Joints, Seile, Verankerungen, Geodreieck, Tune-Werte, Kamera), dann `deflate-raw` falls verfügbar, sonst unkomprimiert, als base64url mit Präfix `CGZ1:` (komprimiert) oder `CGJ1:` (roh). Ungültiger Text gibt eine freundliche Meldung und stürzt nicht ab. `?pause=1` hält die Simulation nach dem Laden an; `?scene=…&shot=1` eignet sich für einen Headless-Screenshot.
+- Determinismus: Nach Export und Import stimmen Körperzahl, Gelenke, Positionen und Geschwindigkeiten überein (gemessen unter `1e-6`). Danach, bei festen 1/60-s-Schritten, blieb eine Testszene über 60 Schritte deckungsgleich (Drift 0). Planck-interne Warmstart-Impulse und der Kontaktgraph werden nicht mitgeschrieben; nach längeren, kontaktreichen Läufen kann die Bahn deshalb leicht abweichen. Die Tests erlauben für 1 s Simulation eine Sicherheitsgrenze von 0,25 (Summe aus Lage- und Geschwindigkeitsdifferenz).
 
 ## Tests
 
