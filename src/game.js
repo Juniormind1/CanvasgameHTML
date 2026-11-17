@@ -4,7 +4,17 @@ const VIEW_W = 32;
 const VIEW_H = 18;
 const BALL_R = 0.34;
 const THICK = 0.16;
-const COLORS = ["#d94b3a", "#ef8b2c", "#e6b423", "#3e9a48", "#3c7fd6", "#7a4fbf", "#8d5a34", "#2b2b2b"];
+// Farbe folgt dem Material. Der Spieler wählt keine Farbe.
+const MAT = {
+  steel: "#8b939e",
+  steelDark: "#4a515a",
+  wood: "#8d5a34",
+  wire: "#5c4632",
+  hemp: "#c9a56a",
+  ink: "#5c5348",
+  terrain: "#3f8f55",
+  decor: "#6b5844",
+};
 const GEO_GRID = 0.5;
 const BALL_RESTITUTION = 0.4;
 // Unter dieser Relativgeschwindigkeit bleibt der Stoß unelastisch (Ruhekontakt).
@@ -22,7 +32,6 @@ let dpr = 1;
 let viewW = 800;
 let viewH = 450;
 const cam = { cx: 16, cy: 9, zoom: 1 };
-let colorIndex = 4;
 let geoSnap = false;
 let mode = "map";
 let ui = [];
@@ -1548,9 +1557,9 @@ function spawnSolid(pts, opt) {
   const meta = track(body, {
     kind: "draw",
     thick: THICK,
-    outline: { local, closed: true, color: opt.color, width: 0.13, fixed: false },
+    outline: { local, closed: true, color: MAT.wood, width: 0.13, fixed: false },
   });
-  const draw = { kind: "solid", body, meta, color: opt.color };
+  const draw = { kind: "solid", body, meta, color: MAT.wood };
   drawings.push(draw);
   attachExistingPins(body, meta);
   noteShape(clean);
@@ -1594,16 +1603,16 @@ function spawnWire(pts, opt) {
   const meta = track(body, {
     kind: "draw",
     thick: THICK,
-    outline: { local, closed: false, color: opt.color, width: THICK, fixed: false },
+    outline: { local, closed: false, color: MAT.wire, width: THICK, fixed: false },
   });
-  const draw = { kind: "wire", body, meta, color: opt.color };
+  const draw = { kind: "wire", body, meta, color: MAT.wire };
   drawings.push(draw);
   attachExistingPins(body, meta);
   noteShape(clean);
   return draw;
 }
 
-function spawnBlob(x, y, r, color) {
+function spawnBlob(x, y, r) {
   const body = world.createDynamicBody({
     position: V(x, y),
     linearDamping: 0.04,
@@ -1616,7 +1625,7 @@ function spawnBlob(x, y, r, color) {
     circles: [{ x: 0, y: 0, r }],
     outline: null,
   });
-  const draw = { kind: "blob", body, meta, color, x, y, r };
+  const draw = { kind: "blob", body, meta, color: MAT.steel, x, y, r };
   drawings.push(draw);
   noteShape([{ x, y: y - r }, { x, y }]);
   return draw;
@@ -1636,7 +1645,7 @@ function ellipseLocalPoly(a, b, angle, n) {
   return ensureCCW(pts);
 }
 
-function spawnEllipse(x, y, a, b, angle, color) {
+function spawnEllipse(x, y, a, b, angle) {
   const body = world.createDynamicBody({
     position: V(x, y),
     linearDamping: 0.04,
@@ -1664,16 +1673,16 @@ function spawnEllipse(x, y, a, b, angle, color) {
     kind: "ellipse",
     round: true,
     ellipse: { a, b, angle },
-    outline: { local, closed: true, color, width: 0.13, fixed: false },
+    outline: { local, closed: true, color: MAT.steel, width: 0.13, fixed: false },
   });
-  const draw = { kind: "ellipse", body, meta, color, x, y, a, b, angle };
+  const draw = { kind: "ellipse", body, meta, color: MAT.steel, x, y, a, b, angle };
   drawings.push(draw);
   attachExistingPins(body, meta);
   noteShape([{ x: x - a, y }, { x, y: y - b }, { x: x + a, y }]);
   return draw;
 }
 
-function spawnRoller(x, y, r, color) {
+function spawnRoller(x, y, r) {
   const body = world.createDynamicBody({
     position: V(x, y),
     linearDamping: 0.015,
@@ -1687,14 +1696,14 @@ function spawnRoller(x, y, r, color) {
     circles: [{ x: 0, y: 0, r }],
     outline: null,
   });
-  const draw = { kind: "roller", body, meta, color, x, y, r };
+  const draw = { kind: "roller", body, meta, color: MAT.steel, x, y, r };
   drawings.push(draw);
   attachExistingPins(body, meta);
   noteShape([{ x: x - r, y }, { x, y: y - r }, { x: x + r, y }]);
   return draw;
 }
 
-function spawnRope(pinA, pinB, stroke, color) {
+function spawnRope(pinA, pinB, stroke) {
   const start = pinWorld(pinA);
   const end = pinWorld(pinB);
   let pts = stroke.map((p) => ({ x: p.x, y: p.y }));
@@ -1761,7 +1770,7 @@ function spawnRope(pinA, pinB, stroke, color) {
     localAnchorB: V(0, 0),
     collideConnected: false,
   }));
-  drawings.push({ kind: "rope", ropeId, bodies, color });
+  drawings.push({ kind: "rope", ropeId, bodies, color: MAT.hemp });
   stats.shapes += 1;
   stats.ropes += 1;
   return drawings[drawings.length - 1];
@@ -1832,9 +1841,8 @@ function commitStroke(rawPts, color) {
   return result;
 }
 
-function commitStrokeApply(rawPts, color) {
+function commitStrokeApply(rawPts) {
   if (won || !world) return null;
-  const used = color || COLORS[colorIndex];
   let pts = simplify(rawPts, tuneCode("simplify", 0.045));
   pts = dedupe(pts);
   if (pts.length < 2) return null;
@@ -1864,29 +1872,29 @@ function commitStrokeApply(rawPts, color) {
       return rememberPin(cx, cy, host, true);
     }
     const r = clamp(Math.max(bw, bh) * 0.5, 0.12, 0.34);
-    return spawnBlob(cx, cy, r, used);
+    return spawnBlob(cx, cy, r);
   }
   // Rundheit am Originalzug prüfen: simplify() macht aus einem Kreis
   // sonst ein grobes Vieleck und würde echte Kreise verwerfen.
   if (closed || dist(pts[0], pts[pts.length - 1]) < tuneCode("close", CIRCLE_CLOSE)) {
     const fit = tryMakeCircle(dedupe(rawPts));
     if (fit) {
-      if (fit.kind === "ellipse") return spawnEllipse(fit.x, fit.y, fit.a, fit.b, fit.angle, used);
-      return spawnRoller(fit.x, fit.y, fit.r, used);
+      if (fit.kind === "ellipse") return spawnEllipse(fit.x, fit.y, fit.a, fit.b, fit.angle);
+      return spawnRoller(fit.x, fit.y, fit.r);
     }
   }
   if (!closed) {
     const a = nearestPin(pts[0].x, pts[0].y, 0.55);
     const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55);
-    if (a && b && a !== b) return spawnRope(a, b, pts, used);
+    if (a && b && a !== b) return spawnRope(a, b, pts);
   }
   if (closed && !selfIntersects(pts, true) && Math.abs(signedArea(pts)) >= 0.05) {
-    const solid = spawnSolid(regularizeClosed(pts), { color: used });
+    const solid = spawnSolid(regularizeClosed(pts), {});
     if (solid) return solid;
-    return spawnWire(pts.concat([{ x: pts[0].x, y: pts[0].y }]), { color: used });
+    return spawnWire(pts.concat([{ x: pts[0].x, y: pts[0].y }]), {});
   }
-  if (!closed) return spawnWire(straightenOpen(pts), { color: used });
-  return spawnWire(pts, { color: used });
+  if (!closed) return spawnWire(straightenOpen(pts), {});
+  return spawnWire(pts, {});
 }
 
 function destroyDrawing(draw) {
@@ -2559,9 +2567,9 @@ function makeBox(def) {
   const meta = track(body, {
     kind: "draw",
     tag: def.tag || "",
-    outline: { local, closed: true, color: def.color, width: 0.12, fixed: false },
+    outline: { local, closed: true, color: MAT.wood, width: 0.12, fixed: false },
   });
-  drawings.push({ kind: "solid", body, meta, color: def.color, preset: true });
+  drawings.push({ kind: "solid", body, meta, color: MAT.wood, preset: true });
   if (def.pin) rememberPin(def.x, def.y + def.hh - 0.05, body, false);
   return body;
 }
@@ -2894,19 +2902,20 @@ function drawBall() {
   const rad = BALL_R * camScale();
   ctx.save();
   ctx.translate(s.x, s.y);
-  ctx.rotate(-ball.getAngle());
-  ctx.fillStyle = "#e23b32";
-  ctx.globalAlpha = 0.92;
+  ctx.fillStyle = MAT.steel;
+  ctx.globalAlpha = 0.96;
   ctx.beginPath();
   ctx.arc(0, 0, rad, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = "#9d241c";
-  ctx.globalAlpha = 0.8;
-  ctx.lineWidth = Math.max(2, rad * 0.18);
+  ctx.strokeStyle = MAT.steelDark;
+  ctx.globalAlpha = 0.9;
+  ctx.lineWidth = Math.max(2, rad * 0.12);
   ctx.stroke();
+  ctx.rotate(-ball.getAngle());
+  ctx.strokeStyle = "#8a3a32";
+  ctx.lineWidth = Math.max(1.6, rad * 0.14);
   ctx.beginPath();
-  ctx.strokeStyle = "rgba(255,255,255,0.45)";
-  ctx.arc(-rad * 0.25, -rad * 0.2, rad * 0.72, Math.PI * 1.1, Math.PI * 1.7);
+  ctx.arc(0, 0, rad * 0.62, -0.55, 0.55);
   ctx.stroke();
   ctx.restore();
 }
@@ -2989,7 +2998,7 @@ function drawRope(draw) {
     const p = body.getPosition();
     pts.push({ x: p.x, y: p.y });
   }
-  crayonPath(pts, draw.color || "#2b2b2b", 0.09);
+  crayonPath(pts, draw.color || MAT.hemp, 0.09);
 }
 
 function drawRocket(rocket) {
@@ -3103,7 +3112,7 @@ function renderPlay() {
   for (const star of stars) drawStar(star);
   drawBall();
   if (pointer && pointer.pts && pointer.pts.length) {
-    crayonPath(pointer.pts, COLORS[colorIndex], THICK);
+    crayonPath(pointer.pts, MAT.ink, THICK);
   }
 }
 
@@ -3183,10 +3192,9 @@ function drawHUD() {
   const got = stars.filter((s) => s.got).length;
   label("Sterne " + got + "/" + stars.length, 24, 76, 16, "#8a5a20");
   if (stats.shapes === 1 && stats.nudges === 0) label("bisher elegant", 150, 76, 16, "#3e9a48");
-  const sw = 22;
   const geoW = 36;
-  const geoH = sw;
-  const geoX = viewW - 28 - COLORS.length * (sw + 8) - 10 - geoW;
+  const geoH = 22;
+  const geoX = viewW - 24 - geoW;
   const geoY = 18;
   ui.push({
     x: geoX, y: geoY, w: geoW, h: geoH,
@@ -3223,22 +3231,7 @@ function drawHUD() {
   }
   ctx.stroke();
   ctx.restore();
-  for (let i = 0; i < COLORS.length; i++) {
-    const x = viewW - 28 - (COLORS.length - i) * (sw + 8);
-    const y = 18;
-    ui.push({
-      x, y, w: sw, h: sw,
-      onClick: () => { colorIndex = i; },
-    });
-    ctx.fillStyle = COLORS[i];
-    ctx.strokeStyle = i === colorIndex ? "#2b2b2b" : "rgba(0,0,0,0.2)";
-    ctx.lineWidth = i === colorIndex ? 3 : 1;
-    ctx.beginPath();
-    ctx.arc(x + sw / 2, y + sw / 2, sw / 2 - 1, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-  }
-  label("Rad: Farbe    Rechtsklick: radiert    R: neu    M: Karte    H: Hilfe", 24, viewH - 32, 15, "#6b5844");
+  label("Rechtsklick: radiert    R: neu    M: Karte    H: Hilfe    Shift+Rad: Zoom", 24, viewH - 32, 15, "#6b5844");
   if (won) {
     const w = 440;
     const h = 220;
@@ -3551,9 +3544,9 @@ function drawCradle() {
     ctx.stroke();
     ctx.beginPath();
     ctx.arc(s.x, s.y, Math.max(5, rec.r * lay.scale), 0, Math.PI * 2);
-    ctx.fillStyle = rec.side ? "#d94b3a" : "#3c7fd6";
+    ctx.fillStyle = MAT.steel;
     ctx.fill();
-    ctx.strokeStyle = "#2b2b2b";
+    ctx.strokeStyle = MAT.steelDark;
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -3566,7 +3559,7 @@ function renderMap() {
     label("Male die Welt.", frame.margin, frame.subY, 16, "#5c4632");
     label("Die Kugel muss jeden Stern berühren.", frame.margin, frame.subY + 20, 16, "#5c4632");
   } else {
-    label("Male die Welt. Die rote Kugel muss jeden Stern berühren.", frame.margin, frame.subY, frame.titleSize > 40 ? 20 : 16, "#5c4632");
+    label("Male die Welt. Die Spielkugel muss jeden Stern berühren.", frame.margin, frame.subY, frame.titleSize > 40 ? 20 : 16, "#5c4632");
   }
   label("Sterne " + starCount() + " / " + ORDER.length, frame.margin, frame.starY, 18, "#8a5a20");
   drawCradle();
@@ -3637,12 +3630,12 @@ function renderHelp() {
     "Klick in einen Gegenstand zieht ihn. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
-    "Klick auf die rote Kugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
+    "Klick auf die Spielkugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
     "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
     "Elegant: genau ein Gegenstand, ohne die Kugel anzuklicken. Nägel zählen nicht.",
     "Old School: kein Schubs, kein eigener Nagel, kein Seil, nichts unter der Kugel.",
-    "Das Geodreieck neben den Farben lässt den Stift auf ein Raster einrasten.",
-    "Mausrad wählt die Farbe, Shift+Rad zoomt, mittlere Taste verschiebt das Blatt.",
+    "Das Geodreieck oben rechts lässt den Stift auf ein Raster einrasten.",
+    "Shift+Rad zoomt, mittlere Taste verschiebt das Blatt.",
     "R setzt das Level zurück. M oder Esc öffnet die Karte.",
   ];
   const helpStep = Math.min(34, Math.max(20, Math.floor((viewH - 110 - 96) / lines.length)));
@@ -3743,10 +3736,13 @@ function renderEditor() {
   ctx.restore();
   const b = editorDoc.ball;
   const bs = worldToScreen(b[0], b[1]);
-  ctx.fillStyle = "#e23b32";
+  ctx.fillStyle = MAT.steel;
   ctx.beginPath();
   ctx.arc(bs.x, bs.y, BALL_R * camScale(), 0, Math.PI * 2);
   ctx.fill();
+  ctx.strokeStyle = MAT.steelDark;
+  ctx.lineWidth = 2;
+  ctx.stroke();
   for (const star of editorDoc.stars) {
     const s = worldToScreen(star[0], star[1]);
     ctx.fillStyle = "#f2c14b";
@@ -3770,7 +3766,7 @@ function renderEditor() {
     ctx.fillRect(-18, -8, 36, 16);
     ctx.restore();
   }
-  if (pointer && pointer.pts) crayonPath(pointer.pts, COLORS[colorIndex], THICK);
+  if (pointer && pointer.pts) crayonPath(pointer.pts, MAT.ink, THICK);
   label("Editor", 48, 64, 28);
   const tools = [
     ["terrain", "Gelände"],
@@ -4012,7 +4008,7 @@ function onPointerUp(e) {
     const shaped = editorTool === "terrain" ? tidyTerrain(current.pts) : current.pts;
     editorDoc.strokes.push({
       kind: editorTool === "decor" ? "decor" : "terrain",
-      color: COLORS[colorIndex],
+      color: editorTool === "decor" ? MAT.decor : MAT.terrain,
       points: shaped.map((p) => [p.x, p.y]),
     });
   }
@@ -4021,7 +4017,7 @@ function onPointerUp(e) {
 function finishPlayStroke(trail, pts) {
   const gesture = tryAnchorGesture(trail);
   if (gesture) return gesture;
-  return commitStroke(pts || trail, COLORS[colorIndex]);
+  return commitStroke(pts || trail);
 }
 
 // Planck skaliert den gespeicherten Kontakt- und Gelenkimpuls beim Warmstart mit
@@ -4062,7 +4058,6 @@ function boot() {
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     if (e.shiftKey) cam.zoom = clamp(cam.zoom * (e.deltaY > 0 ? 0.92 : 1.08), 0.55, 2.4);
-    else colorIndex = (colorIndex + (e.deltaY > 0 ? 1 : COLORS.length - 1)) % COLORS.length;
   }, { passive: false });
   window.addEventListener("keydown", (e) => {
     if (e.target === namebox) return;
@@ -4077,7 +4072,6 @@ function boot() {
         returnMode = "map";
       } else showMap();
     } else if (e.key === "h" || e.key === "H") mode = "help";
-    else if (e.key >= "1" && e.key <= "8") colorIndex = Number(e.key) - 1;
     else if (e.key === "0") resetCam();
   });
   const params = new URLSearchParams(location.search);
@@ -4795,7 +4789,7 @@ function runTests() {
       for (let i = 0; i < 60; i++) step(1 / 60);
       check("anchor ground->rectangle makes it static", ancRes1 === "anchor" && ancA.body.isStatic() && anchors.length === 1 && anchors[0].base === ground);
       check("anchor gesture draws no stroke", drawings.length === ancDrawCount && stats.shapes === ancShapes);
-      check("anchor link has the body color", anchors.length === 1 && anchors[0].color === "#3c7fd6");
+      check("anchor link has the body color", anchors.length === 1 && anchors[0].color === MAT.wood);
 
       const ancB = ancRect(19.2, ancTopA + 0.05, 1, 0.8, "#d94b3a");
       for (let i = 0; i < 90; i++) step(1 / 60);
@@ -5185,21 +5179,21 @@ function runTests() {
     const tintA = ancBox(19, 1.4, 1.5, 1, "#3c7fd6");
     for (let i = 0; i < 90; i++) step(1 / 60);
     finishPlayStroke([{ x: 18.6, y: 1.2 }, { x: 19, y: 1.45 }, { x: 19.4, y: 1.7 }]);
-    check("anchored body takes the ground color", !!tintA && isAnchored(tintA.body) && tintA.color === "#3f8f55" && anchors[0].color === "#3c7fd6");
+    check("anchored body takes the ground color", !!tintA && isAnchored(tintA.body) && tintA.color === "#3f8f55" && anchors[0].color === MAT.wood);
     const tintTop = tintA.body.getPosition().y + 0.5;
     const tintB = ancBox(19.2, tintTop + 0.05, 1, 0.8, "#d94b3a");
     for (let i = 0; i < 90; i++) step(1 / 60);
     finishPlayStroke([{ x: 19.9, y: tintTop - 0.15 }, { x: 19.85, y: tintTop + 0.1 }, { x: 19.8, y: tintTop + 0.35 }]);
-    check("chained body takes the same ground color", !!tintB && isAnchored(tintB.body) && tintB.color === "#3f8f55" && tintA.color === "#3f8f55" && anchorOf(tintB.body).color === "#d94b3a");
+    check("chained body takes the same ground color", !!tintB && isAnchored(tintB.body) && tintB.color === "#3f8f55" && tintA.color === "#3f8f55" && anchorOf(tintB.body).color === MAT.wood);
     const tintBLink = anchorOf(tintB.body);
     const tintBMid = { x: (tintBLink.a.x + tintBLink.b.x) / 2, y: (tintBLink.a.y + tintBLink.b.y) / 2 };
     const tintBMidScr = worldToScreen(tintBMid.x, tintBMid.y);
     onPointerDown({ button: 2, clientX: tintBMidScr.x, clientY: tintBMidScr.y, pointerId: 51 });
-    check("released body gets its own color back", !isAnchored(tintB.body) && tintB.color === "#d94b3a" && isAnchored(tintA.body) && tintA.color === "#3f8f55");
+    check("released body gets its own color back", !isAnchored(tintB.body) && tintB.color === MAT.wood && isAnchored(tintA.body) && tintA.color === "#3f8f55");
     const tintAMid = { x: (anchors[0].a.x + anchors[0].b.x) / 2, y: (anchors[0].a.y + anchors[0].b.y) / 2 };
     const tintAMidScr = worldToScreen(tintAMid.x, tintAMid.y);
     onPointerDown({ button: 2, clientX: tintAMidScr.x, clientY: tintAMidScr.y, pointerId: 52 });
-    check("released root also restores its color", !isAnchored(tintA.body) && tintA.color === "#3c7fd6");
+    check("released root also restores its color", !isAnchored(tintA.body) && tintA.color === MAT.wood);
 
     buildLevel(LEVELS["bergauf"]);
     const tintLeft = ancBox(3, 2.45, 1.4, 0.9, "#3c7fd6");
@@ -5209,6 +5203,32 @@ function runTests() {
     for (let i = 0; i < 90; i++) step(1 / 60);
     finishPlayStroke([{ x: 20.6, y: 8.85 }, { x: 21.1, y: 9.1 }, { x: 21.5, y: 9.3 }]);
     check("anchor tint follows the local ground color", !!tintLeft && !!tintRight && isAnchored(tintLeft.body) && isAnchored(tintRight.body) && tintLeft.color === "#3f8f55" && tintRight.color === "#c9854a");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(16, 7, 1.05, 0.95, 28, 0.07, 0.03), "#d94b3a");
+    const matCirc = drawings.find((d) => d.kind === "roller");
+    check("drawn circle is steel even if a color is passed", !!matCirc && matCirc.color === MAT.steel);
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 2.0, 1.0, 0, 32), "#3c7fd6");
+    geoSnap = false;
+    const matEll = drawings.find((d) => d.kind === "ellipse");
+    check("drawn ellipse is steel", !!matEll && matEll.color === MAT.steel);
+    buildLevel(LEVELS["ein-klotz"]);
+    const matBox = ancBox(18, 1.4, 1.6, 1, "#3c7fd6");
+    check("drawn solid is wood even if a color is passed", !!matBox && matBox.kind === "solid" && matBox.color === MAT.wood && matBox.meta.outline.color === MAT.wood);
+    const matCrate = makeBox({ x: 8, y: 3, hw: 0.5, hh: 0.5, color: "#3c7fd6" });
+    const matCrateDraw = drawings.find((d) => d.body === matCrate);
+    check("crates are wood", !!matCrateDraw && matCrateDraw.color === MAT.wood);
+    buildLevel(LEVELS["ein-klotz"]);
+    const matWire = commitStroke([{ x: 8, y: 4 }, { x: 14, y: 6 }, { x: 18, y: 5.2 }], "#00ff00");
+    check("drawn wire is dark wood even if a color is passed", !!matWire && matWire.kind === "wire" && matWire.color === MAT.wire);
+    buildLevel(LEVELS["ein-klotz"]);
+    tinyNail(10, 1.42);
+    tinyNail(16, 1.42);
+    const matPins = pins.filter((p) => p.userMade);
+    const matRope = matPins.length >= 2 ? spawnRope(matPins[0], matPins[1], [{ x: 10, y: 1.42 }, { x: 13, y: 0.4 }, { x: 16, y: 1.42 }], "#3c7fd6") : null;
+    check("drawn rope is hemp even if a color is passed", !!matRope && matRope.kind === "rope" && matRope.color === MAT.hemp);
 
     buildLevel(LEVELS["ein-klotz"]);
     tinyNail(16, 1.42);
