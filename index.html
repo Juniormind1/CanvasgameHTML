@@ -111,6 +111,7 @@ let scenery = [];
 let geometry = [];
 let bodyMeta = new Map();
 let contactQ = [];
+let ropeCutQ = [];
 let ropeSeq = 1;
 let levelDef = null;
 let won = false;
@@ -792,6 +793,9 @@ const TUNE_SPEC = [
   { group: "Vieleck / Dreieck", key: "hullFill", label: "Füllung zur Hülle", min: 0.50, max: 0.95, step: 0.01, def: 0.7, fmt: (v) => (v * 100).toFixed(0) + " %" },
   { group: "Vieleck / Dreieck", key: "boxFill", label: "Füllung zum Rechteck", min: 0.70, max: 0.99, step: 0.01, def: 0.9, fmt: (v) => (v * 100).toFixed(0) + " %" },
   { group: "Vieleck / Dreieck", key: "boxGap", label: "Eckenabstand / kurze Seite", min: 0.04, max: 0.30, step: 0.01, def: 0.16, fmt: (v) => (v * 100).toFixed(0) + " %" },
+  { group: "Seil", key: "ropeCutAngle", label: "Schnitt-Spitze", min: 5, max: 30, step: 1, def: 15, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
+  { group: "Seil", key: "ropeCutAlign", label: "Senkrecht-Toleranz", min: 10, max: 45, step: 1, def: 30, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
+  { group: "Seil", key: "ropeCutSpeed", label: "Schnitt-Mindesttempo", min: 0.5, max: 8, step: 0.25, def: 2.5, fmt: (v) => Number(v).toFixed(2) + " m/s" },
 ];
 const TUNE_BY_KEY = {};
 for (const spec of TUNE_SPEC) TUNE_BY_KEY[spec.key] = spec;
@@ -1417,6 +1421,7 @@ function clearWorld() {
   geometry = [];
   bodyMeta = new Map();
   contactQ = [];
+  ropeCutQ = [];
   won = false;
   medals = { elegant: false, oldschool: false };
   stats = { shapes: 0, nudges: 0, userPins: 0, ropes: 0, drewUnder: false, dragTrick: false };
@@ -1805,6 +1810,9 @@ const ROPE_SPACING = 0.22;
 const ROPE_BEAD_R = 0.10;
 const ROPE_BEAD_DENSITY = 1.6;
 const ROPE_MAX_STRETCH = 1.01;
+const ROPE_CUT_ANGLE = 15 * Math.PI / 180;   // Innenwinkel der Spitze
+const ROPE_CUT_ALIGN = 30 * Math.PI / 180;   // Abweichung von der Senkrechten
+const ROPE_CUT_SPEED = 2.5;                  // m/s, Mindestgeschwindigkeit
 
 function pathLength(pts) {
   let len = 0;
@@ -2122,6 +2130,214 @@ function tightenRopes(list) {
       limitRopeChord(draw);
       scaleRopeToRest(draw);
     }
+  }
+}
+
+function velocityAt(body, wx, wy) {
+  const v = body.getLinearVelocity();
+  const w = body.getAngularVelocity();
+  const p = body.getPosition();
+  return { x: v.x - w * (wy - p.y), y: v.y + w * (wx - p.x) };
+}
+
+function ropeTips(worldPts, maxAng) {
+  if (!worldPts || worldPts.length < 3) return [];
+  const ccw = ensureCCW(worldPts.map((p) => ({ x: p.x, y: p.y })));
+  const angs = interiorAngles(ccw);
+  const tips = [];
+  for (let i = 0; i < ccw.length; i++) {
+    if (angs[i] >= maxAng) continue;
+    const prev = ccw[(i + ccw.length - 1) % ccw.length];
+    const cur = ccw[i];
+    const next = ccw[(i + 1) % ccw.length];
+    const e1x = prev.x - cur.x;
+    const e1y = prev.y - cur.y;
+    const e2x = next.x - cur.x;
+    const e2y = next.y - cur.y;
+    const l1 = Math.hypot(e1x, e1y) || 1;
+    const l2 = Math.hypot(e2x, e2y) || 1;
+    let ox = -(e1x / l1 + e2x / l2);
+    let oy = -(e1y / l1 + e2y / l2);
+    const lo = Math.hypot(ox, oy) || 1;
+    tips.push({ x: cur.x, y: cur.y, nx: ox / lo, ny: oy / lo, ang: angs[i] });
+  }
+  return tips;
+}
+
+function ropeTangentAtBead(draw, index, contact) {
+  const bodies = draw.bodies;
+  const i = index;
+  let ax, ay, bx, by;
+  if (i > 0 && i < bodies.length - 1) {
+    const pa = bodies[i - 1].getPosition();
+    const pb = bodies[i + 1].getPosition();
+    ax = pa.x;
+    ay = pa.y;
+    bx = pb.x;
+    by = pb.y;
+  } else if (i < bodies.length - 1) {
+    const pa = bodies[i].getPosition();
+    const pb = bodies[i + 1].getPosition();
+    ax = pa.x;
+    ay = pa.y;
+    bx = pb.x;
+    by = pb.y;
+  } else if (i > 0) {
+    const pa = bodies[i - 1].getPosition();
+    const pb = bodies[i].getPosition();
+    ax = pa.x;
+    ay = pa.y;
+    bx = pb.x;
+    by = pb.y;
+  } else return null;
+  const d = Math.hypot(bx - ax, by - ay) || 1;
+  return { x: (bx - ax) / d, y: (by - ay) / d };
+}
+
+function noteRopeCutContact(contact) {
+  const ba = contact.getFixtureA().getBody();
+  const bb = contact.getFixtureB().getBody();
+  const ma = bodyMeta.get(ba);
+  const mb = bodyMeta.get(bb);
+  if (!ma || !mb) return;
+  let bead = null;
+  let cutter = null;
+  let cutMeta = null;
+  if (ma.kind === "rope" && mb.kind !== "rope") {
+    bead = ba;
+    cutter = bb;
+    cutMeta = mb;
+  } else if (mb.kind === "rope" && ma.kind !== "rope") {
+    bead = bb;
+    cutter = ba;
+    cutMeta = ma;
+  } else return;
+  if (!cutMeta || cutMeta.kind === "ball" || cutMeta.kind === "star" || cutMeta.kind === "wire" || cutMeta.round) return;
+  const wm = contact.getWorldManifold && contact.getWorldManifold();
+  if (!wm || !wm.pointCount) return;
+  const pt = wm.points[0];
+  const x = pt.x;
+  const y = pt.y;
+  const vc = velocityAt(cutter, x, y);
+  const vb = velocityAt(bead, x, y);
+  ropeCutQ.push({
+    bead,
+    cutter,
+    cutMeta,
+    x,
+    y,
+    vx: vc.x - vb.x,
+    vy: vc.y - vb.y,
+  });
+}
+
+function ropeShouldCut(ev) {
+  if (!ev || !ev.cutter || !ev.bead || !ev.cutMeta) return false;
+  const draw = drawings.find((d) => d.kind === "rope" && d.bodies && d.bodies.indexOf(ev.bead) >= 0);
+  if (!draw) return false;
+  const maxAng = tuneCode("ropeCutAngle", ROPE_CUT_ANGLE);
+  const align = tuneCode("ropeCutAlign", ROPE_CUT_ALIGN);
+  const minSpeed = tuneCode("ropeCutSpeed", ROPE_CUT_SPEED);
+  const speed = Math.hypot(ev.vx, ev.vy);
+  if (speed < minSpeed) return false;
+  const outline = outlineWorld(ev.cutMeta);
+  if (!outline || outline.length < 3) return false;
+  const tips = ropeTips(outline, maxAng);
+  if (!tips.length) return false;
+  let best = null;
+  let bestD = 0.28;
+  for (const tip of tips) {
+    const d = Math.hypot(tip.x - ev.x, tip.y - ev.y);
+    if (d < bestD) {
+      bestD = d;
+      best = tip;
+    }
+  }
+  if (!best) return false;
+  const sm = speed || 1;
+  const rx = ev.vx / sm;
+  const ry = ev.vy / sm;
+  if (best.nx * rx + best.ny * ry < 0.35) return false;
+  const idx = draw.bodies.indexOf(ev.bead);
+  const tan = ropeTangentAtBead(draw, idx, ev);
+  if (!tan) return false;
+  const along = Math.abs(rx * tan.x + ry * tan.y);
+  if (along > Math.sin(align)) return false;
+  const tipAlong = Math.abs(best.nx * tan.x + best.ny * tan.y);
+  if (tipAlong > Math.sin(align)) return false;
+  ev.draw = draw;
+  ev.index = idx;
+  return true;
+}
+
+function cutRopeAtBead(ev) {
+  const draw = ev.draw;
+  if (!draw || !world) return false;
+  const bodies = draw.bodies;
+  const i = ev.index;
+  if (i < 0 || bodies.length < 3) return false;
+  let cut = i;
+  if (i <= 0) cut = 0;
+  else if (i >= bodies.length - 1) cut = i - 1;
+  else {
+    const pa = bodies[i - 1].getPosition();
+    const pb = bodies[i].getPosition();
+    const pc = bodies[i + 1].getPosition();
+    const d1 = distPointSeg(ev.x, ev.y, pa.x, pa.y, pb.x, pb.y);
+    const d2 = distPointSeg(ev.x, ev.y, pb.x, pb.y, pc.x, pc.y);
+    cut = d1 <= d2 ? i - 1 : i;
+  }
+  const seg = draw.segJoints[cut];
+  if (!seg) return false;
+  if (seg.dist) world.destroyJoint(seg.dist);
+  if (seg.rope) world.destroyJoint(seg.rope);
+  if (draw.spanJoint) {
+    world.destroyJoint(draw.spanJoint);
+    draw.spanJoint = null;
+  }
+  const leftBodies = bodies.slice(0, cut + 1);
+  const rightBodies = bodies.slice(cut + 1);
+  const leftJoints = draw.segJoints.slice(0, cut);
+  const rightJoints = draw.segJoints.slice(cut + 1);
+  if (!leftBodies.length || !rightBodies.length) return false;
+  draw.bodies = leftBodies;
+  draw.segJoints = leftJoints;
+  draw.restLength = leftJoints.reduce((s, j) => s + (j && j.length ? j.length : 0), 0);
+  const ends = draw.endJoints || [null, null];
+  draw.endJoints = [ends[0], null];
+  const rightPin = draw.pinB;
+  draw.pinB = null;
+  const rightId = ropeSeq++;
+  for (const body of rightBodies) {
+    const meta = bodyMeta.get(body);
+    if (meta) meta.ropeId = rightId;
+  }
+  drawings.push({
+    kind: "rope",
+    ropeId: rightId,
+    bodies: rightBodies,
+    color: draw.color || MAT.hemp,
+    restLength: rightJoints.reduce((s, j) => s + (j && j.length ? j.length : 0), 0),
+    segJoints: rightJoints,
+    endJoints: [null, ends[1]],
+    spanJoint: null,
+    pinA: null,
+    pinB: rightPin,
+  });
+  return true;
+}
+
+function applyRopeCuts() {
+  if (!ropeCutQ.length || !world || (world.isLocked && world.isLocked())) {
+    ropeCutQ = [];
+    return;
+  }
+  const batch = ropeCutQ.splice(0);
+  const seen = new Set();
+  for (const ev of batch) {
+    if (!ropeShouldCut(ev)) continue;
+    if (seen.has(ev.draw)) continue;
+    if (cutRopeAtBead(ev)) seen.add(ev.draw);
   }
 }
 
@@ -3026,6 +3242,7 @@ function buildLevel(def) {
     else if ((roundA || roundB) && !isWireMeta(ma) && !isWireMeta(mb)) {
       contact.setRestitution(BALL_RESTITUTION);
     }
+    noteRopeCutContact(contact);
   });
   ground = world.createBody();
   track(ground, { kind: "level" });
@@ -3092,6 +3309,7 @@ function step(dt) {
   if (ropeLive) tightenRopes();
   snapDrag();
   handleContacts();
+  applyRopeCuts();
   stepDragFresh(dt);
   for (const rocket of rockets) {
     if (rocket.mode === "fly") {
@@ -4101,7 +4319,7 @@ function renderHelp() {
     "Ein runder Strich wird eine Kugel. Sie rollt und gibt ihren Schwung weiter.",
     "Winziger Kreis auf einem Körper oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
-    "Linie von Nagel zu Nagel: Seil, so lang wie der Strich, mit allen Schlenkern.",
+    "Linie von Nagel zu Nagel: Seil, so lang wie der Strich, mit allen Schlenkern. Eine Spitze unter 15°, die senkrecht trifft, zerschneidet es.",
     "Klick in einen Gegenstand zieht ihn. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
@@ -4813,6 +5031,65 @@ function runTests() {
     const hangZigRope = drawings.find((d) => d.kind === "rope");
     lines.push("INFO rope-wiggle rest=" + (hangZigRope ? hangZigRope.restLength.toFixed(3) : "none") + " zig=" + zigLen.toFixed(3) + " smooth=" + smoothLen.toFixed(3));
     check("a wiggly stroke makes a longer rope than a smooth curve", !!hangZigRope && hangZigRope.restLength > zigLen - 0.08 && hangZigRope.restLength > smoothLen + 0.25);
+
+    function cutWedgePts(tipX, tipY, tipAng, pointA, len) {
+      const half = tipAng / 2;
+      const w = Math.tan(half) * len;
+      const ca = Math.cos(pointA);
+      const sa = Math.sin(pointA);
+      const local = [{ x: 0, y: 0 }, { x: -len, y: w }, { x: -len, y: -w }];
+      return local.map((p) => ({
+        x: tipX + p.x * ca - p.y * sa,
+        y: tipY + p.x * sa + p.y * ca,
+      }));
+    }
+    function ropePieces() {
+      return drawings.filter((d) => d.kind === "rope");
+    }
+    function prepCutRope() {
+      buildLevel(LEVELS["ein-klotz"]);
+      addStaticSolid([[6, 5.4], [8.4, 5.4], [8.4, 7.2], [6, 7.2]], "#3f8f55");
+      addStaticSolid([[15.6, 5.4], [18, 5.4], [18, 7.2], [15.6, 7.2]], "#3f8f55");
+      const cutPa = rememberPin(7.2, 7.2, hostAt(7.2, 7.2) || ground, false);
+      const cutPb = rememberPin(16.8, 7.2, hostAt(16.8, 7.2) || ground, false);
+      const cutAw = pinWorld(cutPa);
+      const cutBw = pinWorld(cutPb);
+      return spawnRope(cutPa, cutPb, [cutAw, cutBw]);
+    }
+
+    const sharpRope = prepCutRope();
+    const sharpWedge = spawnSolid(cutWedgePts(12, 9.6, 12 * Math.PI / 180, -Math.PI / 2, 1.6), { density: 6 });
+    if (sharpWedge) {
+      sharpWedge.body.setLinearVelocity(V(0, -6));
+      sharpWedge.body.setAngularVelocity(0);
+    }
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    check("a sharp wedge falling onto a rope cuts it", !!sharpRope && ropePieces().length >= 2);
+
+    const bluntRope = prepCutRope();
+    const bluntWedge = spawnSolid(cutWedgePts(12, 9.6, 60 * Math.PI / 180, -Math.PI / 2, 1.6), { density: 6 });
+    if (bluntWedge) {
+      bluntWedge.body.setLinearVelocity(V(0, -6));
+      bluntWedge.body.setAngularVelocity(0);
+    }
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    check("a blunt wedge does not cut the rope", !!bluntRope && ropePieces().length === 1);
+
+    const sideRope = prepCutRope();
+    const sideWedge = spawnSolid(cutWedgePts(9.4, 7.2, 12 * Math.PI / 180, 0, 1.6), { density: 6 });
+    if (sideWedge) {
+      sideWedge.body.setLinearVelocity(V(14, 0));
+      sideWedge.body.setAngularVelocity(0);
+    }
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    check("a sideways tip does not cut the rope", !!sideRope && ropePieces().length === 1);
+
+    const ballRope = prepCutRope();
+    ball.setTransform(V(12, 9.4), 0);
+    ball.setLinearVelocity(V(0, -6));
+    ball.setAngularVelocity(0);
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    check("a ball does not cut the rope", !!ballRope && ropePieces().length === 1);
 
     buildLevel(LEVELS["zuendung"]);
     for (let i = 0; i < 30; i++) step(1 / 60);
