@@ -97,8 +97,13 @@ function maybeSmallBody(pts, closed) {
 
 function commitStrokeApply(drawnPts, rawInk) {
   if (won || !world) return null;
-  const ink = (rawInk && rawInk.length >= 2) ? rawInk : drawnPts;
+  let ink = (rawInk && rawInk.length >= 2) ? rawInk : drawnPts;
   if (!ink || ink.length < 2) return null;
+  // Überschuss am Ende eines geschlossenen Zugs abschneiden (nicht bei Seilen vom Nagel).
+  if (!nearestPin(ink[0].x, ink[0].y, NAIL_HIT)) {
+    const loop = closeLoop(ink);
+    if (loop !== ink) ink = loop;
+  }
   let { pts, closed } = prepareStroke(ink);
   if (pts.length < 2) return null;
   const small = maybeSmallBody(pts, closed);
@@ -113,6 +118,14 @@ function commitStrokeApply(drawnPts, rawInk) {
     if (poly) {
       const neat = snapPolygonPose(poly.corners);
       const solid = spawnSolid(neat, { quadKind: poly.quadKind });
+      if (solid) return solid;
+    }
+    // Kastenform vor der Kreisannahme: Ein Quadrat mit gerundeten oder
+    // abgeschnittenen Ecken füllt sein Rechteck weit mehr als ein Kreis.
+    const box = boxyLoop(ink);
+    if (box) {
+      const neat = snapPolygonPose(box.corners);
+      const solid = spawnSolid(neat, { quadKind: "rect" });
       if (solid) return solid;
     }
     if (!(strokeSnaps() && geoKeepsPolygon(ink))) {

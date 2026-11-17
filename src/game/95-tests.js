@@ -1688,6 +1688,172 @@ function runTests() {
     geoSnap = false;
 
 
+    {
+      // Regression: handgezeichnete Quadrate wurden zum Kreis. Dichter Rohzug
+      // wie von der Maus (alle 2 cm ein Punkt), wacklig, gerundete Ecken,
+      // Start mitten auf einer Kante, Überschuss oder Lücke am Ende.
+      const hqRng = (seed) => {
+        let s = (seed >>> 0) || 1;
+        return () => {
+          s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+          return s / 4294967296;
+        };
+      };
+      const hqSquare = (cx, cy, side, rotDeg, opt, seed) => {
+        const rand = hqRng(seed);
+        const h = side / 2;
+        const rad = (opt.round || 0) * side;
+        const cs = [[h, h], [-h, h], [-h, -h], [h, -h]];
+        const outline = [];
+        const segN = Math.max(8, Math.round(side / 0.01));
+        for (let e = 0; e < 4; e++) {
+          const c0 = cs[e];
+          const c1 = cs[(e + 1) % 4];
+          const c2 = cs[(e + 2) % 4];
+          const dx = (c1[0] - c0[0]) / side;
+          const dy = (c1[1] - c0[1]) / side;
+          for (let k = 0; k < segN; k++) {
+            const t = rad + (side - 2 * rad) * k / segN;
+            outline.push([c0[0] + dx * t, c0[1] + dy * t]);
+          }
+          if (rad > 0) {
+            const nx = (c2[0] - c1[0]) / side;
+            const ny = (c2[1] - c1[1]) / side;
+            const cc = [c1[0] - dx * rad + nx * rad, c1[1] - dy * rad + ny * rad];
+            const aA = Math.atan2(c1[1] - dy * rad - cc[1], c1[0] - dx * rad - cc[0]);
+            let dA = Math.atan2(c1[1] + ny * rad - cc[1], c1[0] + nx * rad - cc[0]) - aA;
+            while (dA > Math.PI) dA -= Math.PI * 2;
+            while (dA < -Math.PI) dA += Math.PI * 2;
+            for (let k = 0; k < 12; k++) {
+              const a = aA + dA * k / 12;
+              outline.push([cc[0] + rad * Math.cos(a), cc[1] + rad * Math.sin(a)]);
+            }
+          }
+        }
+        const off = Math.floor((opt.start || 0) * outline.length);
+        let path = outline.slice(off).concat(outline.slice(0, off));
+        const extra = Math.round((opt.close || 0) * outline.length);
+        if (extra > 0) path = path.concat(outline.slice(off, off + extra));
+        else if (extra < 0) path = path.slice(0, path.length + extra);
+        else path.push(path[0]);
+        const wob = opt.wob || 0;
+        const ph1 = rand() * 6.28;
+        const ph2 = rand() * 6.28;
+        const ca = Math.cos(rotDeg * Math.PI / 180);
+        const sa = Math.sin(rotDeg * Math.PI / 180);
+        const out = [];
+        path.forEach((p, i) => {
+          const s = i / path.length;
+          const n = wob * side * (0.5 * Math.sin(s * Math.PI * 6 + ph1) + 0.3 * Math.sin(s * Math.PI * 14 + ph2)) + (rand() - 0.5) * wob * 0.3;
+          const L = Math.hypot(p[0], p[1]) || 1;
+          const x = p[0] + p[0] / L * n;
+          const y = p[1] + p[1] / L * n;
+          const q = { x: cx + x * ca - y * sa, y: cy + x * sa + y * ca };
+          if (!out.length || dist(out[out.length - 1], q) > 0.02) out.push(q);
+        });
+        return out;
+      };
+      const hqOval = (cx, cy, R, seed, wob, ax, rotDeg) => {
+        const rand = hqRng(seed);
+        const n = Math.max(60, Math.round(Math.PI * 2 * R / 0.02));
+        const ph = rand() * 6.28;
+        const st = rand() * 6.28;
+        const ca = Math.cos((rotDeg || 0) * Math.PI / 180);
+        const sa = Math.sin((rotDeg || 0) * Math.PI / 180);
+        const out = [];
+        for (let i = 0; i <= n * 1.03; i++) {
+          const t = st + Math.PI * 2 * i / n;
+          const rr = R * (1 + wob * Math.sin(3 * t + ph) + wob * 0.5 * Math.sin(5 * t)) + (rand() - 0.5) * 0.01;
+          const x = rr * Math.cos(t) * (ax || 1);
+          const y = rr * Math.sin(t);
+          out.push({ x: cx + x * ca - y * sa, y: cy + x * sa + y * ca });
+        }
+        return out;
+      };
+      const hqThin = (trail) => {
+        const o = [trail[0]];
+        for (const p of trail) if (dist(o[o.length - 1], p) > 0.04) o.push(p);
+        return o;
+      };
+      const hqDraw = (trail, geo) => {
+        buildLevel(LEVELS["ein-klotz"]);
+        geoSnap = !!geo;
+        finishPlayStroke(trail, hqThin(trail));
+        geoSnap = false;
+        const d = drawings.filter((x) => !x.preset).slice(-1)[0];
+        if (!d) return "none";
+        if (d.kind === "solid") return "solid" + (d.meta && d.meta.outline ? d.meta.outline.local.length : 0) + (d.meta && d.meta.quadKind ? ":" + d.meta.quadKind : "");
+        return d.kind;
+      };
+      const hqVariants = [
+        { wob: 0.01, round: 0 },
+        { wob: 0.025, round: 0.05 },
+        { wob: 0.02, round: 0.12, start: 0.37, close: 0.04 },
+        { wob: 0.035, round: 0.08, start: 0.6, close: -0.03 },
+        { wob: 0.015, round: 0.2, start: 0.1, close: 0.06 },
+        { wob: 0.02, round: 0.3, start: 0.2, close: 0.03 },
+        { wob: 0.05, round: 0.1, start: 0.8, close: 0.05 },
+      ];
+      for (const hqGeo of [false, true]) {
+        const tag = hqGeo ? "geo" : "free";
+        let ok = 0;
+        let total = 0;
+        let asCircle = 0;
+        [0.8, 1.2, 2, 3, 4].forEach((side, si) => [0, 30, 45].forEach((rot, ri) => hqVariants.forEach((v, vi) => {
+          const got = hqDraw(hqSquare(16, 8, side, rot, v, 1000 + si * 97 + ri * 13 + vi * 7), hqGeo);
+          total += 1;
+          if (got === "solid4:rect") ok += 1;
+          if (got === "roller" || got === "ellipse") asCircle += 1;
+        })));
+        lines.push("INFO hand-square " + tag + " rect " + ok + "/" + total + " circle " + asCircle);
+        check("hand-drawn squares become rectangles (" + tag + ")", ok >= Math.ceil(total * 0.95) && asCircle === 0);
+        let cOk = 0;
+        let cTotal = 0;
+        [0.4, 0.8, 1.5, 2.5, 3.5].forEach((R, i) => [0, 0.03, 0.06].forEach((w, j) => {
+          const got = hqDraw(hqOval(16, 8, R, 300 + i * 11 + j, w), hqGeo);
+          cTotal += 1;
+          if (got === "roller") cOk += 1;
+        }));
+        lines.push("INFO hand-circle " + tag + " " + cOk + "/" + cTotal);
+        check("hand-drawn circles with overshoot stay circles (" + tag + ")", cOk >= Math.ceil(cTotal * 0.9));
+      }
+      let eOk = 0;
+      let eTotal = 0;
+      [2, 2.6].forEach((ax, i) => [0, 30, 45].forEach((rot, j) => [0.8, 1.6].forEach((R, k) => {
+        const got = hqDraw(hqOval(16, 8, R, 700 + i * 31 + j * 7 + k, 0.02, ax, rot), true);
+        eTotal += 1;
+        if (got === "ellipse") eOk += 1;
+      })));
+      lines.push("INFO hand-ellipse geo " + eOk + "/" + eTotal);
+      check("hand-drawn ellipses stay ellipses with geodreieck", eOk === eTotal);
+      // Fels mit deutlich abgeschnittener Ecke und U-Form: kein Rechteck.
+      const hqPenta = [{ x: 14.5, y: 7 }, { x: 17.5, y: 7 }, { x: 17.5, y: 8.1 }, { x: 16.6, y: 9 }, { x: 14.5, y: 9 }];
+      const hqRing = (corners) => {
+        const out = [];
+        for (let e = 0; e < corners.length; e++) {
+          const a = corners[e];
+          const b = corners[(e + 1) % corners.length];
+          const n = Math.max(2, Math.round(dist(a, b) / 0.02));
+          for (let k = 0; k < n; k++) out.push({ x: a.x + (b.x - a.x) * k / n, y: a.y + (b.y - a.y) * k / n });
+        }
+        out.push({ x: corners[0].x, y: corners[0].y });
+        return out;
+      };
+      const pentaGot = hqDraw(hqRing(hqPenta), false);
+      lines.push("INFO hand-penta free " + pentaGot);
+      check("rock with a cut corner is no rectangle", pentaGot !== "solid4:rect" && pentaGot !== "roller");
+      const hqU = [{ x: 14.5, y: 7 }, { x: 17.5, y: 7 }, { x: 17.5, y: 9.5 }, { x: 16.8, y: 9.5 }, { x: 16.8, y: 7.8 }, { x: 15.2, y: 7.8 }, { x: 15.2, y: 9.5 }, { x: 14.5, y: 9.5 }];
+      const uGot = hqDraw(hqRing(hqU), true);
+      lines.push("INFO hand-u geo " + uGot);
+      check("u-shape is no rectangle", uGot !== "solid4:rect" && uGot !== "roller" && uGot !== "ellipse");
+      // closeLoop schneidet den Überschuss ab, ohne den Ring zu verlieren.
+      const hqOver = hqSquare(16, 8, 2, 0, { wob: 0, round: 0, start: 0.4, close: 0.08 }, 5);
+      const hqCut = closeLoop(hqOver);
+      check("closeLoop trims overshoot", hqCut !== hqOver && !selfIntersects(closedRing(hqCut), true) && Math.abs(Math.abs(signedArea(closedRing(hqCut))) - 4) < 0.1);
+    }
+    geoSnap = false;
+
+
     check("tune panel is absent during tests", !document.getElementById("tune-panel"));
     const tunePrevOn = tuneOn;
     const tunePrevVals = Object.assign({}, tuneVals);

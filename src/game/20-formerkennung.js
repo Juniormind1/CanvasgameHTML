@@ -472,6 +472,134 @@ function cornersFromStroke(pts) {
   return simple;
 }
 
+// Geschlossener Zug mit Überschuss: Wer ein Quadrat oder einen Kreis zeichnet,
+// fährt am Ende oft ein Stück über den Anfang hinaus. Der Ring kreuzt sich dann
+// selbst, und die Vieleck-Erkennung lehnt ihn ab (selfIntersects). Hier wird
+// der Überschuss am äußersten Kreuzungspunkt zwischen Anfangs- und Endstück
+// abgeschnitten. Ohne Kreuzung, aber mit Rückweg neben dem Anfang, wird am
+// nächsten Punktpaar geschnitten. Sonst bleibt der Zug unverändert.
+const LOOP_END_FRAC = 0.3;                    // Anteil der Zuglänge, in dem Anfang und Ende gesucht werden
+
+function closeLoop(pts) {
+  if (!pts || pts.length < 8) return pts;
+  const n = pts.length;
+  const cum = [0];
+  for (let i = 1; i < n; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
+  const total = cum[n - 1];
+  if (total < 0.8) return pts;
+  const headMax = total * LOOP_END_FRAC;
+  const tailMin = total * (1 - LOOP_END_FRAC);
+  let best = null;
+  for (let i = 0; i < n - 1 && cum[i] <= headMax; i++) {
+    const a1 = pts[i];
+    const a2 = pts[i + 1];
+    for (let j = n - 2; j > i + 1 && cum[j + 1] >= tailMin; j--) {
+      const b1 = pts[j];
+      const b2 = pts[j + 1];
+      if (!segmentsCross(a1, a2, b1, b2)) continue;
+      const span = cum[j] - cum[i];
+      if (!best || span > best.span) best = { i, j, span, a1, a2, b1, b2 };
+      break;
+    }
+  }
+  if (best) {
+    const { a1, a2, b1, b2 } = best;
+    const dx = a2.x - a1.x;
+    const dy = a2.y - a1.y;
+    const ex = b2.x - b1.x;
+    const ey = b2.y - b1.y;
+    const den = dx * ey - dy * ex;
+    const t = Math.abs(den) < 1e-12 ? 0.5 : ((b1.x - a1.x) * ey - (b1.y - a1.y) * ex) / den;
+    const x = { x: a1.x + dx * t, y: a1.y + dy * t };
+    const out = [x];
+    for (let k = best.i + 1; k <= best.j; k++) out.push(pts[k]);
+    out.push({ x: x.x, y: x.y });
+    return out;
+  }
+  // Keine Kreuzung: Rückweg innen oder außen neben dem Anfang.
+  const tol = tuneCode("close", CIRCLE_CLOSE);
+  const endGap = dist(pts[0], pts[n - 1]);
+  let pi = 0;
+  let pj = n - 1;
+  let pd = endGap;
+  for (let i = 0; i < n && cum[i] <= headMax; i++) {
+    for (let j = n - 1; j > i && cum[j] >= tailMin; j--) {
+      const d = dist(pts[i], pts[j]);
+      if (d < pd - 1e-9) { pd = d; pi = i; pj = j; }
+    }
+  }
+  if ((pi === 0 && pj === n - 1) || pd > tol || cum[pj] - cum[pi] < total * 0.6) return pts;
+  // Nur kürzen, wenn wirklich etwas übersteht (mehr als ein paar Zentimeter).
+  if (cum[pi] + (total - cum[pj]) < 0.08) return pts;
+  const out = pts.slice(pi, pj + 1).map((p) => ({ x: p.x, y: p.y }));
+  out.push({ x: out[0].x, y: out[0].y });
+  return out;
+}
+
+// Kleinstes umschließendes Rechteck über die Kanten der konvexen Hülle.
+function minAreaRect(pts) {
+  const hull = ensureCCW(convexHull(pts));
+  if (!hull || hull.length < 3) return null;
+  let best = null;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const L = dist(a, b);
+    if (L < 1e-9) continue;
+    const c = (b.x - a.x) / L;
+    const s = (b.y - a.y) / L;
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (const p of hull) {
+      const u = p.x * c + p.y * s;
+      const v = -p.x * s + p.y * c;
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    const area = (maxU - minU) * (maxV - minV);
+    if (!best || area < best.area) best = { area, c, s, minU, maxU, minV, maxV };
+  }
+  if (!best || best.area < 1e-6) return null;
+  const { c, s } = best;
+  const uv = (u, v) => ({ x: u * c - v * s, y: u * s + v * c });
+  return {
+    corners: ensureCCW([uv(best.minU, best.minV), uv(best.maxU, best.minV), uv(best.maxU, best.maxV), uv(best.minU, best.maxV)]),
+    area: best.area,
+    hullArea: Math.abs(signedArea(hull)),
+  };
+}
+
+// Kastenform: Ein Kreis oder eine Ellipse füllt ihr kleinstes Rechteck nur zu
+// π/4 (78,5 %), ein regelmäßiges Achteck zu 83 %. Ein Quadrat, auch mit
+// gerundeten oder abgeschnittenen Ecken, liegt deutlich darüber. Dann ist der
+// Zug kein Kreis, sondern ein Rechteck.
+const BOX_LOOP_FILL = 0.88;                   // Hülle / kleinstes Rechteck, ab hier eckig
+const BOX_LOOP_SOLID = 0.9;                   // Zugfläche / Hülle, sonst Delle (z. B. U-Form)
+const BOX_LOOP_EDGE = 0.16;                   // größter Abstand zum Rechteckrand / kurze Seite
+
+function boxyLoop(pts) {
+  const ring = closedRing(pts);
+  if (!ring || ring.length < 4) return null;
+  if (selfIntersects(ring, true)) return null;
+  const rect = minAreaRect(ring);
+  if (!rect) return null;
+  const area = Math.abs(signedArea(ring));
+  if (rect.hullArea < 0.05 || area / rect.hullArea < BOX_LOOP_SOLID) return null;
+  const fill = rect.hullArea / rect.area;
+  if (fill < BOX_LOOP_FILL) return null;
+  const w = dist(rect.corners[0], rect.corners[1]);
+  const h = dist(rect.corners[1], rect.corners[2]);
+  const short = Math.min(w, h);
+  if (short < 0.12) return null;
+  // Der Zug muss überall nahe am Rechteckrand bleiben. Ein Fels mit einer
+  // deutlich abgeschnittenen Ecke bleibt so ein Fünfeck.
+  let far = 0;
+  for (const p of ring) far = Math.max(far, distToPolyEdges(p.x, p.y, rect.corners));
+  if (far > short * BOX_LOOP_EDGE) return null;
+  return { corners: rect.corners, fill, far: far / short };
+}
+
 function recognizePolygon(pts) {
   if (!pts || pts.length < 3) return null;
   let ring = closedRing(pts);
