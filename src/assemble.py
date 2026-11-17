@@ -3,7 +3,12 @@ from pathlib import Path
 root = Path(__file__).resolve().parent
 repo = root.parent
 planck = (root / "planck.min.js").read_text(encoding="utf-8")
-game = (root / "game.js").read_text(encoding="utf-8")
+# Spielquelle: alle src/game/*.js in Dateinamen-Reihenfolge (00-, 05-, …, 99-).
+# Die Verkettung bleibt im globalen Scope und entspricht der früheren src/game.js.
+parts = sorted((root / "game").glob("*.js"))
+if not parts:
+    raise SystemExit("keine Dateien in src/game/")
+game = "".join(p.read_text(encoding="utf-8") for p in parts)
 html = """<!DOCTYPE html>
 <html lang="de">
 <head>

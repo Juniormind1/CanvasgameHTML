@@ -1,0 +1,1942 @@
+function runTests() {
+  const lines = [];
+  function check(name, cond) {
+    lines.push((cond ? "PASS " : "FAIL ") + name);
+  }
+  try {
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 3.7, y: 2.5 }, { x: 5.2, y: 2.5 }, { x: 5.2, y: 4.8 }, { x: 3.7, y: 4.8 }, { x: 3.7, y: 2.5 },
+    ], "#3c7fd6");
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const b1 = ball.getPosition();
+    check("klotz moves ball", b1.x > 7.5 || stars.every((s) => s.got));
+
+    {
+      // Regression: Rest-Teilschritte im Frame-Loop haben den Warmstart-Impuls
+      // vervielfacht. Unregelmäßige Form fällt auf Rechteck auf Klotz.
+      const jumpFrames = { even: [0.0172], ragged: [0.0201, 0.0133, 0.0168], jitter: [0.0168, 0.0165, 0.0171, 0.0163, 0.0174, 0.0167] };
+      for (const jumpName of Object.keys(jumpFrames)) {
+        const jumpDts = jumpFrames[jumpName];
+        buildLevel(LEVELS["ein-klotz"]);
+        world.destroyBody(ball);
+        ball = null;
+        stars = [];
+        const jumpBlock = makeBox({ x: 16, y: 2.4, hw: 2.2, hh: 0.4, color: "#3c7fd6" });
+        for (let i = 0; i < 60; i++) step(1 / 60);
+        const jumpTop = jumpBlock.getPosition().y + 0.4;
+        const jumpRect = commitStroke([
+          { x: 15, y: jumpTop + 1.2 }, { x: 17, y: jumpTop + 1.2 }, { x: 17, y: jumpTop + 2.2 }, { x: 15, y: jumpTop + 2.2 }, { x: 15, y: jumpTop + 1.2 },
+        ], "#d94b3a");
+        const zig = [{ x: 15, y: jumpTop + 4 }];
+        for (let k = 0; k < 5; k++) {
+          zig.push({ x: 15.35 + k * 0.5, y: jumpTop + 5.1 });
+          zig.push({ x: 15.6 + k * 0.5, y: jumpTop + 4.25 });
+        }
+        zig.push({ x: 17.8, y: jumpTop + 5.2 }, { x: 17.8, y: jumpTop + 3.7 }, { x: 15, y: jumpTop + 3.7 }, { x: 15, y: jumpTop + 4 });
+        const jumpIrr = commitStroke(zig, "#3e9a48");
+        const jumpBodies = [jumpBlock, jumpRect && jumpRect.body, jumpIrr && jumpIrr.body].filter(Boolean);
+        const jumpSpeed = (b) => Math.hypot(b.getLinearVelocity().x, b.getLinearVelocity().y);
+        const jumpTouch = (b) => {
+          for (let c = b.getContactList(); c; c = c.next) if (c.contact.isTouching()) return true;
+          return false;
+        };
+        const jumpClock = { acc: 0 };
+        let vHit = 0;
+        let tHit = -1;
+        let vAfter = 0;
+        let frameNo = 0;
+        while (jumpIrr && jumpIrr.body && simTime < 4.5) {
+          advanceFixed(jumpClock, jumpDts[frameNo++ % jumpDts.length], step);
+          if (tHit < 0) {
+            vHit = Math.max(vHit, jumpSpeed(jumpIrr.body));
+            if (jumpTouch(jumpIrr.body)) tHit = simTime;
+          } else if (simTime > tHit + 0.1) {
+            for (const b of jumpBodies) vAfter = Math.max(vAfter, jumpSpeed(b));
+          }
+        }
+        const jumpEndY = jumpIrr && jumpIrr.body ? jumpIrr.body.getPosition().y : 999;
+        check("no velocity jump after impact (" + jumpName + " frames)", jumpBodies.length === 3 && tHit > 0 && vAfter < vHit * 0.5 && jumpEndY < jumpTop + 3);
+        lines.push("INFO impact " + jumpName + " vHit " + vHit.toFixed(2) + " vAfter " + vAfter.toFixed(2) + " endY " + jumpEndY.toFixed(2));
+      }
+      check("frame rest waits for the next fixed step", advanceFixed({ acc: 0 }, 0.0172, () => {}) === 1 && advanceFixed({ acc: 0 }, 0.0005, () => {}) === 0);
+      buildLevel(LEVELS["ein-klotz"]);
+      const spiky = [];
+      for (let k = 0; k < 16; k++) {
+        const ang = k * Math.PI / 8;
+        const rr = k % 2 ? 0.55 : 2.1;
+        const da = k % 2 ? 0 : 0.015;
+        spiky.push({ x: 16 + rr * Math.cos(ang - da), y: 9 + rr * Math.sin(ang - da) });
+        if (!(k % 2)) spiky.push({ x: 16 + rr * Math.cos(ang + da), y: 9 + rr * Math.sin(ang + da) });
+      }
+      spiky.push({ x: spiky[0].x, y: spiky[0].y });
+      const spikyDraw = commitStroke(spiky, "#7a4fbf");
+      let thinFix = 0;
+      let boxFix = 0;
+      let polyFix = 0;
+      for (let f = spikyDraw && spikyDraw.body ? spikyDraw.body.getFixtureList() : null; f; f = f.getNext()) {
+        const sh = f.getShape();
+        if (!sh.m_vertices || sh.m_type !== "polygon") continue;
+        polyFix++;
+        const vs = [];
+        for (let k = 0; k < sh.m_count; k++) vs.push(sh.m_vertices[k]);
+        if (polyMinWidth(vs) < MIN_FIX_H - 1e-9) thinFix++;
+        if (vs.some((v) => Math.hypot(v.x, v.y) > 2.4)) boxFix++;
+      }
+      check("thin spikes give no sliver fixtures", !!spikyDraw && spikyDraw.kind === "solid" && polyFix > 0 && thinFix === 0 && boxFix === 0);
+      const flatBody = world.createDynamicBody({ position: V(5, 9) });
+      check("degenerate polygon is rejected, not a 2 m box", !makePolygonFixture(flatBody, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }], fixtureOpt()) && !flatBody.getFixtureList());
+      world.destroyBody(flatBody);
+    }
+
+    buildLevel(LEVELS["die-luecke"]);
+    let maxAlone = ball.getPosition().x;
+    doNudge(1);
+    for (let i = 0; i < 220; i++) {
+      step(1 / 60);
+      maxAlone = Math.max(maxAlone, ball.getPosition().x);
+    }
+    check("one nudge does not clear the gap", maxAlone < 18);
+
+    buildLevel(LEVELS["die-luecke"]);
+    commitStroke([
+      { x: 6.2, y: 5.1 }, { x: 9, y: 5.24 }, { x: 13, y: 5.02 },
+      { x: 17, y: 5.2 }, { x: 21, y: 5.05 }, { x: 24.4, y: 5.14 },
+    ], "#8d5a34");
+    const bridge = drawings.find((d) => d.kind === "wire");
+    check("wobbly bridge straightens", !!bridge && bridge.meta.outline.local.length === 2);
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    const by0 = bridge ? bridge.body.getPosition().y : -1;
+    doNudge(1);
+    let climbed = false;
+    for (let i = 0; i < 240; i++) {
+      step(1 / 60);
+      const p = ball.getPosition();
+      if (p.x > 12 && p.y > 4.6) climbed = true;
+    }
+    check("bridge stays up", !!bridge && bridge.body.getPosition().y > 3);
+    check("one nudge climbs the bridge", climbed);
+    lines.push("INFO bridge y0 " + by0.toFixed(2) + " y " + (bridge ? bridge.body.getPosition().y.toFixed(2) : "none") + " ball " + ball.getPosition().x.toFixed(2) + "," + ball.getPosition().y.toFixed(2) + " nudges " + stats.nudges);
+
+    buildLevel(LEVELS["der-nagel"]);
+    const before = ball.getPosition().x;
+    commitStroke([
+      { x: 0.7, y: 14.0 }, { x: 16.8, y: 14.0 }, { x: 16.8, y: 15.4 }, { x: 0.7, y: 15.4 }, { x: 0.7, y: 14.0 },
+    ], "#3c7fd6");
+    check("hammer pinned", drawings.some((d) => d.kind === "solid"));
+    for (let i = 0; i < 220; i++) step(1 / 60);
+    check("hammer shoves ball", ball.getPosition().x > before + 1.2 || stars.every((s) => s.got));
+
+    buildLevel(LEVELS["zwei-naegel"]);
+    commitStroke([
+      { x: 11.3, y: 4.72 }, { x: 20.7, y: 4.72 }, { x: 20.7, y: 5.38 }, { x: 11.3, y: 5.38 }, { x: 11.3, y: 4.72 },
+    ], "#c9854a");
+    const board = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const y0 = board ? board.body.getPosition().y : 0;
+    for (let i = 0; i < 150; i++) step(1 / 60);
+    check("two pins hold the board", !!board && board.body.getPosition().y > y0 - 0.8);
+
+    buildLevel(LEVELS["das-seil"]);
+    const pa = pins[0];
+    const pb = pins[1];
+    const aw = pinWorld(pa);
+    const bw = pinWorld(pb);
+    const sagMx = (aw.x + bw.x) / 2;
+    const sagCurve = [
+      aw,
+      { x: aw.x + (bw.x - aw.x) * 0.25, y: Math.min(aw.y, bw.y) - 0.9 },
+      { x: sagMx, y: Math.min(aw.y, bw.y) - 1.3 },
+      { x: aw.x + (bw.x - aw.x) * 0.75, y: Math.min(aw.y, bw.y) - 0.9 },
+      bw,
+    ];
+    commitStroke(sagCurve, "#2b2b2b");
+    const rope = drawings.find((d) => d.kind === "rope");
+    check("rope created", !!rope);
+    for (let i = 0; i < 120; i++) step(1 / 60);
+    if (rope) {
+      const mid = rope.bodies[Math.floor(rope.bodies.length / 2)].getPosition();
+      check("rope sags", mid.y < Math.min(aw.y, bw.y) - 0.45);
+    } else lines.push("FAIL rope sags");
+
+    buildLevel(LEVELS["das-seil"]);
+    const hangPa = pins[0];
+    const hangPb = pins[1];
+    const hangAw = pinWorld(hangPa);
+    const hangBw = pinWorld(hangPb);
+    const hangMx = (hangAw.x + hangBw.x) / 2;
+    const hangSmooth = [
+      hangAw,
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.5, y: hangAw.y - 2.2 },
+      hangBw,
+    ];
+    const hangZig = [
+      hangAw,
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.2, y: hangAw.y - 1.4 },
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.4, y: hangAw.y - 0.2 },
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.6, y: hangAw.y - 1.4 },
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.8, y: hangAw.y - 0.2 },
+      hangBw,
+    ];
+    const smoothLen = pathLength(hangSmooth);
+    const zigLen = pathLength(hangZig);
+    commitStroke(hangSmooth, "#2b2b2b");
+    const hangSmoothRope = drawings.find((d) => d.kind === "rope");
+    check("smooth hanging rope keeps the stroke length", !!hangSmoothRope && Math.abs(hangSmoothRope.restLength - smoothLen) < 0.08);
+    const hangBallY0 = hangAw.y - 1.2;
+    ball.setTransform(V(hangMx, hangBallY0), 0);
+    ball.setLinearVelocity(V(0, 0));
+    ball.setAngularVelocity(0);
+    for (let i = 0; i < 240; i++) step(1 / 60);
+    const hangLive = hangSmoothRope ? ropeChainLength(hangSmoothRope) : 99;
+    const hangBall = ball.getPosition();
+    const hangFinite = Number.isFinite(hangLive) && Number.isFinite(hangBall.x) && Number.isFinite(hangBall.y);
+    check("rope under a ball stays within 102 percent of its drawn length", !!hangSmoothRope && hangFinite && hangLive <= hangSmoothRope.restLength * 1.02);
+    check("rope under a ball does not drop it to the ground", hangFinite && hangBall.y > 8.4);
+    lines.push("INFO rope-load live=" + hangLive.toFixed(3) + " rest=" + (hangSmoothRope ? hangSmoothRope.restLength.toFixed(3) : "none") + " ball=" + hangBall.x.toFixed(2) + "," + hangBall.y.toFixed(2));
+    buildLevel(LEVELS["das-seil"]);
+    commitStroke(hangZig, "#2b2b2b");
+    const hangZigRope = drawings.find((d) => d.kind === "rope");
+    lines.push("INFO rope-wiggle rest=" + (hangZigRope ? hangZigRope.restLength.toFixed(3) : "none") + " zig=" + zigLen.toFixed(3) + " smooth=" + smoothLen.toFixed(3));
+    check("a wiggly stroke makes a longer rope than a smooth curve", !!hangZigRope && hangZigRope.restLength > zigLen - 0.08 && hangZigRope.restLength > smoothLen + 0.25);
+
+    function cutWedgePts(tipX, tipY, tipAng, pointA, len) {
+      const half = tipAng / 2;
+      const w = Math.tan(half) * len;
+      const ca = Math.cos(pointA);
+      const sa = Math.sin(pointA);
+      const local = [{ x: 0, y: 0 }, { x: -len, y: w }, { x: -len, y: -w }];
+      return local.map((p) => ({
+        x: tipX + p.x * ca - p.y * sa,
+        y: tipY + p.x * sa + p.y * ca,
+      }));
+    }
+    function ropePieces() {
+      return drawings.filter((d) => d.kind === "rope");
+    }
+    function prepCutRope() {
+      buildLevel(LEVELS["ein-klotz"]);
+      addStaticSolid([[6, 5.4], [8.4, 5.4], [8.4, 7.2], [6, 7.2]], "#3f8f55");
+      addStaticSolid([[15.6, 5.4], [18, 5.4], [18, 7.2], [15.6, 7.2]], "#3f8f55");
+      const cutPa = rememberPin(7.2, 7.2, hostAt(7.2, 7.2) || ground, false);
+      const cutPb = rememberPin(16.8, 7.2, hostAt(16.8, 7.2) || ground, false);
+      const cutAw = pinWorld(cutPa);
+      const cutBw = pinWorld(cutPb);
+      return spawnRope(cutPa, cutPb, [cutAw, cutBw]);
+    }
+
+    const sharpRope = prepCutRope();
+    const sharpWedge = spawnSolid(cutWedgePts(12, 9.6, 12 * Math.PI / 180, -Math.PI / 2, 1.6), { density: 6 });
+    if (sharpWedge) {
+      sharpWedge.body.setLinearVelocity(V(0, -6));
+      sharpWedge.body.setAngularVelocity(0);
+    }
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    check("a sharp wedge falling onto a rope cuts it", !!sharpRope && ropePieces().length >= 2);
+
+    const bluntRope = prepCutRope();
+    const bluntWedge = spawnSolid(cutWedgePts(12, 9.6, 60 * Math.PI / 180, -Math.PI / 2, 1.6), { density: 6 });
+    if (bluntWedge) {
+      bluntWedge.body.setLinearVelocity(V(0, -6));
+      bluntWedge.body.setAngularVelocity(0);
+    }
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    check("a blunt wedge does not cut the rope", !!bluntRope && ropePieces().length === 1);
+
+    const sideRope = prepCutRope();
+    const sideWedge = spawnSolid(cutWedgePts(9.4, 7.2, 12 * Math.PI / 180, 0, 1.6), { density: 6 });
+    if (sideWedge) {
+      sideWedge.body.setLinearVelocity(V(14, 0));
+      sideWedge.body.setAngularVelocity(0);
+    }
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    check("a sideways tip does not cut the rope", !!sideRope && ropePieces().length === 1);
+
+    const ballRope = prepCutRope();
+    ball.setTransform(V(12, 9.4), 0);
+    ball.setLinearVelocity(V(0, -6));
+    ball.setAngularVelocity(0);
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    check("a ball does not cut the rope", !!ballRope && ropePieces().length === 1);
+
+    buildLevel(LEVELS["zuendung"]);
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    const rx = rockets[0].body.getPosition().x;
+    commitStroke([
+      { x: 5.4, y: 3.1 }, { x: 7.0, y: 3.1 }, { x: 7.0, y: 4.6 }, { x: 5.4, y: 4.6 }, { x: 5.4, y: 3.1 },
+    ], "#8d5a34");
+    for (let i = 0; i < 150; i++) step(1 / 60);
+    const rocket = rockets.find((r) => r.mode === "fly" || r.mode === "gone" || (r.body && r.body.getPosition().x > rx + 0.8));
+    check("rocket launches", !!rocket);
+
+    buildLevel(LEVELS["ein-strich"]);
+    commitStroke([
+      { x: 4.0, y: 2.3 }, { x: 6.45, y: 2.3 }, { x: 6.45, y: 5.4 }, { x: 4.0, y: 5.4 }, { x: 4.0, y: 2.3 },
+    ], "#3c7fd6");
+    for (let i = 0; i < 220; i++) step(1 / 60);
+    lines.push("INFO elegant ball " + ball.getPosition().x.toFixed(2) + " won " + won + " shapes " + stats.shapes + " nudges " + stats.nudges + " stars " + stars.filter((s) => s.got).length);
+    check("elegant flag", won && medals.elegant);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 10, y: 4 }, { x: 10, y: 6 }, { x: 8, y: 6 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const n = drawings.length;
+    eraseAt(9, 5);
+    check("erase removes drawing", drawings.length === n - 1);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const fall = [];
+    for (let i = 0; i <= 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      fall.push({ x: 16 + Math.cos(a) * 0.2, y: 10 + Math.sin(a) * 0.2 });
+    }
+    commitStroke(fall, "#7a4fbf");
+    const blob = drawings.find((d) => d.kind === "blob");
+    check("free circle is a body", !!blob);
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    check("free circle falls", blob && blob.body.getPosition().y < 8.5);
+
+    buildLevel(LEVELS.sandbox);
+    check("sandbox loads", !!ball && stars.length === 1);
+    buildLevel(LEVELS.werkstatt);
+    check("workshop has two stars and a rocket", stars.length === 2 && rockets.length === 1);
+    buildLevel(LEVELS.flaschenzug);
+    check("pulley level has basket and crate pins", pins.length >= 2);
+
+    function interiors(draw) {
+      return interiorAngles(draw.meta.outline.local).map((a) => a * 180 / Math.PI);
+    }
+    function near90(angs) {
+      return angs.every((a) => Math.abs(a - 90) < 2);
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 10, y: 3.82 }, { x: 12, y: 4.08 },
+      { x: 12.15, y: 5.5 }, { x: 11.9, y: 7 },
+      { x: 10, y: 7.16 }, { x: 8.1, y: 6.9 },
+      { x: 7.85, y: 5.4 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const quad = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const quadAng = quad ? interiors(quad) : [];
+    check("wobbly quad becomes a right rectangle", !!quad && quad.meta.outline.local.length === 4 && near90(quadAng));
+    lines.push("INFO quad corners " + (quad ? quad.meta.outline.local.length : 0) + " angles " + quadAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const tilt = 25 * Math.PI / 180;
+    const tc = Math.cos(tilt);
+    const ts = Math.sin(tilt);
+    const around = (x, y) => ({ x: 18 + x * tc - y * ts, y: 8 + x * ts + y * tc });
+    const tilted = [
+      around(-1.5, -0.7), around(0, -0.86), around(1.5, -0.66),
+      around(1.62, 0), around(1.45, 0.72),
+      around(0, 0.84), around(-1.55, 0.68), around(-1.62, 0),
+    ];
+    tilted.push(tilted[0]);
+    commitStroke(tilted, "#ef8b2c");
+    const tquad = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const tAng = tquad ? interiors(tquad) : [];
+    let edgeAng = 0;
+    if (tquad) {
+      const p = tquad.meta.outline.local;
+      let best = -1;
+      for (let i = 0; i < p.length; i++) {
+        const q = p[(i + 1) % p.length];
+        const len = Math.hypot(q.x - p[i].x, q.y - p[i].y);
+        if (len > best) {
+          best = len;
+          edgeAng = Math.atan2(q.y - p[i].y, q.x - p[i].x) * 180 / Math.PI;
+        }
+      }
+    }
+    let lineAng = Math.abs(edgeAng) % 180;
+    if (lineAng > 90) lineAng = 180 - lineAng;
+    const tiltOk = Math.min(Math.abs(lineAng - 25), Math.abs(lineAng - 65)) < 8;
+    check("tilted quad stays tilted and square", !!tquad && tquad.meta.outline.local.length === 4 && near90(tAng) && tiltOk);
+    lines.push("INFO tilt edge " + edgeAng.toFixed(1) + " angles " + tAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 14, y: 6 }, { x: 15.2, y: 6.32 }, { x: 16.4, y: 6.1 },
+      { x: 15.55, y: 7.15 }, { x: 15.1, y: 8.2 }, { x: 14.35, y: 7.05 }, { x: 14, y: 6 },
+    ], "#3e9a48");
+    const tri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const triAng = tri ? interiors(tri) : [];
+    check("wobbly triangle straightens to three corners", !!tri && tri.meta.outline.local.length === 3);
+    check("non-right triangle stays non-right", triAng.length === 3 && triAng.every((a) => Math.abs(a - 90) > 15));
+    lines.push("INFO tri angles " + triAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 20, y: 6 }, { x: 21.5, y: 6.4 }, { x: 23.1, y: 6.22 },
+      { x: 21.55, y: 7.05 }, { x: 20.3, y: 8.15 }, { x: 20.18, y: 7.05 }, { x: 20, y: 6 },
+    ], "#7a4fbf");
+    const right = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const rightAng = right ? interiors(right) : [];
+    check("near-right triangle snaps one corner to 90", !!right && right.meta.outline.local.length === 3 && rightAng.some((a) => Math.abs(a - 90) < 2));
+    lines.push("INFO right angles " + rightAng.map((a) => a.toFixed(1)).join(","));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 6, y: 9 }, { x: 9, y: 9.15 }, { x: 10.5, y: 11.1 }, { x: 8.1, y: 13 }, { x: 5.3, y: 11.2 }, { x: 6, y: 9 },
+    ], "#d94b3a");
+    const pent = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("pentagon does not snap to a rectangle", !!pent && pent.meta.outline.local.length >= 5);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 4, y: 10 }, { x: 7, y: 11.6 }, { x: 10, y: 10.2 }, { x: 13, y: 12.1 }, { x: 16, y: 9.4 },
+    ], "#8d5a34");
+    const curve = drawings.find((d) => d.kind === "wire");
+    check("curved line stays curved", !!curve && curve.meta.outline.local.length >= 4);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 15, y: 3.2 }, { x: 18, y: 3.2 }, { x: 18, y: 4.8 }, { x: 15, y: 4.8 }, { x: 15, y: 3.2 },
+    ], "#3c7fd6");
+    for (let i = 0; i < 100; i++) step(1 / 60);
+    commitStroke([
+      { x: 15.3, y: 7 }, { x: 17.7, y: 7 }, { x: 17.7, y: 8.5 }, { x: 15.3, y: 8.5 }, { x: 15.3, y: 7 },
+    ], "#ef8b2c");
+    const stack = drawings.filter((d) => d.kind === "solid" && !d.preset);
+    const top = stack[stack.length - 1];
+    let flew = false;
+    for (let i = 0; i < 160; i++) {
+      step(1 / 60);
+      if (top && top.body.getPosition().y > 11) flew = true;
+    }
+    const vend = top ? top.body.getLinearVelocity() : { x: 0, y: 9 };
+    check("stacked boxes settle", !!top && !flew && Math.abs(vend.y) < 0.6 && top.body.getPosition().y < 7);
+    lines.push("INFO stack y " + (top ? top.body.getPosition().y.toFixed(2) : "none") + " vy " + vend.y.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 4.1, y: 4.2 }, { x: 6.3, y: 4.2 }, { x: 6.3, y: 5.7 }, { x: 4.1, y: 5.7 }, { x: 4.1, y: 4.2 },
+    ], "#8d5a34");
+    let ballFlew = false;
+    for (let i = 0; i < 140; i++) {
+      step(1 / 60);
+      if (ball.getPosition().y > 6) ballFlew = true;
+    }
+    const bv = ball.getLinearVelocity();
+    check("box on the ball does not launch it", !ballFlew && Math.abs(bv.y) < 1.5);
+    lines.push("INFO ball drop y " + ball.getPosition().y.toFixed(2) + " vy " + bv.y.toFixed(2));
+
+    const edited = levelFromDoc({
+      name: "Snap",
+      ball: [6, 2],
+      stars: [[24, 2]],
+      strokes: [
+        {
+          kind: "terrain",
+          color: "#3f8f55",
+          points: [[8, 4], [10, 3.8], [12, 4.1], [12.2, 6.9], [10, 7.2], [7.9, 6.8], [8, 4]],
+        },
+        {
+          kind: "terrain",
+          color: "#8d5a34",
+          points: [[2, 3], [6, 3.15], [10, 2.9], [14, 3.1]],
+        },
+      ],
+    });
+    const editorAng = edited.solids.length ? interiorAngles(edited.solids[0].pts).map((a) => a * 180 / Math.PI) : [];
+    check("editor quad snaps", edited.solids.length === 1 && edited.solids[0].pts.length === 4 && near90(editorAng));
+    check("editor line snaps", edited.wires.length === 1 && edited.wires[0].pts.length === 2);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    const starPos = stars[0].body.getPosition();
+    check("confetti has twenty pieces", confetti.length === 20);
+    check("confetti rectangles have two colors", confetti.length === 20 && confetti.every((c) => c.front !== c.back));
+    check("confetti rotates", confetti.every((c) => c.spinV !== 0 && c.flipV !== 0));
+    check("confetti starts at the star", confetti.every((c) => Math.hypot(c.ox - starPos.x, c.oy - starPos.y) < 0.02));
+    let turned = false;
+    const spin0 = confetti[0] ? confetti[0].spin : 0;
+    const flip0 = confetti[0] ? confetti[0].flip : 0;
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    if (confetti[0] && (Math.abs(confetti[0].spin - spin0) > 0.2 || Math.abs(confetti[0].flip - flip0) > 0.2)) turned = true;
+    check("confetti keeps turning", turned);
+
+    buildLevel(LEVELS.werkstatt);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    const used = new Set(confetti.map((c) => c.ox.toFixed(2) + "," + c.oy.toFixed(2)));
+    check("confetti comes from every star", stars.length === 2 && used.size === 2 && confetti.length === 20);
+    check("click on the left half pushes left", nudgeDirFromClick(5, 4.7) === -1);
+    check("click on the right half pushes right", nudgeDirFromClick(5, 5.2) === 1);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    for (let i = 0; i < 10; i++) step(1 / 60);
+    const half = ball.getPosition().x;
+    doNudge(nudgeDirFromClick(half, half - 0.05));
+    step(1 / 60);
+    check("left half click accelerates left", ball.getLinearVelocity().x < -2);
+    buildLevel(LEVELS["ein-klotz"]);
+    for (let i = 0; i < 10; i++) step(1 / 60);
+    const halfR = ball.getPosition().x;
+    doNudge(nudgeDirFromClick(halfR, halfR + 0.05));
+    step(1 / 60);
+    check("right half click accelerates right", ball.getLinearVelocity().x > 2);
+
+    function ring(cx, cy, r) {
+      const pts = [];
+      for (let i = 0; i <= 18; i++) {
+        const a = (i / 18) * Math.PI * 2;
+        const wob = 1 + 0.045 * Math.sin(a * 3);
+        pts.push({ x: cx + Math.cos(a) * r * wob, y: cy + Math.sin(a) * r * wob });
+      }
+      return pts;
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(12, 6, 0.72), "#3c7fd6");
+    const one = drawings.find((d) => d.kind === "roller");
+    const shape = one && one.body.getFixtureList().getShape();
+    check("wobbly circle becomes a roller", !!one && Math.abs(one.r - 0.72) < 0.08 && shape && shape.m_type === "circle");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const cradleR = 0.4;
+    const cradleY = 1.3 + cradleR + 0.04;
+    const xs = [8, 8.84, 9.68];
+    for (const x of xs) commitStroke(ring(x, cradleY, cradleR), "#ef8b2c");
+    const row = drawings.filter((d) => d.kind === "roller").sort((a, b) => a.body.getPosition().x - b.body.getPosition().x);
+    check("cradle has three rollers", row.length === 3);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    row[0].body.setLinearVelocity(V(5.5, 0));
+    row[0].body.setAwake(true);
+    for (let i = 0; i < 100; i++) step(1 / 60);
+    const v0 = row[0].body.getLinearVelocity().x;
+    const v2 = row[2].body.getLinearVelocity().x;
+    check("cradle passes the shove to the far ball", v2 > 2.2 && v2 > v0 + 1);
+    lines.push("INFO cradle v " + v0.toFixed(2) + " " + row[1].body.getLinearVelocity().x.toFixed(2) + " " + v2.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(3.5, 1.66, 0.34), "#7a4fbf");
+    const hitter = drawings.find((d) => d.kind === "roller");
+    for (let i = 0; i < 30; i++) step(1 / 60);
+    const ballX0 = ball.getPosition().x;
+    hitter.body.setLinearVelocity(V(6, 0));
+    hitter.body.setAwake(true);
+    for (let i = 0; i < 80; i++) step(1 / 60);
+    check("roller gives its shove to the red ball", ball.getPosition().x > ballX0 + 1.2);
+
+    function cornerDepth(host, x, y) {
+      const meta = bodyMeta.get(host);
+      if (!meta || !meta.outline || !meta.outline.closed) return 0;
+      const worldPts = meta.outline.local.map((p) => {
+        const w = host.getWorldPoint(V(p.x, p.y));
+        return { x: w.x, y: w.y };
+      });
+      if (!pointInPoly(x, y, worldPts)) return 0;
+      let best = Infinity;
+      for (let i = 0; i < worldPts.length; i++) {
+        const a = worldPts[i];
+        const b = worldPts[(i + 1) % worldPts.length];
+        best = Math.min(best, distPointSeg(x, y, a.x, a.y, b.x, b.y));
+      }
+      return best;
+    }
+    function pairOverlap(a, b) {
+      const ca = bodyCorners(a);
+      const cb = bodyCorners(b);
+      let worst = 0;
+      for (const p of ca) worst = Math.max(worst, cornerDepth(b, p.x, p.y));
+      for (const p of cb) worst = Math.max(worst, cornerDepth(a, p.x, p.y));
+      return worst;
+    }
+    function bodyCorners(body) {
+      const meta = bodyMeta.get(body);
+      return meta.outline.local.map((p) => {
+        const w = body.getWorldPoint(V(p.x, p.y));
+        return { x: w.x, y: w.y };
+      });
+    }
+    function floorSink(body) {
+      let worst = 0;
+      for (const p of bodyCorners(body)) {
+        if (p.y < 1.3) worst = Math.max(worst, 1.3 - p.y);
+      }
+      return worst;
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 1.5, 0.16), "#2b2b2b");
+    const nail = pins.find((p) => p.userMade);
+    check("small circle on the floor is a ground nail", !!nail && nail.body === ground);
+    check("ground nail is not a loose ball", !drawings.some((d) => d.kind === "blob" || d.kind === "roller" || d.kind === "ellipse"));
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 5, 0.16), "#7a4fbf");
+    check("small circle in the air stays loose", drawings.some((d) => d.kind === "blob") && !pins.some((p) => p.userMade));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(ring(8, 1.5, 0.16), "#2b2b2b");
+    const floorNail = pins.find((p) => p.userMade);
+    const hung = makeBox({ x: 9.3, y: 3.4, hw: 0.45, hh: 0.45, color: "#8d5a34" });
+    const boxPin = rememberPin(9.3, 3.4, hung, true);
+    const anchorRope = spawnRope(floorNail, boxPin, [{ x: 8, y: 1.5 }, { x: 9.3, y: 3.4 }], "#3c7fd6");
+    check("rope anchors to a floor nail", !!anchorRope && anchorRope.kind === "rope");
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    const nailAt = pinWorld(floorNail);
+    world.setGravity(V(0, 0));
+    hung.setTransform(V(nailAt.x + 3, nailAt.y + 2.4), 0);
+    hung.setLinearVelocity(V(0, 0));
+    hung.setAngularVelocity(0);
+    hung.setAwake(true);
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const pulledIn = Math.hypot(hung.getPosition().x - nailAt.x, hung.getPosition().y - nailAt.y);
+    world.setGravity(V(0, -24));
+    check("floor nail pulls the box back", pulledIn < 2.4);
+    lines.push("INFO anchor dist " + pulledIn.toFixed(2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const wide = makeBox({ x: 8, y: 5, hw: 1.6, hh: 0.9, color: "#3c7fd6" });
+    for (let i = 0; i < 8; i++) step(1 / 60);
+    const boxMid = wide.getPosition();
+    const boxEdge = { x: boxMid.x + 1.5, y: boxMid.y };
+    check("the middle of a roomy box is a stroke", pressKind(boxMid.x, boxMid.y) === "draw");
+    check("the edge of a roomy box is a drag", pressKind(boxEdge.x, boxEdge.y) === "drag");
+    check("empty paper is a stroke", pressKind(boxMid.x + 4, boxMid.y + 3) === "draw");
+    check("press on the ball is a nudge", pressKind(ball.getPosition().x, ball.getPosition().y) === "nudge");
+    const inkBefore = stats.shapes;
+    check("press on the edge grabs at once", beginDrag(boxEdge.x, boxEdge.y));
+    moveDrag(boxEdge.x + 1.4, boxEdge.y);
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    endDrag();
+    check("a grab does not leave a stroke", stats.shapes === inkBefore && !playDrag);
+    const slimBoard = makeBox({ x: 18, y: 8, hw: 1.4, hh: 0.22, color: "#ef8b2c" });
+    check("a thin board grabs everywhere", pressKind(slimBoard.getPosition().x, slimBoard.getPosition().y) === "drag");
+    const adoptTrail = [
+      { x: boxMid.x, y: boxMid.y },
+      { x: boxMid.x + 0.45, y: boxMid.y },
+      { x: boxMid.x + 0.95, y: boxMid.y },
+    ];
+    pointer = { id: 80, pts: adoptTrail.slice(), trail: adoptTrail.slice(), moved: true, grab: null, dragging: false };
+    const midAdopt = tryAdoptCenterGrab(pointer.trail);
+    check("a long stroke from the middle becomes a grab", midAdopt && playDrag && playDrag.body === wide);
+    endDrag();
+    pointer = null;
+    const loopTrail = ring(boxMid.x, boxMid.y, 0.16);
+    pointer = { id: 81, pts: loopTrail.slice(), trail: loopTrail.slice(), moved: true, grab: null, dragging: false };
+    const loopAdopt = tryAdoptCenterGrab(pointer.trail);
+    check("a small loop in the middle does not become a grab", !loopAdopt && !playDrag);
+    pointer = null;
+    const pinsBeforeHost = pins.filter((pin) => pin.userMade).length;
+    commitStroke(ring(boxMid.x, boxMid.y, 0.16), "#2b2b2b");
+    const hostNail = pins.find((pin) => pin.userMade && pin.body === wide);
+    check("a small loop in the middle of a box is a nail in that box", !!hostNail && hostNail.body === wide && pins.filter((pin) => pin.userMade).length === pinsBeforeHost + 1);
+    const lid = commitStroke([
+      { x: boxMid.x - 0.9, y: boxMid.y - 0.45 },
+      { x: boxMid.x + 0.9, y: boxMid.y - 0.45 },
+      { x: boxMid.x + 0.9, y: boxMid.y + 0.45 },
+      { x: boxMid.x - 0.9, y: boxMid.y + 0.45 },
+      { x: boxMid.x - 0.9, y: boxMid.y - 0.45 },
+    ], "#8d5a34");
+    check("a body drawn over a nail hangs on it", !!lid && lid.body && hostNail.joints.some(Boolean));
+    const quick = makeBox({ x: 22, y: 8, hw: 0.4, hh: 0.4, color: "#ef8b2c" });
+    check("fast grab starts", beginDrag(22, 8));
+    moveDrag(28, 11);
+    step(1 / 60);
+    const qp = quick.getPosition();
+    lines.push("INFO fast drag " + qp.x.toFixed(2) + "," + qp.y.toFixed(2));
+    check("a dragged box keeps up with a fast cursor", Math.hypot(qp.x - 28, qp.y - 11) < 0.35);
+    endDrag();
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    const geoA = snapDrawPoint({ x: 8.21, y: 4.19 });
+    const geoB = snapDrawPoint({ x: 10.18, y: 4.22 });
+    const geoDiag = snapDrawPoint({ x: 8.74, y: 4.74 });
+    check("geodreieck snaps a stroke onto the half-meter grid", geoA.x === 8 && geoA.y === 4 && geoB.x === 10 && geoB.y === 4);
+    check("a diagonal lands on a grid point", geoDiag.x === 8.5 && geoDiag.y === 4.5);
+    const walk = [];
+    for (let x = 8; x <= 10; x += 0.5) walk.push({ x, y: 4 });
+    for (let y = 4.5; y <= 6; y += 0.5) walk.push({ x: 10, y });
+    for (let x = 9.5; x >= 8; x -= 0.5) walk.push({ x, y: 6 });
+    for (let y = 5.5; y >= 4; y -= 0.5) walk.push({ x: 8, y });
+    commitStroke(walk, "#3c7fd6");
+    const gridBox = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("a grid square becomes a body", !!gridBox && gridBox.meta.outline.local.length === 4);
+    const geoHold = makeBox({ x: 22.2, y: 12.2, hw: 0.4, hh: 0.4, color: "#ef8b2c" });
+    check("grab uses the raw cursor while the geodreieck is on", pressKind(geoHold.getPosition().x, geoHold.getPosition().y) === "drag");
+    check("empty paper still draws while the geodreieck is on", pressKind(26.2, 14.2) === "draw");
+    geoSnap = false;
+    const freePt = snapDrawPoint({ x: 8.21, y: 4.19 });
+    check("without the geodreieck the point stays put", freePt.x === 8.21 && freePt.y === 4.19);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const lower = makeBox({ x: 14, y: 2.1, hw: 0.75, hh: 0.75, color: "#3c7fd6" });
+    const upper = makeBox({ x: 14, y: 6.4, hw: 0.75, hh: 0.75, color: "#ef8b2c" });
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    const shapesBefore = stats.shapes;
+    const nudgesBefore = stats.nudges;
+    check("drag can grab the upper box", beginDrag(upper.getPosition().x, upper.getPosition().y));
+    let worstHit = 0;
+    for (let i = 0; i < 120; i++) {
+      moveDrag(14, 2.1);
+      step(1 / 60);
+      worstHit = Math.max(worstHit, pairOverlap(upper, lower), floorSink(upper), floorSink(lower));
+    }
+    check("drag does not push boxes through each other or the floor", worstHit < 0.08);
+    lines.push("INFO drag overlap " + worstHit.toFixed(3));
+    endDrag();
+    check("drag counts as neither shape nor nudge", stats.shapes === shapesBefore && stats.nudges === nudgesBefore);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const base = makeBox({ x: 20, y: 2.1, hw: 0.7, hh: 0.7, color: "#3e9a48" });
+    const pile = makeBox({ x: 24, y: 6, hw: 0.7, hh: 0.7, color: "#e6b423" });
+    for (let i = 0; i < 20; i++) step(1 / 60);
+    beginDrag(pile.getPosition().x, pile.getPosition().y);
+    for (let i = 0; i < 140; i++) {
+      moveDrag(base.getPosition().x, base.getPosition().y + 1.7);
+      step(1 / 60);
+    }
+    endDrag();
+    for (let i = 0; i < 160; i++) step(1 / 60);
+    const stackedGap = pile.getPosition().y - base.getPosition().y;
+    const stackedOverlap = pairOverlap(pile, base);
+    check("released box stacks on the other", stackedGap > 1.2 && stackedGap < 2.2 && stackedOverlap < 0.08 && Math.abs(pile.getPosition().x - base.getPosition().x) < 0.45);
+    lines.push("INFO stack gap " + stackedGap.toFixed(2) + " overlap " + stackedOverlap.toFixed(3));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const slab = makeBox({ x: 10, y: 6, hw: 1.2, hh: 0.35, color: "#3c7fd6" });
+    for (let i = 0; i < 5; i++) step(1 / 60);
+    const grip = slab.getWorldPoint(V(1.0, 0.22));
+    check("corner grab starts", beginDrag(grip.x, grip.y));
+    for (let i = 0; i < 300; i++) {
+      moveDrag(grip.x, grip.y);
+      step(1 / 60);
+    }
+    const held = slab.getWorldPoint(V(1.0, 0.22));
+    const com = slab.getPosition();
+    const hangX = com.x - held.x;
+    const hangY = com.y - held.y;
+    check("grab point stays under the cursor", Math.hypot(held.x - grip.x, held.y - grip.y) < 0.25);
+    check("weight hangs below the grab", hangY < -0.85 && Math.abs(hangX) < 0.16);
+    lines.push("INFO hang " + hangX.toFixed(2) + "," + hangY.toFixed(2));
+    endDrag();
+
+    function measureDragSweep(label, localX, localY, speed) {
+      buildLevel(LEVELS["ein-klotz"]);
+      const plank = makeBox({ x: 12, y: 8, hw: 1.2, hh: 0.35, color: "#3c7fd6" });
+      for (let i = 0; i < 8; i++) step(1 / 60);
+      const g0 = plank.getWorldPoint(V(localX, localY));
+      beginDrag(g0.x, g0.y);
+      for (let i = 0; i < 300; i++) {
+        moveDrag(g0.x, g0.y);
+        step(1 / 60);
+      }
+      const settleW = plank.getAngularVelocity();
+      const hangA = plank.getAngle();
+      const mass = plank.getMass();
+      const inertia = plank.getInertia();
+      const off = plank.getWorldPoint(V(localX, localY));
+      const c0 = plank.getPosition();
+      const rx = c0.x - off.x;
+      const ry = c0.y - off.y;
+      const pivotI = inertia + mass * (rx * rx + ry * ry);
+      const refW = Math.abs(mass * (ry * speed) / pivotI);
+      let maxW = 0;
+      let maxTilt = 0;
+      let maxErr = 0;
+      const sweepDt = 1 / 60;
+      const nSweep = 48;
+      for (let i = 1; i <= nSweep; i++) {
+        moveDrag(g0.x + speed * sweepDt * i, g0.y);
+        step(sweepDt);
+        const w = Math.abs(plank.getAngularVelocity());
+        if (w > maxW) maxW = w;
+        const tilt = Math.abs(plank.getAngle() - hangA);
+        if (tilt > maxTilt) maxTilt = tilt;
+        const g = plank.getWorldPoint(V(localX, localY));
+        const err = Math.hypot(g.x - (g0.x + speed * sweepDt * i), g.y - g0.y);
+        if (err > maxErr) maxErr = err;
+      }
+      const wAtEnd = Math.abs(plank.getAngularVelocity());
+      const tiltEnd = Math.abs(plank.getAngle() - hangA);
+      for (let i = 0; i < 180; i++) {
+        moveDrag(g0.x + speed * sweepDt * nSweep, g0.y);
+        step(sweepDt);
+        const w = Math.abs(plank.getAngularVelocity());
+        if (w > maxW) maxW = w;
+      }
+      const wAfter = Math.abs(plank.getAngularVelocity());
+      const held = plank.getWorldPoint(V(localX, localY));
+      const comAfter = plank.getPosition();
+      const hangAfterY = comAfter.y - held.y;
+      endDrag();
+      lines.push("INFO drag-spin " + label + " settleW " + settleW.toFixed(3) + " maxW " + maxW.toFixed(2) + " refW " + refW.toFixed(2) + " wSweep " + wAtEnd.toFixed(2) + " wAfter " + wAfter.toFixed(2) + " maxTilt " + (maxTilt * 180 / Math.PI).toFixed(1) + " tiltEnd " + (tiltEnd * 180 / Math.PI).toFixed(1) + " hangY " + hangAfterY.toFixed(2) + " err " + maxErr.toFixed(3));
+      return { maxW, maxTilt, maxErr, wAfter, refW, hangAfterY };
+    }
+    const dragCorner = measureDragSweep("corner-8", 1.05, 0.28, 8);
+    const dragCenter = measureDragSweep("center-8", 0.05, 0.02, 8);
+    const dragCornerFast = measureDragSweep("corner-14", 1.05, 0.28, 14);
+    check("corner drag at 8 m/s stays a pendulum", dragCorner.maxW < dragCorner.refW * 1.4 + 1 && dragCorner.maxTilt < 100 * Math.PI / 180 && dragCorner.maxErr < 0.25);
+    check("near-center drag stays near the reference spin", dragCenter.maxW < dragCenter.refW * 1.4 + 0.5 && dragCenter.maxTilt < 25 * Math.PI / 180);
+    check("dragged plank hangs again after a sweep", dragCorner.hangAfterY < -0.7);
+    check("a 14 m/s corner drag does not spin away", dragCornerFast.maxW < dragCornerFast.refW * 1.5 + 2 && dragCornerFast.maxErr < 0.25);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const pusher = makeBox({ x: 3.1, y: 2.3, hw: 0.4, hh: 0.4, color: "#d94b3a" });
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    const shoveX0 = ball.getPosition().x;
+    beginDrag(pusher.getPosition().x, pusher.getPosition().y);
+    for (let i = 0; i < 120; i++) {
+      const bp = ball.getPosition();
+      moveDrag(bp.x, bp.y);
+      step(1 / 60);
+    }
+    lines.push("INFO shove ball " + ball.getPosition().x.toFixed(2) + " box " + pusher.getPosition().x.toFixed(2) + " trick " + stats.dragTrick);
+    check("a dragged body can shove the ball", ball.getPosition().x > shoveX0 + 0.35);
+    check("dragging a body into the ball is a trick", stats.dragTrick);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    check("a trick still solves the level", won);
+    check("a trick skips confetti", confetti.length === 0);
+    endDrag();
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const rested = makeBox({ x: 18, y: 3.2, hw: 0.4, hh: 0.4, color: "#3e9a48" });
+    for (let i = 0; i < 15; i++) step(1 / 60);
+    beginDrag(rested.getPosition().x, rested.getPosition().y);
+    for (let i = 0; i < 30; i++) {
+      moveDrag(18, 3.4);
+      step(1 / 60);
+    }
+    endDrag();
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    check("a settled drag is not yet a trick", !stats.dragTrick);
+    for (const star of stars) star.got = true;
+    step(1 / 60);
+    check("a settled drag still gets confetti", won && confetti.length === 20);
+
+    ensureCradle();
+    for (let i = 0; i < 40; i++) stepCradle(1 / 60);
+    const outer = cradleBalls[0];
+    const far = cradleBalls[cradleBalls.length - 1];
+    const mid = cradleBalls[2];
+    check("cradle drag grabs an outer ball", beginCradleDrag(outer));
+    const pulled = cradlePose(outer, -0.95);
+    let cradleOverlap = 0;
+    for (let i = 0; i < 50; i++) {
+      cradleDrag.goal = pulled;
+      stepCradle(1 / 60);
+      for (let a = 0; a < cradleBalls.length; a++) {
+        for (let b = a + 1; b < cradleBalls.length; b++) {
+          const pa = cradleBalls[a].body.getPosition();
+          const pb = cradleBalls[b].body.getPosition();
+          const gap = Math.hypot(pa.x - pb.x, pa.y - pb.y) - cradleBalls[a].r - cradleBalls[b].r;
+          if (gap < -cradleOverlap) cradleOverlap = -gap;
+        }
+      }
+    }
+    const raised = outer.body.getPosition().x < outer.anchorX - 0.35;
+    endCradleDrag();
+    const released = Math.hypot(outer.body.getLinearVelocity().x, outer.body.getLinearVelocity().y);
+    let farSwing = 0;
+    let midSwing = 0;
+    const halfSwing = Math.PI * Math.sqrt(far.len / 24);
+    const swingWins = [];
+    for (let i = 0; i < Math.ceil(10 * halfSwing * 60); i++) {
+      stepCradle(1 / 60);
+      farSwing = Math.max(farSwing, Math.abs(far.body.getPosition().x - far.anchorX));
+      midSwing = Math.max(midSwing, Math.abs(mid.body.getPosition().x - mid.anchorX));
+      const w = Math.floor((i + 1) / 60 / halfSwing);
+      if (!swingWins[w]) swingWins[w] = { mid: 0, out: 0 };
+      for (let b = 0; b < cradleBalls.length; b++) {
+        const d = Math.abs(cradleBalls[b].body.getPosition().x - cradleBalls[b].anchorX);
+        if (b === 0 || b === cradleBalls.length - 1) swingWins[w].out = Math.max(swingWins[w].out, d);
+        else swingWins[w].mid = Math.max(swingWins[w].mid, d);
+      }
+      for (let a = 0; a < cradleBalls.length; a++) {
+        for (let b = a + 1; b < cradleBalls.length; b++) {
+          const pa = cradleBalls[a].body.getPosition();
+          const pb = cradleBalls[b].body.getPosition();
+          const gap = Math.hypot(pa.x - pb.x, pa.y - pb.y) - 0.4;
+          if (gap < -cradleOverlap) cradleOverlap = -gap;
+        }
+      }
+    }
+    check("outer cradle ball can be pulled aside", raised);
+    check("released cradle ball starts from rest", released < 0.35);
+    check("map cradle sends the swing to the far ball", farSwing > 0.42 && midSwing < farSwing * 0.55);
+    check("cradle balls do not overlap", cradleOverlap < 0.06);
+    const swingWorst = swingWins.slice(0, 10).reduce((m, w) => Math.max(m, w.mid / Math.max(w.out, 1e-6)), 0);
+    check("cradle middle balls stay calm for 10 half swings", swingWins.length >= 10 && swingWorst < 0.1);
+    lines.push("INFO cradle mid/outer worst " + swingWorst.toFixed(3) + " over " + Math.min(10, swingWins.length) + " half swings");
+    lines.push("INFO cradle swing far " + farSwing.toFixed(2) + " mid " + midSwing.toFixed(2) + " overlap " + cradleOverlap.toFixed(3));
+
+    resetTrebuchet();
+    treb.noSlip = true;
+    for (let i = 0; i < 18; i++) stepTrebuchet(1 / 60);
+    releaseTrebuchet();
+    let trebPeak = 0;
+    for (let i = 0; i < 180; i++) {
+      stepTrebuchet(1 / 60);
+      if (treb && treb.ball) {
+        const peakV = treb.ball.getLinearVelocity();
+        trebPeak = Math.max(trebPeak, Math.hypot(peakV.x, peakV.y));
+      }
+    }
+    resetTrebuchet();
+    const trebStart = { x: treb.ball.getPosition().x, y: treb.ball.getPosition().y };
+    const trebStartX = trebStart.x;
+    for (let i = 0; i < 18; i++) stepTrebuchet(1 / 60);
+    check("trebuchet hold pin stays until release", !!treb && !treb.released && !!treb.holdJoint);
+    check("trebuchet ball rests in the pouch", !!treb && trebBallInPouch(0.16));
+    releaseTrebuchet();
+    let trebMaxY = trebStart.y;
+    let trebFinalAng = 0;
+    let trebLeftPouch = false;
+    let trebDidSlip = false;
+    let trebLandX = null;
+    for (let i = 0; i < 360; i++) {
+      stepTrebuchet(1 / 60);
+      if (treb && treb.ball) trebMaxY = Math.max(trebMaxY, treb.ball.getPosition().y);
+      if (treb && treb.arm) trebFinalAng = treb.arm.getAngle();
+      if (treb && treb.hooked && !trebBallInPouch(0.22)) trebLeftPouch = true;
+      if (treb && !treb.hooked && !trebDidSlip) trebDidSlip = true;
+      if (trebDidSlip && trebLandX == null && treb.ball && treb.ball.getPosition().y <= TREB_BALL_R + 0.05 && treb.ball.getLinearVelocity().y <= 0) {
+        trebLandX = treb.ball.getPosition().x;
+      }
+    }
+    const trebFly = treb ? trebStartX - treb.minBallX : 0;
+    const trebLive = treb ? treb.maxLive : 99;
+    const trebOk = treb && !treb.exploded && trebFinite(treb.ball) && trebFinite(treb.arm);
+    const trebEnd = treb && treb.ball ? treb.ball.getPosition() : { x: 0, y: 0 };
+    const sl = treb && treb.slip ? treb.slip : { x: 0, y: 0, vx: 0, vy: 0 };
+    const trebRel = treb && treb.slipRel != null ? treb.slipRel : 0;
+    const trebSlipV = Math.hypot(sl.vx, sl.vy);
+    const trebLand = trebLandX != null ? trebStartX - trebLandX : trebFly;
+    lines.push("INFO trebuchet fly " + trebFly.toFixed(2) + " land " + trebLand.toFixed(2) + " live " + trebLive.toFixed(3) + " maxY " + trebMaxY.toFixed(2) + " end " + trebEnd.x.toFixed(2) + "," + trebEnd.y.toFixed(2) + " vSlip " + sl.vx.toFixed(2) + "," + sl.vy.toFixed(2) + " slipRel " + trebRel.toFixed(2) + " peak " + trebPeak.toFixed(2) + " slipV " + trebSlipV.toFixed(2) + " didSlip " + trebDidSlip + " leftPouch " + trebLeftPouch);
+    check("trebuchet ball stays in the pouch until release", !trebLeftPouch && trebDidSlip);
+    check("trebuchet sling swings past the arm tip before release", trebDidSlip && trebRel >= -0.2 && trebRel <= 0.55);
+    check("trebuchet release speed is near the measured maximum", trebSlipV >= trebPeak * 0.9 && trebPeak > 20);
+    check("trebuchet ball flies far after release", trebFly > 15);
+    check("trebuchet throws to the left", trebFly > 15 && sl.vx < 0);
+    check("trebuchet sling stays within 102 percent of its length", trebLive <= 1.02);
+    check("trebuchet does not explode", trebOk);
+
+    {
+      // Verankern: kurzer gerader Zug Boden -> Körper, Ketten nur vom Boden aus.
+      buildLevel(LEVELS["ein-klotz"]);
+      const ancRect = (x0, y0, w, h, color) => commitStroke([
+        { x: x0, y: y0 }, { x: x0 + w, y: y0 }, { x: x0 + w, y: y0 + h }, { x: x0, y: y0 + h }, { x: x0, y: y0 },
+      ], color);
+      const ancA = ancRect(19, 1.4, 1.5, 1, "#3c7fd6");
+      const ancE = ancRect(25, 1.4, 1.5, 1, "#3e9a48");
+      const ancC = ancRect(29, 1.4, 1.2, 0.8, "#7a4fbf");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const ancTopA = ancA.body.getPosition().y + 0.5;
+      const ancDrawCount = drawings.length;
+      const ancShapes = stats.shapes;
+      const ancRes1 = finishPlayStroke([{ x: 18.6, y: 1.2 }, { x: 19, y: 1.45 }, { x: 19.4, y: 1.7 }]);
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      check("anchor ground->rectangle makes it static", ancRes1 === "anchor" && ancA.body.isStatic() && anchors.length === 1 && anchors[0].base === ground);
+      check("anchor gesture draws no stroke", drawings.length === ancDrawCount && stats.shapes === ancShapes);
+      check("anchor link has the body color", anchors.length === 1 && anchors[0].color === MAT.wood);
+
+      const ancB = ancRect(19.2, ancTopA + 0.05, 1, 0.8, "#d94b3a");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const ancResB = finishPlayStroke([{ x: 19.9, y: ancTopA - 0.15 }, { x: 19.85, y: ancTopA + 0.1 }, { x: 19.8, y: ancTopA + 0.35 }]);
+      check("anchor to an anchored body works", ancResB === "anchor" && ancB.body.isStatic() && anchorOf(ancB.body) && anchorOf(ancB.body).base === ancA.body);
+
+      const ancD = ancRect(29.1, ancC.body.getPosition().y + 0.45, 0.9, 0.6, "#ef8b2c");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const ancTopC = ancC.body.getPosition().y + 0.4;
+      const ancFreeDirect = anchorBody(ancD, ancC.body, { x: 29.6, y: ancTopC - 0.1 }, { x: 29.6, y: ancTopC + 0.2 });
+      const ancFreeGesture = tryAnchorGesture([{ x: 29.6, y: ancTopC - 0.15 }, { x: 29.6, y: ancTopC + 0.25 }]);
+      check("chain between two free bodies is refused", !ancFreeDirect && !ancFreeGesture && ancD.body.isDynamic() && ancC.body.isDynamic());
+
+      const ancLong = finishPlayStroke([{ x: 22.5, y: 1.2 }, { x: 24, y: 1.45 }, { x: 25.4, y: 1.7 }]);
+      check("long drag into a body still draws", ancLong && ancLong !== "anchor" && ancE.body.isDynamic());
+      const ancCurved = finishPlayStroke([{ x: 24.6, y: 1.25 }, { x: 24.62, y: 1.75 }, { x: 24.9, y: 1.95 }, { x: 25.25, y: 1.8 }]);
+      check("curved short drag into a body still draws", ancCurved && ancCurved !== "anchor" && ancE.body.isDynamic());
+      const ancEmpty = finishPlayStroke([{ x: 12.5, y: 1.25 }, { x: 12.9, y: 1.55 }, { x: 13.3, y: 1.9 }]);
+      check("short stroke from the ground into empty space draws", ancEmpty && ancEmpty !== "anchor" && drawings.includes(ancEmpty));
+
+      const ancMid = { x: (anchors[0].a.x + anchors[0].b.x) / 2, y: (anchors[0].a.y + anchors[0].b.y) / 2 };
+      const ancMidScr = worldToScreen(ancMid.x, ancMid.y);
+      onPointerDown({ button: 2, clientX: ancMidScr.x, clientY: ancMidScr.y, pointerId: 7 });
+      const ancRight = anchors.length === 0 && drawings.includes(ancA) && drawings.includes(ancB);
+      for (let i = 0; i < 30; i++) step(1 / 60);
+      check("right click on the link releases body and dependents", ancRight && ancA.body.isDynamic() && ancB.body.isDynamic() && anchors.length === 0);
+
+      buildLevel(LEVELS["ein-klotz"]);
+      const ancBlob = spawnBlob(21.5, 1.62, 0.3, "#e6b423");
+      const ancRoll = spawnRoller(23.5, 1.85, 0.5, "#8d5a34");
+      const ancWire = spawnWire([{ x: 27, y: 1.5 }, { x: 28.5, y: 1.5 }], { color: "#2b2b2b" });
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      finishPlayStroke([{ x: 21.1, y: 1.2 }, { x: 21.5, y: 1.6 }]);
+      finishPlayStroke([{ x: 23.0, y: 1.2 }, { x: 23.4, y: 1.7 }]);
+      const ancWy = ancWire.body.getPosition().y;
+      finishPlayStroke([{ x: 27.4, y: 1.2 }, { x: 27.7, y: ancWy }]);
+      check("balls and wires are not anchored", ancBlob.body.isDynamic() && ancRoll.body.isDynamic() && ancWire.body.isDynamic() && anchors.length === 0);
+
+      const ancG = ancRect(16, 1.4, 1.5, 1, "#3c7fd6");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const ancGc = ancG.body.getPosition();
+      finishPlayStroke([{ x: 15.6, y: 1.2 }, { x: 16.4, y: 1.6 }]);
+      const ancGrabKind = pressKind(ancGc.x, ancGc.y);
+      const ancGrab = beginDrag(ancGc.x, ancGc.y);
+      check("anchored body cannot be grabbed", ancG.body.isStatic() && ancGrabKind !== "drag" && !ancGrab && !playDrag);
+      const ancAgain = finishPlayStroke([{ x: 15.6, y: 1.2 }, { x: 16.4, y: 1.6 }]);
+      check("same anchor gesture again releases it", ancAgain === "anchor" && ancG.body.isDynamic() && anchors.length === 0);
+
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      const ancHc = ancG.body.getPosition();
+      const ancDragOk = beginDrag(ancHc.x, ancHc.y);
+      moveDrag(ancHc.x + 0.1, 1.1);
+      for (let i = 0; i < 20; i++) step(1 / 60);
+      const ancHeld = playDrag ? playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)) : ancHc;
+      endDrag();
+      const ancRev = tryAnchorDragEnd(ancG.body, { x: ancHeld.x, y: ancHeld.y }, [{ x: ancHc.x, y: ancHc.y }, { x: ancHc.x + 0.1, y: 1.1 }]);
+      check("reverse drag body->ground anchors it", ancDragOk && ancRev && ancG.body.isStatic());
+      const ancPose = ancG.body.getPosition().y;
+      for (let i = 0; i < 120; i++) step(1 / 60);
+      check("anchored body stays put", Math.abs(ancG.body.getPosition().y - ancPose) < 1e-6);
+
+      buildLevel(LEVELS["ein-klotz"]);
+      const ancMiss = ancRect(14, 1.65, 1.5, 1, "#3c7fd6");
+      const ancMissN = drawings.length;
+      const ancMissRes = finishPlayStroke([{ x: 14.4, y: 1.2 }, { x: 14.7, y: 1.85 }, { x: 15.0, y: 2.2 }]);
+      const ancMissPt = ancMiss.body.getPosition();
+      const ancMissCan = beginDrag(ancMissPt.x, ancMissPt.y);
+      check("rejected anchor stroke draws nothing", ancMissRes === "miss" && drawings.length === ancMissN && ancMiss.body.isDynamic() && anchors.length === 0);
+      check("rejected anchor stroke leaves the body grabbable", !!ancMissCan && playDrag && playDrag.body === ancMiss.body);
+      endDrag();
+
+      const ancLift = ancRect(17.5, 1.65, 1.5, 1, "#d94b3a");
+      const ancLiftN = drawings.length;
+      const ancLiftTrail = [{ x: 17.9, y: 1.2 }, { x: 18.2, y: 1.85 }, { x: 18.5, y: 2.2 }];
+      pointer = { id: 41, pts: ancLiftTrail.slice(), trail: ancLiftTrail.slice(), moved: true, grab: null, dragging: false };
+      const ancLiftAdopt = tryAdoptAnchorGrab(pointer.trail);
+      const ancLiftGot = !!(playDrag && playDrag.body === ancLift.body);
+      const ancLiftX0 = ancLift.body.getPosition().x;
+      if (playDrag) moveDrag(ancLiftX0 + 0.9, ancLift.body.getPosition().y);
+      for (let i = 0; i < 20; i++) step(1 / 60);
+      const ancLiftX1 = ancLift.body.getPosition().x;
+      endDrag();
+      pointer = null;
+      check("rejected anchor gesture becomes a grab", ancLiftAdopt && ancLiftGot);
+      check("rejected anchor grab moves the body and draws no stroke", drawings.length === ancLiftN && ancLiftX1 > ancLiftX0 + 0.2 && ancLift.body.isDynamic() && anchors.length === 0);
+
+      buildLevel(LEVELS["ein-klotz"]);
+      const ancKeep = ancRect(19, 1.4, 1.5, 1, "#3c7fd6");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      finishPlayStroke([{ x: 18.6, y: 1.2 }, { x: 19, y: 1.45 }, { x: 19.4, y: 1.7 }]);
+      const ancKeepC = ancKeep.body.getPosition();
+      const ancKeepScr = worldToScreen(ancKeepC.x, ancKeepC.y);
+      const ancKeepN = drawings.length;
+      onPointerDown({ button: 2, clientX: ancKeepScr.x, clientY: ancKeepScr.y, pointerId: 42 });
+      check("right click on anchored body does not delete it", drawings.length === ancKeepN && drawings.includes(ancKeep) && isAnchored(ancKeep.body) && ancKeep.body.isStatic());
+
+      const ancKeepTop = ancKeepC.y + 0.5;
+      const ancDep = ancRect(19.2, ancKeepTop + 0.05, 1, 0.8, "#d94b3a");
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      finishPlayStroke([{ x: 19.9, y: ancKeepTop - 0.15 }, { x: 19.85, y: ancKeepTop + 0.1 }, { x: 19.8, y: ancKeepTop + 0.35 }]);
+      const ancDepC = ancDep.body.getPosition();
+      // Links liegt der Klick weit weg vom Verbindungsstrich (der rechts endet).
+      const ancDepHit = { x: ancDepC.x - 0.3, y: ancDepC.y };
+      const ancDepScr = worldToScreen(ancDepHit.x, ancDepHit.y);
+      const ancDepN = drawings.length;
+      onPointerDown({ button: 2, clientX: ancDepScr.x, clientY: ancDepScr.y, pointerId: 43 });
+      check("right click on a body anchored to another does not delete it", drawings.length === ancDepN && drawings.includes(ancDep) && isAnchored(ancDep.body) && isAnchored(ancKeep.body));
+
+      const ancDepLink = anchorOf(ancDep.body);
+      const ancDepReleased = !!ancDepLink && drawings.includes(ancDep);
+      if (ancDepLink) {
+        const ancDepMid = { x: (ancDepLink.a.x + ancDepLink.b.x) / 2, y: (ancDepLink.a.y + ancDepLink.b.y) / 2 };
+        const ancDepMidScr = worldToScreen(ancDepMid.x, ancDepMid.y);
+        onPointerDown({ button: 2, clientX: ancDepMidScr.x, clientY: ancDepMidScr.y, pointerId: 44 });
+      }
+      check("right click on the dependent link releases only that body", ancDepReleased && !isAnchored(ancDep.body) && isAnchored(ancKeep.body) && drawings.includes(ancDep));
+      const ancDepFree = ancDep.body.getPosition();
+      const ancDepFreeScr = worldToScreen(ancDepFree.x - 0.3, ancDepFree.y);
+      onPointerDown({ button: 2, clientX: ancDepFreeScr.x, clientY: ancDepFreeScr.y, pointerId: 45 });
+      check("right click deletes the body after the link is gone", !drawings.includes(ancDep) && drawings.includes(ancKeep) && isAnchored(ancKeep.body));
+    }
+
+    function circRing(cx, cy, rx, ry, n, wob1, wob2) {
+      const pts = [];
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const wob = 1 + wob1 * Math.sin(a * 3) + wob2 * Math.sin(a * 5 + 0.4);
+        pts.push({ x: cx + Math.cos(a) * rx * wob, y: cy + Math.sin(a) * ry * wob });
+      }
+      return pts;
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(12, 6, 1.05, 0.95, 28, 0.07, 0.03), "#3c7fd6");
+    const circHand = drawings.find((d) => d.kind === "roller");
+    const circHandShape = circHand && circHand.body.getFixtureList().getShape();
+    check("shaky slightly oval freehand stroke is a circle", !!circHand && circHandShape && circHandShape.m_type === "circle" && Math.abs(circHand.r - 1) < 0.15);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(14, 7, 1.1, 1.0, 30, 0.08, 0.03), "#7a4fbf");
+    const circHand2 = drawings.find((d) => d.kind === "roller");
+    check("another shaky freehand loop is a circle", !!circHand2 && circHand2.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 10, y: 5 }, { x: 11.2, y: 4.6 }, { x: 12.5, y: 5.1 }, { x: 12.8, y: 6.3 },
+      { x: 11.9, y: 7.4 }, { x: 10.4, y: 7.1 }, { x: 9.6, y: 6.0 }, { x: 10, y: 5 },
+    ], "#8d5a34");
+    const circRockA = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("irregular rock stays a polygon", !!circRockA && circRockA.kind === "solid" && circRockA.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 3 }, { x: 10.5, y: 3.2 }, { x: 11.8, y: 3.8 }, { x: 12.0, y: 4.6 },
+      { x: 10.8, y: 5.3 }, { x: 9.2, y: 5.5 }, { x: 7.6, y: 4.9 }, { x: 7.4, y: 3.8 }, { x: 8, y: 3 },
+    ], "#d94b3a");
+    const circRockB = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("elongated rock stays a polygon", !!circRockB && circRockB.kind === "solid" && circRockB.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 9, y: 4 }, { x: 10, y: 4 }, { x: 11, y: 5 }, { x: 11, y: 6 },
+      { x: 10, y: 7 }, { x: 9, y: 7 }, { x: 8, y: 6 }, { x: 8, y: 5 }, { x: 9, y: 4 },
+    ], "#3e9a48");
+    const circGeoRound = drawings.find((d) => d.kind === "roller");
+    check("geodreieck shape without a right angle becomes a circle", !!circGeoRound && circGeoRound.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 10, y: 7 }, { x: 8, y: 4 },
+    ], "#ef8b2c");
+    const circGeoTri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("geodreieck triangle without a right angle stays a polygon", !!circGeoTri && circGeoTri.kind === "solid" && circGeoTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 12, y: 7 }, { x: 8, y: 7 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const circGeoRect = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("geodreieck rectangle with right angles stays a polygon", !!circGeoRect && circGeoRect.kind === "solid" && circGeoRect.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 8, y: 7 }, { x: 8, y: 4 },
+    ], "#7a4fbf");
+    const circGeoRight = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const circGeoRightAng = circGeoRight ? interiorAngles(circGeoRight.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    check("geodreieck right triangle stays a polygon", !!circGeoRight && circGeoRight.kind === "solid" && circGeoRight.meta.outline.local.length === 3 && circGeoRightAng.some((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+    geoSnap = false;
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(16, 7, 1.1, 0.98, 24, 0.12, 0.05), "#3c7fd6");
+    const circNoisy = drawings.find((d) => d.kind === "roller");
+    check("noisy freehand circle with uneven radius is a circle", !!circNoisy && circNoisy.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(15, 6.5, 1.28, 1.0, 22, 0.08, 0.04), "#7a4fbf");
+    const circOval = drawings.find((d) => d.kind === "roller");
+    check("slightly more oval scratchy loop is a circle", !!circOval && circOval.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circOpenPts = circRing(13, 6, 1.05, 0.95, 24, 0.10, 0.04);
+    circOpenPts.splice(-2, 2);
+    commitStroke(circOpenPts, "#ef8b2c");
+    const circOpen = drawings.find((d) => d.kind === "roller");
+    check("almost closed noisy loop is a circle", !!circOpen && circOpen.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(14, 7, 1.05, 0.98, 12, 0.05, 0.02), "#3e9a48");
+    const circFew = drawings.find((d) => d.kind === "roller");
+    check("coarse twelve-point loop is a circle", !!circFew && circFew.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 10.2, y: 3.7 }, { x: 11.6, y: 5.0 },
+      { x: 11.0, y: 6.8 }, { x: 9.1, y: 7.2 }, { x: 7.6, y: 5.6 }, { x: 8, y: 4 },
+    ], "#8d5a34");
+    const circSixRock = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("six-corner rock stays a polygon", !!circSixRock && circSixRock.kind === "solid" && circSixRock.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 10, y: 7 }, { x: 8, y: 4 },
+    ], "#d94b3a");
+    const circFreeTri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("freehand triangle stays a polygon", !!circFreeTri && circFreeTri.kind === "solid" && circFreeTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circDense = [];
+    for (let i = 0; i < 40; i++) {
+      const a = -Math.PI / 2 + Math.PI * i / 40;
+      circDense.push({ x: 16 + Math.cos(a) * 1.15, y: 7 + Math.sin(a) * 1.15 });
+    }
+    for (let i = 1; i < 8; i++) {
+      const a = Math.PI / 2 + Math.PI * i / 8;
+      circDense.push({ x: 16 + Math.cos(a) * 1.15, y: 7 + Math.sin(a) * 1.15 });
+    }
+    circDense.push({ x: 16 + Math.cos(-Math.PI / 2) * 1.15, y: 7 + Math.sin(-Math.PI / 2) * 1.15 });
+    commitStroke(circDense, "#3c7fd6");
+    const circUneven = drawings.find((d) => d.kind === "roller");
+    check("unevenly sampled circle is a circle", !!circUneven && circUneven.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 12, y: 8 }, { x: 8, y: 8 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const circSquare = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("square stays a polygon", !!circSquare && circSquare.kind === "solid" && circSquare.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circHexPts = [];
+    for (let i = 0; i <= 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      circHexPts.push({ x: 14 + Math.cos(a) * 1.5, y: 7 + Math.sin(a) * 1.5 });
+    }
+    commitStroke(circHexPts, "#8d5a34");
+    const circHex = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("regular hexagon stays a polygon", !!circHex && circHex.kind === "solid" && circHex.meta.outline.local.length === 6 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circPentPts = [];
+    for (let i = 0; i <= 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      circPentPts.push({ x: 14 + Math.cos(a) * 1.5, y: 7 + Math.sin(a) * 1.5 });
+    }
+    commitStroke(circPentPts, "#ef8b2c");
+    const circPent = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("regular pentagon stays a polygon", !!circPent && circPent.kind === "solid" && circPent.meta.outline.local.length === 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circLongPts = [];
+    for (let i = 0; i <= 32; i++) {
+      const a = (i / 32) * Math.PI * 2;
+      circLongPts.push({ x: 16 + Math.cos(a) * 2.0, y: 7 + Math.sin(a) * 1.0 });
+    }
+    commitStroke(circLongPts, "#7a4fbf");
+    const circLong = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("two-to-one ellipse stays a polygon", !!circLong && circLong.kind === "solid" && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    function ellipseStroke(cx, cy, ra, rb, rot, n) {
+      const pts = [];
+      const ca = Math.cos(rot);
+      const sa = Math.sin(rot);
+      const count = n || 32;
+      for (let i = 0; i <= count; i++) {
+        const t = (i / count) * Math.PI * 2;
+        const u = ra * Math.cos(t);
+        const v = rb * Math.sin(t);
+        pts.push({ x: cx + u * ca - v * sa, y: cy + u * sa + v * ca });
+      }
+      return pts;
+    }
+    function ellipseAxisDiff(got, want) {
+      let d = Math.abs(got - want) % Math.PI;
+      if (d > Math.PI / 2) d = Math.PI - d;
+      return d;
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 2.0, 1.0, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const geoEll12 = drawings.find((d) => d.kind === "ellipse");
+    check("geodreieck two-to-one oval becomes an ellipse", !!geoEll12 && Math.abs(geoEll12.a - 2) < 0.15 && Math.abs(geoEll12.b - 1) < 0.12 && ellipseAxisDiff(geoEll12.angle, 0) < 8 * Math.PI / 180);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 2.1, 0.7, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const geoEll13 = drawings.find((d) => d.kind === "ellipse");
+    check("geodreieck three-to-one oval becomes an ellipse", !!geoEll13 && Math.abs(geoEll13.a / geoEll13.b - 3) < 0.35 && ellipseAxisDiff(geoEll13.angle, 0) < 8 * Math.PI / 180);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 2.0, 1.0, 30 * Math.PI / 180, 32), "#7a4fbf");
+    geoSnap = false;
+    const geoEllRot = drawings.find((d) => d.kind === "ellipse");
+    check("geodreieck rotated oval keeps its axes", !!geoEllRot && Math.abs(geoEllRot.a - 2) < 0.15 && Math.abs(geoEllRot.b - 1) < 0.12 && ellipseAxisDiff(geoEllRot.angle, 30 * Math.PI / 180) < 8 * Math.PI / 180);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 1.3 + 0.7 + 0.06, 2.0, 0.7, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const geoEllLie = drawings.find((d) => d.kind === "ellipse");
+    if (geoEllLie) {
+      for (let i = 0; i < 240; i++) step(1 / 60);
+    }
+    const liePos = geoEllLie ? geoEllLie.body.getPosition() : { x: 0, y: 0 };
+    const lieAng = geoEllLie ? geoEllLie.body.getAngle() + geoEllLie.angle : 99;
+    const lieW = geoEllLie ? Math.abs(geoEllLie.body.getAngularVelocity()) : 99;
+    const lieVy = geoEllLie ? Math.abs(geoEllLie.body.getLinearVelocity().y) : 99;
+    check("lying ellipse settles on its long side", !!geoEllLie && liePos.y < 1.3 + (geoEllLie.a + geoEllLie.b) * 0.5 && liePos.y > 1.3 + geoEllLie.b * 0.55 && ellipseAxisDiff(lieAng, 0) < 25 * Math.PI / 180 && lieW < 0.45 && lieVy < 0.45);
+
+    function handEllipse(cx, cy, ra, rb, rot, n, wob, seed, gap) {
+      const pts = [];
+      const ca = Math.cos(rot);
+      const sa = Math.sin(rot);
+      let s = ((seed || 1) * 1103515245 + 12345) >>> 0;
+      const rnd = () => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return s / 0x100000000 - 0.5;
+      };
+      const count = n || 48;
+      const last = gap ? count - 1 : count;
+      for (let i = 0; i <= last; i++) {
+        const t = ((i + rnd() * 0.35) / count) * Math.PI * 2;
+        const u = ra * Math.cos(t) * (1 + rnd() * 2 * (wob || 0));
+        const v = rb * Math.sin(t) * (1 + rnd() * 2 * (wob || 0));
+        pts.push({
+          x: cx + u * ca - v * sa + rnd() * (wob || 0) * ra * 0.4,
+          y: cy + u * sa + v * ca + rnd() * (wob || 0) * ra * 0.4,
+        });
+      }
+      return pts;
+    }
+    function playDrawWorld(worldPts, pointerId) {
+      const s0 = worldToScreen(worldPts[0].x, worldPts[0].y);
+      onPointerDown({ button: 0, clientX: s0.x, clientY: s0.y, pointerId });
+      for (let i = 1; i < worldPts.length; i++) {
+        const sc = worldToScreen(worldPts[i].x, worldPts[i].y);
+        onPointerMove({ clientX: sc.x, clientY: sc.y, pointerId });
+      }
+      const last = worldPts[worldPts.length - 1];
+      const sN = worldToScreen(last.x, last.y);
+      onPointerUp({ button: 0, clientX: sN.x, clientY: sN.y, pointerId });
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    const previewStart = worldToScreen(8.21, 4.19);
+    onPointerDown({ button: 0, clientX: previewStart.x, clientY: previewStart.y, pointerId: 701 });
+    check("geodreieck first ink stays off the grid", !!pointer && pointer.pts && pointer.pts.length === 1 && Math.abs(pointer.pts[0].x - 8.21) < 0.03 && Math.abs(pointer.pts[0].y - 4.19) < 0.03);
+    const previewNext = worldToScreen(8.74, 4.74);
+    onPointerMove({ clientX: previewNext.x, clientY: previewNext.y, pointerId: 701 });
+    check("geodreieck preview stays unsnapped while drawing", !!pointer && pointer.pts.some((p) => Math.abs(p.x - 8.74) < 0.05 && Math.abs(p.y - 4.74) < 0.05));
+    onPointerUp({ button: 0, clientX: previewNext.x, clientY: previewNext.y, pointerId: 701 });
+    geoSnap = false;
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    const hand12 = handEllipse(16, 7, 2.0, 1.0, 30 * Math.PI / 180, 48, 0.05, 7, false);
+    const snapped12 = snapStrokePoints(hand12);
+    finishPlayStroke(hand12, hand12);
+    geoSnap = false;
+    const geoHand12 = drawings.find((d) => d.kind === "ellipse");
+    check("grid-snapped hand oval would have right angles", hasRightAngle(closedRing(snapped12) || snapped12));
+    check("hand-drawn 1:2 oval with geodreieck is an ellipse", !!geoHand12 && Math.abs(geoHand12.a - 2) < 0.35 && Math.abs(geoHand12.b - 1) < 0.3 && ellipseAxisDiff(geoHand12.angle, 30 * Math.PI / 180) < 18 * Math.PI / 180);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    // 1:1,5 bei a=2,1 / b=1,4: a-b=0,7 liegt unter 0,15*a + 1 Rasterweite (0,815), daher Kreis.
+    playDrawWorld(handEllipse(16, 7, 2.1, 1.4, 0, 56, 0.06, 11, false), 702);
+    geoSnap = false;
+    check("pointer-drawn mid-size 1:1.5 oval with geodreieck is a circle", !!drawings.find((d) => d.kind === "roller") && !drawings.some((d) => d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    finishPlayStroke(handEllipse(16, 7, 2.1, 0.7, 20 * Math.PI / 180, 36, 0.06, 19, true), handEllipse(16, 7, 2.1, 0.7, 20 * Math.PI / 180, 36, 0.06, 19, true));
+    geoSnap = false;
+    check("hand-drawn 1:3 oval with a gap is an ellipse", !!drawings.find((d) => d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    finishPlayStroke(handEllipse(16, 7, 1.6, 0.8, 55 * Math.PI / 180, 20, 0.07, 23, false), handEllipse(16, 7, 1.6, 0.8, 55 * Math.PI / 180, 20, 0.07, 23, false));
+    geoSnap = false;
+    check("sparse jittered oval with geodreieck is an ellipse", !!drawings.find((d) => d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 3.0, 2.2, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const nearRoundGap = drawings.find((d) => d.kind === "roller");
+    check("near-round 3-by-2.2 oval becomes a circle", !!nearRoundGap && !drawings.some((d) => d.kind === "ellipse") && Math.abs(nearRoundGap.r - 2.6) < 0.15);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 3.0, 1.8, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const clearGapEll = drawings.find((d) => d.kind === "ellipse");
+    check("3-by-1.8 oval stays an ellipse", !!clearGapEll && Math.abs(clearGapEll.a - 3) < 0.15 && Math.abs(clearGapEll.b - 1.8) < 0.12);
+
+    let geoHits = 0;
+    let geoTotal = 0;
+    let geoEllHits = 0;
+    let geoCircHits = 0;
+    const geoCases = [
+      // Die vier nahezu runden Fälle (a-b unter 0,15*a + Rasterweite) sollen Kreise werden,
+      // zählen in der Quote aber weiter als erkannt (Ellipse oder Kreis, nicht Vieleck).
+      [1.8, 1.2, 0, 64, 0.04, 1, false],
+      [2.0, 1.0, 15, 48, 0.05, 2, false],
+      [2.1, 0.7, 0, 40, 0.05, 3, false],
+      [1.6, 0.8, 40, 28, 0.07, 4, false],
+      [2.4, 1.2, 70, 80, 0.04, 5, false],
+      [1.5, 1.0, 10, 22, 0.06, 6, false],
+      [2.0, 1.0, 30, 16, 0.05, 7, false],
+      [2.2, 0.9, 55, 36, 0.08, 8, true],
+      [1.7, 1.1, 25, 52, 0.06, 9, false],
+      [2.0, 0.7, 5, 44, 0.05, 10, true],
+      [1.4, 0.9, 65, 30, 0.07, 11, false],
+      [2.5, 1.0, 45, 60, 0.05, 12, false],
+    ];
+    for (const [ra, rb, deg, n, wob, seed, gap] of geoCases) {
+      geoTotal += 1;
+      buildLevel(LEVELS["ein-klotz"]);
+      geoSnap = true;
+      const raw = handEllipse(16, 7, ra, rb, deg * Math.PI / 180, n, wob, seed, gap);
+      finishPlayStroke(raw, raw);
+      geoSnap = false;
+      if (drawings.some((d) => d.kind === "ellipse")) geoEllHits += 1;
+      if (drawings.some((d) => d.kind === "roller")) geoCircHits += 1;
+      if (drawings.some((d) => d.kind === "ellipse" || d.kind === "roller")) geoHits += 1;
+    }
+    lines.push("INFO geo hand-ellipse " + geoHits + "/" + geoTotal + " (ellipses " + geoEllHits + ", circles " + geoCircHits + ")");
+    check("most hand-drawn ovals with geodreieck become ellipses or circles", geoHits >= 10);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    finishPlayStroke([
+      { x: 8.15, y: 4.12 }, { x: 9.3, y: 4.08 }, { x: 10.7, y: 3.95 }, { x: 11.9, y: 4.18 },
+      { x: 12.08, y: 5.1 }, { x: 11.95, y: 6.2 }, { x: 12.1, y: 6.92 },
+      { x: 10.8, y: 7.08 }, { x: 9.2, y: 6.9 }, { x: 8.08, y: 7.05 },
+      { x: 7.92, y: 5.8 }, { x: 8.1, y: 4.9 }, { x: 8.15, y: 4.12 },
+    ], [
+      { x: 8.15, y: 4.12 }, { x: 9.3, y: 4.08 }, { x: 10.7, y: 3.95 }, { x: 11.9, y: 4.18 },
+      { x: 12.08, y: 5.1 }, { x: 11.95, y: 6.2 }, { x: 12.1, y: 6.92 },
+      { x: 10.8, y: 7.08 }, { x: 9.2, y: 6.9 }, { x: 8.08, y: 7.05 },
+      { x: 7.92, y: 5.8 }, { x: 8.1, y: 4.9 }, { x: 8.15, y: 4.12 },
+    ]);
+    geoSnap = false;
+    const geoWobRect = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const geoWobAng = geoWobRect ? interiorAngles(geoWobRect.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    check("geodreieck wobbly rectangle stays a polygon", !!geoWobRect && geoWobRect.kind === "solid" && geoWobRect.meta.outline.local.length === 4 && geoWobAng.every((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    finishPlayStroke([
+      { x: 8.12, y: 4.08 }, { x: 10.9, y: 4.15 }, { x: 13.88, y: 4.18 },
+      { x: 12.1, y: 6.3 }, { x: 10.25, y: 8.62 },
+      { x: 9.1, y: 6.2 }, { x: 8.12, y: 4.08 },
+    ], [
+      { x: 8.12, y: 4.08 }, { x: 10.9, y: 4.15 }, { x: 13.88, y: 4.18 },
+      { x: 12.1, y: 6.3 }, { x: 10.25, y: 8.62 },
+      { x: 9.1, y: 6.2 }, { x: 8.12, y: 4.08 },
+    ]);
+    geoSnap = false;
+    const geoWobTri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("geodreieck non-right triangle stays a polygon", !!geoWobTri && geoWobTri.kind === "solid" && geoWobTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    function diaRng(seed) {
+      let s = (seed >>> 0) || 1;
+      return () => {
+        s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+        return s / 4294967296;
+      };
+    }
+    function rotPt(x, y, ca, sa, cx, cy) {
+      return { x: cx + x * ca - y * sa, y: cy + x * sa + y * ca };
+    }
+    function squareStroke(cx, cy, hw, hh, rotDeg, kind, seed) {
+      const a = rotDeg * Math.PI / 180;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      const corners = [
+        rotPt(-hw, -hh, ca, sa, cx, cy),
+        rotPt(hw, -hh, ca, sa, cx, cy),
+        rotPt(hw, hh, ca, sa, cx, cy),
+        rotPt(-hw, hh, ca, sa, cx, cy),
+      ];
+      const rand = diaRng(seed);
+      let pts = [];
+      const startEdge = kind === "mid" ? 0 : 0;
+      const startT = kind === "mid" ? 0.48 : 0;
+      for (let e = 0; e < 4; e++) {
+        const i = (startEdge + e) % 4;
+        const a0 = corners[i];
+        const a1 = corners[(i + 1) % 4];
+        const len = Math.hypot(a1.x - a0.x, a1.y - a0.y) || 1;
+        const nx = -(a1.y - a0.y) / len;
+        const ny = (a1.x - a0.x) / len;
+        const nSamp = kind === "clean" ? 3 : 7;
+        for (let k = 0; k < nSamp; k++) {
+          let t = k / nSamp;
+          if (e === 0) t = startT + (1 - startT) * t;
+          if (t >= 0.999) continue;
+          let wob = 0;
+          if (kind === "hand" || kind === "gap" || kind === "mid") {
+            wob = (rand() - 0.5) * 0.14 + 0.05 * Math.sin((t + e) * 6 + seed * 0.1);
+          }
+          pts.push({ x: a0.x + (a1.x - a0.x) * t + nx * wob, y: a0.y + (a1.y - a0.y) * t + ny * wob });
+        }
+      }
+      if (kind === "gap") {
+        if (pts.length > 6) pts = pts.slice(0, Math.max(5, pts.length - 2));
+        return pts;
+      }
+      if (kind === "mid") {
+        pts.push({ x: pts[0].x + (rand() - 0.5) * 0.08, y: pts[0].y + (rand() - 0.5) * 0.08 });
+        return pts;
+      }
+      pts.push({ x: pts[0].x, y: pts[0].y });
+      return pts;
+    }
+    function rautenOk(draw, rotDeg) {
+      if (!draw || draw.kind !== "solid" || !draw.meta || !draw.meta.outline) return false;
+      const loc = draw.meta.outline.local;
+      if (!loc || loc.length !== 4) return false;
+      const angs = interiorAngles(loc).map((a) => a * 180 / Math.PI);
+      if (!angs.every((a) => Math.abs(a - 90) < 6)) return false;
+      let best = -1;
+      let edgeAng = 0;
+      for (let i = 0; i < loc.length; i++) {
+        const q = loc[(i + 1) % loc.length];
+        const len = Math.hypot(q.x - loc[i].x, q.y - loc[i].y);
+        if (len > best) {
+          best = len;
+          edgeAng = Math.atan2(q.y - loc[i].y, q.x - loc[i].x) * 180 / Math.PI;
+        }
+      }
+      let line = Math.abs(edgeAng) % 90;
+      if (line > 45) line = 90 - line;
+      const want = ((Math.abs(rotDeg) % 90) > 45) ? 90 - (Math.abs(rotDeg) % 90) : (Math.abs(rotDeg) % 90);
+      return Math.abs(line - want) < 10;
+    }
+    function rautenKind(draw) {
+      if (!draw) return "none";
+      if (draw.kind === "roller") return "circle";
+      if (draw.kind === "ellipse") return "ellipse";
+      if (draw.kind === "solid" && draw.meta && draw.meta.outline) return "n" + draw.meta.outline.local.length;
+      return draw.kind;
+    }
+
+    const rautenAngles = [0, 25, 30, 45, 60];
+    const rautenModes = ["free", "geo"];
+    const rautenKinds = ["clean", "hand", "gap", "mid"];
+    for (const modeName of rautenModes) {
+      for (const ang of rautenAngles) {
+        let ok = 0;
+        let total = 0;
+        const useGeo = modeName === "geo";
+        for (const kind of rautenKinds) {
+          const n = kind === "clean" ? 2 : 4;
+          for (let i = 0; i < n; i++) {
+            buildLevel(LEVELS["ein-klotz"]);
+            geoSnap = useGeo;
+            const stroke = squareStroke(16, 8, 1.6, 1.6, ang, kind, 100 + ang * 17 + i * 31 + (useGeo ? 7 : 0) + kind.length * 13);
+            commitStroke(stroke);
+            geoSnap = false;
+            const draw = drawings.find((d) => (d.kind === "solid" && !d.preset) || d.kind === "roller" || d.kind === "ellipse");
+            total += 1;
+            if (rautenOk(draw, ang)) ok += 1;
+          }
+        }
+        lines.push("INFO rauten " + modeName + "-" + ang + " " + ok + "/" + total);
+        check("rauten " + modeName + " " + ang + " deg stay rotated rectangles", ok >= Math.ceil(total * 0.8));
+      }
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const skew = squareStroke(16, 8, 1.7, 1.7, 45, "hand", 77);
+    // pull one corner inward so one angle is about 85 degrees
+    const skc = [
+      { x: 14.4, y: 8.0 }, { x: 16.0, y: 6.3 }, { x: 17.6, y: 8.0 }, { x: 16.0, y: 9.55 }, { x: 14.4, y: 8.0 },
+    ];
+    geoSnap = false;
+    commitStroke(skc);
+    const skewDraw = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const skewAng = skewDraw ? interiorAngles(skewDraw.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    check("80-to-100 degree corners become right angles without geodreieck", !!skewDraw && skewDraw.meta.outline.local.length === 4 && skewAng.every((a) => Math.abs(a - 90) < 2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(skc);
+    geoSnap = false;
+    const skewGeo = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const skewGeoAng = skewGeo ? interiorAngles(skewGeo.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    check("80-to-100 degree corners become right angles with geodreieck", !!skewGeo && skewGeo.meta.outline.local.length === 4 && skewGeoAng.every((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 16, y: 6.2 }, { x: 18.4, y: 8.0 }, { x: 16, y: 9.8 }, { x: 13.6, y: 8.0 }, { x: 16, y: 6.2 },
+    ]);
+    geoSnap = false;
+    const rhomb = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const rhombAng = rhomb ? interiorAngles(rhomb.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    const rhombIsRect = rhombAng.length === 4 && rhombAng.every((a) => Math.abs(a - 90) < 8);
+    check("acute rhombus is not forced into a rectangle", !!rhomb && rhomb.kind === "solid" && rhomb.meta.outline.local.length === 4 && !rhombIsRect && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+    lines.push("INFO rhomb angles " + rhombAng.map((a) => a.toFixed(1)).join(","));
+
+    function rotCorners(local, cx, cy, rotDeg) {
+      const a = rotDeg * Math.PI / 180;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      return local.map((p) => ({ x: cx + p.x * ca - p.y * sa, y: cy + p.x * sa + p.y * ca }));
+    }
+    function wobbleCorners(corners, kind, seed) {
+      const rand = diaRng(seed);
+      let pts = [];
+      const nSamp = kind === "clean" ? 3 : 7;
+      for (let e = 0; e < 4; e++) {
+        const a0 = corners[e];
+        const a1 = corners[(e + 1) % 4];
+        const len = Math.hypot(a1.x - a0.x, a1.y - a0.y) || 1;
+        const nx = -(a1.y - a0.y) / len;
+        const ny = (a1.x - a0.x) / len;
+        for (let k = 0; k < nSamp; k++) {
+          const t = k / nSamp;
+          let wob = 0;
+          if (kind !== "clean") wob = (rand() - 0.5) * 0.14 + 0.04 * Math.sin((t + e) * 6 + seed * 0.1);
+          pts.push({ x: a0.x + (a1.x - a0.x) * t + nx * wob, y: a0.y + (a1.y - a0.y) * t + ny * wob });
+        }
+      }
+      pts.push({ x: pts[0].x, y: pts[0].y });
+      return pts;
+    }
+    function sideParallelDeg(loc, i, j) {
+      const a = loc[i];
+      const b = loc[(i + 1) % 4];
+      const c = loc[j];
+      const d = loc[(j + 1) % 4];
+      const ax = b.x - a.x, ay = b.y - a.y;
+      const bx = d.x - c.x, by = d.y - d.y + (d.y - c.y);
+      const la = Math.hypot(ax, ay) || 1;
+      const lb = Math.hypot(bx, by) || 1;
+      const cos = Math.abs((ax * bx + ay * by) / (la * lb));
+      return Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI;
+    }
+    function quadGeometryOk(draw, expect) {
+      if (!draw || draw.kind !== "solid" || !draw.meta || !draw.meta.outline) return false;
+      const loc = draw.meta.outline.local;
+      if (!loc || loc.length !== 4) return false;
+      const angs = interiorAngles(loc).map((a) => a * 180 / Math.PI);
+      const par02 = sideParallelDeg(loc, 0, 2) < 2.5;
+      const par13 = sideParallelDeg(loc, 1, 3) < 2.5;
+      const right = angs.map((a) => Math.abs(a - 90) < 2);
+      const nRight = right.filter(Boolean).length;
+      const kindOk = !draw.meta.quadKind || draw.meta.quadKind === expect;
+      if (expect === "rect") return kindOk && right.every(Boolean) && par02 && par13;
+      if (expect === "ramp") {
+        if (!kindOk || nRight !== 2 || !(par02 || par13)) return false;
+        const idx = [];
+        for (let i = 0; i < 4; i++) if (right[i]) idx.push(i);
+        const gap = Math.abs(idx[0] - idx[1]);
+        return gap === 1 || gap === 3;
+      }
+      if (expect === "para") return kindOk && par02 && par13 && nRight < 3;
+      if (expect === "trap") {
+        if (!kindOk || par02 === par13) return false;
+        const pair = par02 ? 0 : 1;
+        const l1 = Math.hypot(loc[(pair + 1) % 4].x - loc[(pair + 2) % 4].x, loc[(pair + 1) % 4].y - loc[(pair + 2) % 4].y);
+        const l2 = Math.hypot(loc[(pair + 3) % 4].x - loc[pair].x, loc[(pair + 3) % 4].y - loc[pair].y);
+        const legs = Math.abs(l1 - l2) / Math.max(l1, l2) < 0.04;
+        const baseA = Math.abs(angs[pair] - angs[(pair + 1) % 4]) < 2.5;
+        return legs && baseA;
+      }
+      if (expect === "free") return (!draw.meta.quadKind || draw.meta.quadKind === "free") && nRight < 3;
+      return false;
+    }
+    const formShapes = {
+      rect: [{ x: -1.6, y: -0.9 }, { x: 1.6, y: -0.9 }, { x: 1.6, y: 0.9 }, { x: -1.6, y: 0.9 }],
+      ramp: [{ x: -1.55, y: -0.75 }, { x: 1.55, y: -0.75 }, { x: 0.35, y: 0.75 }, { x: -1.55, y: 0.75 }],
+      para: [{ x: -1.55, y: -0.7 }, { x: 1.15, y: -0.7 }, { x: 1.65, y: 0.7 }, { x: -1.05, y: 0.7 }],
+      trap: [{ x: -1.7, y: -0.7 }, { x: 1.7, y: -0.7 }, { x: 1.05, y: 0.7 }, { x: -1.05, y: 0.7 }],
+    };
+    const formAngles = [0, 30, 45];
+    const formModes = ["free", "geo"];
+    const formKinds = ["clean", "hand", "hand"];
+    const formRates = {};
+    for (const formName of ["rect", "ramp", "para", "trap"]) {
+      for (const modeName of formModes) {
+        let ok = 0;
+        let total = 0;
+        formKinds.forEach((kind, ki) => {
+          for (const ang of formAngles) {
+            buildLevel(LEVELS["ein-klotz"]);
+            geoSnap = modeName === "geo";
+            const seed = 400 + formName.length * 17 + ang * 11 + ki * 29 + (geoSnap ? 5 : 0);
+            const corners = rotCorners(formShapes[formName], 16, 8, ang);
+            commitStroke(wobbleCorners(corners, kind, seed));
+            geoSnap = false;
+            const draw = drawings.find((d) => (d.kind === "solid" && !d.preset) || d.kind === "roller" || d.kind === "ellipse");
+            total += 1;
+            if (quadGeometryOk(draw, formName)) ok += 1;
+          }
+        });
+        formRates[formName + "-" + modeName] = ok + "/" + total;
+        lines.push("INFO quad-form " + formName + "-" + modeName + " " + ok + "/" + total);
+        check("hand-drawn " + formName + " with " + modeName + " regularizes", ok >= Math.ceil(total * 0.8));
+      }
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = false;
+    const rocky = rotCorners([{ x: -1.7, y: -0.85 }, { x: 1.85, y: -0.4 }, { x: 1.05, y: 1.2 }, { x: -1.15, y: 0.35 }], 16, 8, 12);
+    commitStroke(wobbleCorners(rocky, "hand", 909));
+    const rockFree = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("irregular free quad stays irregular without geodreieck", quadGeometryOk(rockFree, "free"));
+    lines.push("INFO rock-free kind " + (rockFree && rockFree.meta ? (rockFree.meta.quadKind || "none") : "missing") + " n " + (rockFree && rockFree.meta && rockFree.meta.outline ? rockFree.meta.outline.local.length : 0));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(wobbleCorners(rocky, "hand", 909));
+    geoSnap = false;
+    const rockGeo = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const rockGeoKind = rockGeo && rockGeo.meta ? rockGeo.meta.quadKind : null;
+    check("irregular quad is regularized with geodreieck", !!rockGeoKind && rockGeoKind !== "free" && quadGeometryOk(rockGeo, rockGeoKind));
+    lines.push("INFO rock-geo kind " + (rockGeoKind || "missing"));
+
+    geoSnap = false;
+
+
+    check("tune panel is absent during tests", !document.getElementById("tune-panel"));
+    const tunePrevOn = tuneOn;
+    const tunePrevVals = Object.assign({}, tuneVals);
+    let tuneStored = null;
+    try { tuneStored = localStorage.getItem(TUNE_STORE); } catch (err) { tuneStored = null; }
+    try { localStorage.setItem(TUNE_STORE, JSON.stringify({ maxCv: 0.03 })); } catch (err) { /* optional */ }
+    tuneVals = { maxCv: 0.03 };
+    tuneOn = false;
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(12, 6, 1.05, 0.95, 28, 0.07, 0.03), "#3c7fd6");
+    check("stored tune values do not apply without tune mode", !!drawings.find((d) => d.kind === "roller"));
+    buildLevel(LEVELS["ein-klotz"]);
+    tuneOn = true;
+    commitStroke(circRing(12, 6, 1.05, 0.95, 28, 0.07, 0.03), "#3c7fd6");
+    const tuneTight = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("tighter CV rejects a shaky oval", !!tuneTight && tuneTight.kind === "solid" && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+    buildLevel(LEVELS["ein-klotz"]);
+    tuneVals = { maxCv: CIRCLE_MAX_CV };
+    commitStroke(circRing(12, 6, 1.05, 0.95, 28, 0.07, 0.03), "#3c7fd6");
+    check("default CV still accepts the shaky oval", !!drawings.find((d) => d.kind === "roller"));
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    tuneVals = { ellCircleRatio: 0.40 };
+    commitStroke(ellipseStroke(16, 7, 2.0, 1.0, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    check("lower b/a threshold turns a 1:2 oval into a circle", !!drawings.find((d) => d.kind === "roller") && !drawings.some((d) => d.kind === "ellipse"));
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    tuneVals = { ellExtraGap: 0 };
+    commitStroke(ellipseStroke(16, 7, 3.0, 2.2, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    check("zero extra radius gap keeps a 3-by-2.2 oval an ellipse", !!drawings.find((d) => d.kind === "ellipse") && !drawings.some((d) => d.kind === "roller"));
+    tuneOn = tunePrevOn;
+    tuneVals = tunePrevVals;
+    try {
+      if (tuneStored == null) localStorage.removeItem(TUNE_STORE);
+      else localStorage.setItem(TUNE_STORE, tuneStored);
+    } catch (err) { /* optional */ }
+    check("tune panel still absent after parameter tests", !document.getElementById("tune-panel"));
+
+    function ancBox(x, y, w, h, color) {
+      return commitStroke([
+        { x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }, { x, y },
+      ], color);
+    }
+    function tinyNail(x, y) {
+      const pts = [];
+      for (let i = 0; i <= 10; i++) {
+        const a = (i / 10) * Math.PI * 2;
+        pts.push({ x: x + Math.cos(a) * 0.16, y: y + Math.sin(a) * 0.16 });
+      }
+      return commitStroke(pts, "#2b2b2b");
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const tintA = ancBox(19, 1.4, 1.5, 1, "#3c7fd6");
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    finishPlayStroke([{ x: 18.6, y: 1.2 }, { x: 19, y: 1.45 }, { x: 19.4, y: 1.7 }]);
+    check("anchored body takes the ground color", !!tintA && isAnchored(tintA.body) && tintA.color === "#3f8f55" && anchors[0].color === MAT.wood);
+    const tintTop = tintA.body.getPosition().y + 0.5;
+    const tintB = ancBox(19.2, tintTop + 0.05, 1, 0.8, "#d94b3a");
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    finishPlayStroke([{ x: 19.9, y: tintTop - 0.15 }, { x: 19.85, y: tintTop + 0.1 }, { x: 19.8, y: tintTop + 0.35 }]);
+    check("chained body takes the same ground color", !!tintB && isAnchored(tintB.body) && tintB.color === "#3f8f55" && tintA.color === "#3f8f55" && anchorOf(tintB.body).color === MAT.wood);
+    const tintBLink = anchorOf(tintB.body);
+    const tintBMid = { x: (tintBLink.a.x + tintBLink.b.x) / 2, y: (tintBLink.a.y + tintBLink.b.y) / 2 };
+    const tintBMidScr = worldToScreen(tintBMid.x, tintBMid.y);
+    onPointerDown({ button: 2, clientX: tintBMidScr.x, clientY: tintBMidScr.y, pointerId: 51 });
+    check("released body gets its own color back", !isAnchored(tintB.body) && tintB.color === MAT.wood && isAnchored(tintA.body) && tintA.color === "#3f8f55");
+    const tintAMid = { x: (anchors[0].a.x + anchors[0].b.x) / 2, y: (anchors[0].a.y + anchors[0].b.y) / 2 };
+    const tintAMidScr = worldToScreen(tintAMid.x, tintAMid.y);
+    onPointerDown({ button: 2, clientX: tintAMidScr.x, clientY: tintAMidScr.y, pointerId: 52 });
+    check("released root also restores its color", !isAnchored(tintA.body) && tintA.color === MAT.wood);
+
+    buildLevel(LEVELS["bergauf"]);
+    const tintLeft = ancBox(3, 2.45, 1.4, 0.9, "#3c7fd6");
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    finishPlayStroke([{ x: 2.6, y: 2.25 }, { x: 3.1, y: 2.5 }, { x: 3.5, y: 2.7 }]);
+    const tintRight = ancBox(21, 9.05, 1.4, 0.9, "#d94b3a");
+    for (let i = 0; i < 90; i++) step(1 / 60);
+    finishPlayStroke([{ x: 20.6, y: 8.85 }, { x: 21.1, y: 9.1 }, { x: 21.5, y: 9.3 }]);
+    check("anchor tint follows the local ground color", !!tintLeft && !!tintRight && isAnchored(tintLeft.body) && isAnchored(tintRight.body) && tintLeft.color === "#3f8f55" && tintRight.color === "#c9854a");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke(circRing(16, 7, 1.05, 0.95, 28, 0.07, 0.03), "#d94b3a");
+    const matCirc = drawings.find((d) => d.kind === "roller");
+    check("drawn circle is steel even if a color is passed", !!matCirc && matCirc.color === MAT.steel);
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 2.0, 1.0, 0, 32), "#3c7fd6");
+    geoSnap = false;
+    const matEll = drawings.find((d) => d.kind === "ellipse");
+    check("drawn ellipse is steel", !!matEll && matEll.color === MAT.steel);
+    buildLevel(LEVELS["ein-klotz"]);
+    const matBox = ancBox(18, 1.4, 1.6, 1, "#3c7fd6");
+    check("drawn solid is wood even if a color is passed", !!matBox && matBox.kind === "solid" && matBox.color === MAT.wood && matBox.meta.outline.color === MAT.wood);
+    const matCrate = makeBox({ x: 8, y: 3, hw: 0.5, hh: 0.5, color: "#3c7fd6" });
+    const matCrateDraw = drawings.find((d) => d.body === matCrate);
+    check("crates are wood", !!matCrateDraw && matCrateDraw.color === MAT.wood);
+    buildLevel(LEVELS["ein-klotz"]);
+    const matWire = commitStroke([{ x: 8, y: 4 }, { x: 14, y: 6 }, { x: 18, y: 5.2 }], "#00ff00");
+    check("drawn wire is dark wood even if a color is passed", !!matWire && matWire.kind === "wire" && matWire.color === MAT.wire);
+
+    function strokeOpenWire(x0, y0, x1, y1, evExtra, pointerId) {
+      const a = worldToScreen(x0, y0);
+      const b = worldToScreen(x1, y1);
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      const base = { button: 0, pointerId };
+      const ev = evExtra || {};
+      onPointerDown(Object.assign({ clientX: a.x, clientY: a.y }, base, ev));
+      onPointerMove(Object.assign({ clientX: midX, clientY: midY }, base, ev));
+      onPointerMove(Object.assign({ clientX: b.x, clientY: b.y }, base, ev));
+      const previewLive = !!(pointer && pointer.pts && pointer.pts.some((pt) => pt.thick));
+      onPointerUp(Object.assign({ clientX: b.x, clientY: b.y }, base, ev));
+      pointer = null;
+      endDrag();
+      const draw = drawings[drawings.length - 1];
+      return { draw, previewLive };
+    }
+    buildLevel(LEVELS["ein-klotz"]);
+    const lightPen = strokeOpenWire(20, 8, 24, 8, { pointerType: "pen", pressure: 0.2 }, 900);
+    const heavyPen = strokeOpenWire(20, 10, 24, 10, { pointerType: "pen", pressure: 0.9 }, 901);
+    const mouseWire = strokeOpenWire(20, 12, 24, 12, { pointerType: "mouse", pressure: 0.9 }, 902);
+    const touchWire = strokeOpenWire(20, 6, 24, 6, { pointerType: "touch", pressure: 0.9 }, 903);
+    const lightThick = lightPen.draw && lightPen.draw.meta ? lightPen.draw.meta.thick : 0;
+    const heavyThick = heavyPen.draw && heavyPen.draw.meta ? heavyPen.draw.meta.thick : 0;
+    const mouseThick = mouseWire.draw && mouseWire.draw.meta ? mouseWire.draw.meta.thick : 0;
+    const touchThick = touchWire.draw && touchWire.draw.meta ? touchWire.draw.meta.thick : 0;
+    const lightMass = lightPen.draw && lightPen.draw.body ? lightPen.draw.body.getMass() : 0;
+    const heavyMass = heavyPen.draw && heavyPen.draw.body ? heavyPen.draw.body.getMass() : 0;
+    lines.push("INFO pen-thick light " + lightThick.toFixed(3) + " heavy " + heavyThick.toFixed(3) + " mouse " + mouseThick.toFixed(3) + " masses " + lightMass.toFixed(3) + "," + heavyMass.toFixed(3));
+    check("a light pen stroke makes a thinner wire", !!lightPen.draw && lightPen.draw.kind === "wire" && lightThick < THICK - 0.005);
+    check("a heavy pen stroke makes a thicker wire", !!heavyPen.draw && heavyPen.draw.kind === "wire" && heavyThick > THICK + 0.05);
+    check("a heavier pen wire is heavier", heavyMass > lightMass * 1.4);
+    check("a mouse stroke keeps the default thickness", !!mouseWire.draw && mouseWire.draw.kind === "wire" && Math.abs(mouseThick - THICK) < 0.001);
+    check("touch pressure does not change wire thickness", !!touchWire.draw && touchWire.draw.kind === "wire" && Math.abs(touchThick - THICK) < 0.001);
+    check("pen preview shows pressure while drawing", lightPen.previewLive && heavyPen.previewLive && !mouseWire.previewLive);
+    buildLevel(LEVELS["ein-klotz"]);
+    tinyNail(10, 1.42);
+    tinyNail(16, 1.42);
+    const matPins = pins.filter((p) => p.userMade);
+    const matRope = matPins.length >= 2 ? spawnRope(matPins[0], matPins[1], [{ x: 10, y: 1.42 }, { x: 13, y: 0.4 }, { x: 16, y: 1.42 }], "#3c7fd6") : null;
+    check("drawn rope is hemp even if a color is passed", !!matRope && matRope.kind === "rope" && matRope.color === MAT.hemp);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    tinyNail(16, 1.42);
+    const nailHang = ancBox(14, 1.4, 4, 0.8, "#8d5a34");
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    const nailPin = pins.find((p) => p.userMade);
+    const nailJoints = nailPin ? nailPin.joints.filter(Boolean).length : 0;
+    const nailGrabX = 17.6;
+    const nailGrabY = nailHang.body.getPosition().y;
+    const nailP0 = pinWorld(nailPin);
+    const nailLocal = nailHang.body.getLocalPoint(V(nailGrabX, nailGrabY));
+    const nailR0 = Math.hypot(nailGrabX - nailP0.x, nailGrabY - nailP0.y);
+    const nailAng0 = nailHang.body.getAngle();
+    const nailDragOk = beginDrag(nailGrabX, nailGrabY);
+    moveDrag(nailGrabX + 2.2, nailGrabY + 2.8);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    const nailP1 = pinWorld(nailPin);
+    const nailGrabNow = nailHang.body.getWorldPoint(V(nailLocal.x, nailLocal.y));
+    const nailR1 = Math.hypot(nailGrabNow.x - nailP1.x, nailGrabNow.y - nailP1.y);
+    const nailAng1 = nailHang.body.getAngle();
+    endDrag();
+    check("nailed body stays on the nail while dragged", !!nailHang && nailJoints >= 1 && nailDragOk && Math.hypot(nailP1.x - nailP0.x, nailP1.y - nailP0.y) < 0.05);
+    check("nailed drag keeps the grab distance and rotates", Math.abs(nailR1 - nailR0) < 0.08 && Math.abs(nailAng1 - nailAng0) > 0.25);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    tinyNail(14.5, 1.42);
+    tinyNail(17.5, 1.42);
+    const nailLock = ancBox(13.5, 1.4, 5, 0.85, "#3c7fd6");
+    for (let i = 0; i < 80; i++) step(1 / 60);
+    const nailLockPins = pins.filter((p) => p.userMade && p.joints.some(Boolean));
+    const nailLockPos = nailLock.body.getPosition();
+    const nailLockAng = nailLock.body.getAngle();
+    const nailLockDrag = beginDrag(nailLockPos.x, nailLockPos.y);
+    moveDrag(nailLockPos.x + 2, nailLockPos.y + 3);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    const nailLockPos2 = nailLock.body.getPosition();
+    const nailLockAng2 = nailLock.body.getAngle();
+    endDrag();
+    check("a body locked by two nails does not move when dragged", nailLockPins.length >= 2 && nailLockDrag && Math.hypot(nailLockPos2.x - nailLockPos.x, nailLockPos2.y - nailLockPos.y) < 0.08 && Math.abs(nailLockAng2 - nailLockAng) < 0.08);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    tinyNail(12, 1.42);
+    const nailLone = pins.find((p) => p.userMade);
+    const nailLone0 = cycleNailMotor(nailLone);
+    const nailLone1 = cycleNailMotor(nailLone);
+    const nailLone2 = cycleNailMotor(nailLone);
+    check("a lone nail still cycles its motor state", nailLone0 === 1 && nailLone1 === -1 && nailLone2 === 0 && nailLone.motor === 0);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const nailMot = rememberPin(16, 8, ground, true);
+    const nailMotBox = ancBox(14, 7.2, 4, 0.8, "#8d5a34");
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    const nailMotScr = worldToScreen(pinWorld(nailMot).x, pinWorld(nailMot).y);
+    onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 61 });
+    onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 61 });
+    check("clicking a nail cycles to left turn", nailMot.motor === 1 && !playDrag && nailMot.joints.some(Boolean));
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const nailWccw = nailMotBox.body.getAngularVelocity();
+    check("left motor reaches about +90 deg/s", Math.abs(nailWccw - Math.PI / 2) < 0.35 && !stats.dragTrick);
+    onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
+    onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
+    check("second click switches to right turn", nailMot.motor === -1);
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const nailWcw = nailMotBox.body.getAngularVelocity();
+    check("right motor reaches about -90 deg/s", Math.abs(nailWcw + Math.PI / 2) < 0.35);
+    onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
+    onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
+    check("third click turns the motor off", nailMot.motor === 0 && nailMot.joints.every((j) => !j || !j.isMotorEnabled()));
+    for (let i = 0; i < 180; i++) step(1 / 60);
+    const nailWoff = nailMotBox.body.getAngularVelocity();
+    check("an off nail joint is not driven", Math.abs(nailWoff) < 1.0);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    addStaticSolid([
+      { x: 20, y: 1.3 }, { x: 21.4, y: 1.3 }, { x: 21.4, y: 10 }, { x: 20, y: 10 },
+    ], "#3c7fd6");
+    ball.setTransform(V(12, 5), 0);
+    ball.setLinearVelocity(V(16, 0));
+    ball.setAngularVelocity(0);
+    let bounceVin = 0;
+    let bounceVout = 0;
+    let bounceHit = false;
+    for (let i = 0; i < 90; i++) {
+      const bounceVx = ball.getLinearVelocity().x;
+      if (!bounceHit && bounceVx > 6) bounceVin = bounceVx;
+      step(1 / 60);
+      const bounceVx2 = ball.getLinearVelocity().x;
+      if (!bounceHit && bounceVin > 6 && bounceVx2 < 0) {
+        bounceHit = true;
+        bounceVout = bounceVx2;
+      }
+    }
+    lines.push("INFO bounce vin=" + bounceVin.toFixed(2) + " vout=" + bounceVout.toFixed(2));
+    check("ball bounces off a wall with damped speed", bounceHit && bounceVin > 10 && bounceVout < 0 && Math.abs(bounceVout) > bounceVin * 0.15 && Math.abs(bounceVout) < bounceVin * 0.75);
+    for (let i = 0; i < 240; i++) step(1 / 60);
+    const bounceRest = ball.getLinearVelocity();
+    check("ball comes to rest after the bounce without jitter", Math.hypot(bounceRest.x, bounceRest.y) < 0.4 && ball.getPosition().y < 2.2 && ball.getPosition().x < 20);
+  } catch (err) {
+    lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
+  }
+  const fail = lines.some((line) => line.startsWith("FAIL"));
+  testlog.style.display = "block";
+  testlog.textContent = lines.join("\n");
+  document.title = fail ? "FAIL" : "PASS";
+}
+
+
+
