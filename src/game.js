@@ -665,7 +665,12 @@ function straightenOpen(pts) {
 // der Mittelpunkt ist der Flächenschwerpunkt. Hauptkriterium: relative
 // Radiusstreuung std(r)/mean(r) unter CIRCLE_MAX_CV. Dazu die Eckenregel,
 // damit gleichmäßige Vielecke und Felsbrocken eckig bleiben.
-// Mit Geodreieck zusätzlich: mindestens fünf Ecken, kein rechter Winkel.
+// Mit Geodreieck: Ellipsen-Fit über die Hauptachsen (Kovarianz/PCA der
+// abgetasteten Umrandung). Residuum ist die relative Streuung der
+// elliptischen Radien (CV-artig) unter ELLIPSE_MAX_CV. Fast kreisförmige
+// Achsen (b/a >= ELLIPSE_CIRCLE_RATIO) bleiben ein Kreis. Rechte Winkel
+// (Rechtecke, rechtwinklige Dreiecke) bleiben Vielecke. Ohne Geodreieck
+// nur Kreise, Felsbrocken bleiben eckig.
 const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an krakeligen Kreisen und 1:2-Ovalen
 const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
 const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
@@ -675,6 +680,9 @@ const CIRCLE_MIN_R = 0.16;
 const CIRCLE_MAX_R = 4;
 const CIRCLE_MIN_PTS = 5;
 const CIRCLE_CLOSE = 0.7;                     // Enden dürfen so weit offen sein
+const ELLIPSE_MAX_CV = 0.12;                  // Residuum am Ellipsenrand, analog zu CIRCLE_MAX_CV
+const ELLIPSE_CIRCLE_RATIO = 0.85;            // b/a, darüber Kreis statt Ellipse
+const ELLIPSE_PHYS_VERTS = 16;                // Physik-Polygon; über maxPolygonVertices wird zerlegt
 
 function closedRing(pts) {
   if (!pts || pts.length < 2) return pts;
@@ -814,14 +822,86 @@ function circleFit(pts) {
   return fit;
 }
 
+function ellipseFromPoints(pts) {
+  const ring = closedRing(pts);
+  if (!ring || ring.length < 3) return null;
+  const samples = resampleRing(ring, CIRCLE_SAMPLES);
+  if (!samples) return null;
+  const c = polygonCentroid(ring);
+  if (!c) return null;
+  let sxx = 0;
+  let syy = 0;
+  let sxy = 0;
+  for (const p of samples) {
+    const dx = p.x - c.x;
+    const dy = p.y - c.y;
+    sxx += dx * dx;
+    syy += dy * dy;
+    sxy += dx * dy;
+  }
+  const n = samples.length;
+  sxx /= n;
+  syy /= n;
+  sxy /= n;
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  const ca = Math.cos(ang);
+  const sa = Math.sin(ang);
+  const uv = [];
+  let maxU = 0;
+  let maxV = 0;
+  for (const p of samples) {
+    const dx = p.x - c.x;
+    const dy = p.y - c.y;
+    const u = dx * ca + dy * sa;
+    const v = -dx * sa + dy * ca;
+    uv.push({ u, v });
+    if (Math.abs(u) > maxU) maxU = Math.abs(u);
+    if (Math.abs(v) > maxV) maxV = Math.abs(v);
+  }
+  if (maxU < 1e-6 || maxV < 1e-6) return null;
+  let a = maxU;
+  let b = maxV;
+  let mean = 0;
+  for (const p of uv) mean += Math.sqrt((p.u * p.u) / (a * a) + (p.v * p.v) / (b * b));
+  mean /= uv.length;
+  if (mean < 1e-6) return null;
+  a *= mean;
+  b *= mean;
+  let acc = 0;
+  mean = 0;
+  for (const p of uv) mean += Math.sqrt((p.u * p.u) / (a * a) + (p.v * p.v) / (b * b));
+  mean /= uv.length;
+  if (mean < 1e-6) return null;
+  for (const p of uv) {
+    const rho = Math.sqrt((p.u * p.u) / (a * a) + (p.v * p.v) / (b * b));
+    acc += (rho - mean) * (rho - mean);
+  }
+  const cv = Math.sqrt(acc / uv.length) / mean;
+  let angle = ang;
+  if (b > a) {
+    const tmp = a;
+    a = b;
+    b = tmp;
+    angle += Math.PI / 2;
+  }
+  while (angle > Math.PI / 2) angle -= Math.PI;
+  while (angle <= -Math.PI / 2) angle += Math.PI;
+  if (a < CIRCLE_MIN_R || a > CIRCLE_MAX_R * 1.5) return null;
+  if (b < CIRCLE_MIN_R * 0.6) return null;
+  return { kind: "ellipse", x: c.x, y: c.y, a, b, angle, cv, r: 0.5 * (a + b) };
+}
+
 function tryMakeCircle(pts) {
   if (strokeSnaps()) {
     const ring = closedRing(pts);
     if (!ring || ring.length < CIRCLE_MIN_PTS || Math.abs(signedArea(ring)) < 0.05) return null;
     if (hasRightAngle(ring)) return null;
-    const fit = circleFromPoints(ring);
-    if (!fit || fit.cv >= CIRCLE_MAX_CV) return null;
-    return fit;
+    const ell = ellipseFromPoints(ring);
+    if (!ell || ell.cv >= ELLIPSE_MAX_CV) return null;
+    if (ell.b / ell.a >= ELLIPSE_CIRCLE_RATIO) {
+      return { kind: "circle", x: ell.x, y: ell.y, r: 0.5 * (ell.a + ell.b), cv: ell.cv };
+    }
+    return ell;
   }
   return circleFit(pts);
 }
@@ -1255,6 +1335,57 @@ function spawnBlob(x, y, r, color) {
   return draw;
 }
 
+function ellipseLocalPoly(a, b, angle, n) {
+  const pts = [];
+  const ca = Math.cos(angle);
+  const sa = Math.sin(angle);
+  const count = Math.max(8, n | 0);
+  for (let i = 0; i < count; i++) {
+    const t = (i / count) * Math.PI * 2;
+    const u = a * Math.cos(t);
+    const v = b * Math.sin(t);
+    pts.push({ x: u * ca - v * sa, y: u * sa + v * ca });
+  }
+  return ensureCCW(pts);
+}
+
+function spawnEllipse(x, y, a, b, angle, color) {
+  const body = world.createDynamicBody({
+    position: V(x, y),
+    linearDamping: 0.04,
+    angularDamping: 0.08,
+    bullet: true,
+  });
+  const fopt = fixtureOpt({ density: 3.2, friction: 0.16, restitution: 0 });
+  const local = ellipseLocalPoly(a, b, angle, ELLIPSE_PHYS_VERTS);
+  let made = addConvexFixture(body, local, fopt) ? 1 : 0;
+  if (!made) {
+    const merged = ensureCCW(mergeShortEdges(local, MIN_FIX_H));
+    let tris = triangulate(merged);
+    if (!tris.length) {
+      const hull = convexHull(merged);
+      tris = [];
+      for (let i = 1; i < hull.length - 1; i++) tris.push([hull[0], hull[i], hull[i + 1]]);
+    }
+    for (const tri of tris) made += addTriFixture(body, tri, fopt) ? 1 : 0;
+  }
+  if (!made) {
+    world.destroyBody(body);
+    return null;
+  }
+  const meta = track(body, {
+    kind: "ellipse",
+    round: true,
+    ellipse: { a, b, angle },
+    outline: { local, closed: true, color, width: 0.13, fixed: false },
+  });
+  const draw = { kind: "ellipse", body, meta, color, x, y, a, b, angle };
+  drawings.push(draw);
+  attachExistingPins(body, meta);
+  noteShape([{ x: x - a, y }, { x, y: y - b }, { x: x + a, y }]);
+  return draw;
+}
+
 function spawnRoller(x, y, r, color) {
   const body = world.createDynamicBody({
     position: V(x, y),
@@ -1446,7 +1577,10 @@ function commitStroke(rawPts, color) {
   // sonst ein grobes Vieleck und würde echte Kreise verwerfen.
   if (closed || dist(pts[0], pts[pts.length - 1]) < CIRCLE_CLOSE) {
     const fit = tryMakeCircle(dedupe(rawPts));
-    if (fit) return spawnRoller(fit.x, fit.y, fit.r, used);
+    if (fit) {
+      if (fit.kind === "ellipse") return spawnEllipse(fit.x, fit.y, fit.a, fit.b, fit.angle, used);
+      return spawnRoller(fit.x, fit.y, fit.r, used);
+    }
   }
   if (!closed) {
     const a = nearestPin(pts[0].x, pts[0].y, 0.55);
@@ -2658,6 +2792,10 @@ function renderPlay() {
       ctx.fill();
       ctx.restore();
       crayonPath(circlePts(p.x, p.y, draw.r, 16), draw.color, 0.1);
+    } else if (draw.kind === "ellipse") {
+      const epts = ellipseWorldPts(draw, 32);
+      crayonFill(epts, draw.color);
+      crayonPath(epts, draw.color, 0.1);
     } else if (draw.meta) {
       const pts = outlineWorld(draw.meta);
       if (!pts) continue;
@@ -2674,6 +2812,28 @@ function renderPlay() {
   if (pointer && pointer.pts && pointer.pts.length) {
     crayonPath(pointer.pts, COLORS[colorIndex], THICK);
   }
+}
+
+function ellipseWorldPts(draw, n) {
+  if (!draw || !draw.body) return [];
+  const pos = draw.body.getPosition();
+  const rot = draw.body.getAngle();
+  const phi = draw.angle || 0;
+  const ca = Math.cos(phi);
+  const sa = Math.sin(phi);
+  const cr = Math.cos(rot);
+  const sr = Math.sin(rot);
+  const pts = [];
+  const count = Math.max(8, n | 0);
+  for (let i = 0; i <= count; i++) {
+    const t = (i / count) * Math.PI * 2;
+    const u = draw.a * Math.cos(t);
+    const v = draw.b * Math.sin(t);
+    const lx = u * ca - v * sa;
+    const ly = u * sa + v * ca;
+    pts.push({ x: pos.x + lx * cr - ly * sr, y: pos.y + lx * sr + ly * cr });
+  }
+  return pts;
 }
 
 function circlePts(x, y, r, n) {
@@ -4109,7 +4269,7 @@ function runTests() {
     commitStroke(ring(8, 1.5, 0.16), "#2b2b2b");
     const nail = pins.find((p) => p.userMade);
     check("small circle on the floor is a ground nail", !!nail && nail.body === ground);
-    check("ground nail is not a loose ball", !drawings.some((d) => d.kind === "blob" || d.kind === "roller"));
+    check("ground nail is not a loose ball", !drawings.some((d) => d.kind === "blob" || d.kind === "roller" || d.kind === "ellipse"));
     buildLevel(LEVELS["ein-klotz"]);
     commitStroke(ring(8, 5, 0.16), "#7a4fbf");
     check("small circle in the air stays loose", drawings.some((d) => d.kind === "blob") && !pins.some((p) => p.userMade));
@@ -4487,7 +4647,7 @@ function runTests() {
       { x: 11.9, y: 7.4 }, { x: 10.4, y: 7.1 }, { x: 9.6, y: 6.0 }, { x: 10, y: 5 },
     ], "#8d5a34");
     const circRockA = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("irregular rock stays a polygon", !!circRockA && circRockA.kind === "solid" && circRockA.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller"));
+    check("irregular rock stays a polygon", !!circRockA && circRockA.kind === "solid" && circRockA.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     commitStroke([
@@ -4495,7 +4655,7 @@ function runTests() {
       { x: 10.8, y: 5.3 }, { x: 9.2, y: 5.5 }, { x: 7.6, y: 4.9 }, { x: 7.4, y: 3.8 }, { x: 8, y: 3 },
     ], "#d94b3a");
     const circRockB = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("elongated rock stays a polygon", !!circRockB && circRockB.kind === "solid" && circRockB.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller"));
+    check("elongated rock stays a polygon", !!circRockB && circRockB.kind === "solid" && circRockB.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     geoSnap = true;
@@ -4512,7 +4672,7 @@ function runTests() {
       { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 10, y: 7 }, { x: 8, y: 4 },
     ], "#ef8b2c");
     const circGeoTri = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("geodreieck triangle without a right angle stays a polygon", !!circGeoTri && circGeoTri.kind === "solid" && circGeoTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller"));
+    check("geodreieck triangle without a right angle stays a polygon", !!circGeoTri && circGeoTri.kind === "solid" && circGeoTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     geoSnap = true;
@@ -4520,7 +4680,7 @@ function runTests() {
       { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 12, y: 7 }, { x: 8, y: 7 }, { x: 8, y: 4 },
     ], "#3c7fd6");
     const circGeoRect = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("geodreieck rectangle with right angles stays a polygon", !!circGeoRect && circGeoRect.kind === "solid" && circGeoRect.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller"));
+    check("geodreieck rectangle with right angles stays a polygon", !!circGeoRect && circGeoRect.kind === "solid" && circGeoRect.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     geoSnap = true;
@@ -4529,7 +4689,7 @@ function runTests() {
     ], "#7a4fbf");
     const circGeoRight = drawings.find((d) => d.kind === "solid" && !d.preset);
     const circGeoRightAng = circGeoRight ? interiorAngles(circGeoRight.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
-    check("geodreieck right triangle stays a polygon", !!circGeoRight && circGeoRight.kind === "solid" && circGeoRight.meta.outline.local.length === 3 && circGeoRightAng.some((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller"));
+    check("geodreieck right triangle stays a polygon", !!circGeoRight && circGeoRight.kind === "solid" && circGeoRight.meta.outline.local.length === 3 && circGeoRightAng.some((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
     geoSnap = false;
 
     buildLevel(LEVELS["ein-klotz"]);
@@ -4560,14 +4720,14 @@ function runTests() {
       { x: 11.0, y: 6.8 }, { x: 9.1, y: 7.2 }, { x: 7.6, y: 5.6 }, { x: 8, y: 4 },
     ], "#8d5a34");
     const circSixRock = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("six-corner rock stays a polygon", !!circSixRock && circSixRock.kind === "solid" && circSixRock.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller"));
+    check("six-corner rock stays a polygon", !!circSixRock && circSixRock.kind === "solid" && circSixRock.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     commitStroke([
       { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 10, y: 7 }, { x: 8, y: 4 },
     ], "#d94b3a");
     const circFreeTri = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("freehand triangle stays a polygon", !!circFreeTri && circFreeTri.kind === "solid" && circFreeTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller"));
+    check("freehand triangle stays a polygon", !!circFreeTri && circFreeTri.kind === "solid" && circFreeTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     const circDense = [];
@@ -4589,7 +4749,7 @@ function runTests() {
       { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 12, y: 8 }, { x: 8, y: 8 }, { x: 8, y: 4 },
     ], "#3c7fd6");
     const circSquare = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("square stays a polygon", !!circSquare && circSquare.kind === "solid" && circSquare.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller"));
+    check("square stays a polygon", !!circSquare && circSquare.kind === "solid" && circSquare.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     const circHexPts = [];
@@ -4599,7 +4759,7 @@ function runTests() {
     }
     commitStroke(circHexPts, "#8d5a34");
     const circHex = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("regular hexagon stays a polygon", !!circHex && circHex.kind === "solid" && circHex.meta.outline.local.length === 6 && !drawings.some((d) => d.kind === "roller"));
+    check("regular hexagon stays a polygon", !!circHex && circHex.kind === "solid" && circHex.meta.outline.local.length === 6 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     const circPentPts = [];
@@ -4609,7 +4769,7 @@ function runTests() {
     }
     commitStroke(circPentPts, "#ef8b2c");
     const circPent = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("regular pentagon stays a polygon", !!circPent && circPent.kind === "solid" && circPent.meta.outline.local.length === 5 && !drawings.some((d) => d.kind === "roller"));
+    check("regular pentagon stays a polygon", !!circPent && circPent.kind === "solid" && circPent.meta.outline.local.length === 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     buildLevel(LEVELS["ein-klotz"]);
     const circLongPts = [];
@@ -4619,7 +4779,61 @@ function runTests() {
     }
     commitStroke(circLongPts, "#7a4fbf");
     const circLong = drawings.find((d) => d.kind === "solid" && !d.preset);
-    check("two-to-one ellipse stays a polygon", !!circLong && circLong.kind === "solid" && !drawings.some((d) => d.kind === "roller"));
+    check("two-to-one ellipse stays a polygon", !!circLong && circLong.kind === "solid" && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    function ellipseStroke(cx, cy, ra, rb, rot, n) {
+      const pts = [];
+      const ca = Math.cos(rot);
+      const sa = Math.sin(rot);
+      const count = n || 32;
+      for (let i = 0; i <= count; i++) {
+        const t = (i / count) * Math.PI * 2;
+        const u = ra * Math.cos(t);
+        const v = rb * Math.sin(t);
+        pts.push({ x: cx + u * ca - v * sa, y: cy + u * sa + v * ca });
+      }
+      return pts;
+    }
+    function ellipseAxisDiff(got, want) {
+      let d = Math.abs(got - want) % Math.PI;
+      if (d > Math.PI / 2) d = Math.PI - d;
+      return d;
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 2.0, 1.0, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const geoEll12 = drawings.find((d) => d.kind === "ellipse");
+    check("geodreieck two-to-one oval becomes an ellipse", !!geoEll12 && Math.abs(geoEll12.a - 2) < 0.15 && Math.abs(geoEll12.b - 1) < 0.12 && ellipseAxisDiff(geoEll12.angle, 0) < 8 * Math.PI / 180);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 2.1, 0.7, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const geoEll13 = drawings.find((d) => d.kind === "ellipse");
+    check("geodreieck three-to-one oval becomes an ellipse", !!geoEll13 && Math.abs(geoEll13.a / geoEll13.b - 3) < 0.35 && ellipseAxisDiff(geoEll13.angle, 0) < 8 * Math.PI / 180);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 7, 2.0, 1.0, 30 * Math.PI / 180, 32), "#7a4fbf");
+    geoSnap = false;
+    const geoEllRot = drawings.find((d) => d.kind === "ellipse");
+    check("geodreieck rotated oval keeps its axes", !!geoEllRot && Math.abs(geoEllRot.a - 2) < 0.15 && Math.abs(geoEllRot.b - 1) < 0.12 && ellipseAxisDiff(geoEllRot.angle, 30 * Math.PI / 180) < 8 * Math.PI / 180);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(ellipseStroke(16, 1.3 + 0.7 + 0.06, 2.0, 0.7, 0, 32), "#7a4fbf");
+    geoSnap = false;
+    const geoEllLie = drawings.find((d) => d.kind === "ellipse");
+    if (geoEllLie) {
+      for (let i = 0; i < 240; i++) step(1 / 60);
+    }
+    const liePos = geoEllLie ? geoEllLie.body.getPosition() : { x: 0, y: 0 };
+    const lieAng = geoEllLie ? geoEllLie.body.getAngle() + geoEllLie.angle : 99;
+    const lieW = geoEllLie ? Math.abs(geoEllLie.body.getAngularVelocity()) : 99;
+    const lieVy = geoEllLie ? Math.abs(geoEllLie.body.getLinearVelocity().y) : 99;
+    check("lying ellipse settles on its long side", !!geoEllLie && liePos.y < 1.3 + (geoEllLie.a + geoEllLie.b) * 0.5 && liePos.y > 1.3 + geoEllLie.b * 0.55 && ellipseAxisDiff(lieAng, 0) < 25 * Math.PI / 180 && lieW < 0.45 && lieVy < 0.45);
 
     function ancBox(x, y, w, h, color) {
       return commitStroke([
