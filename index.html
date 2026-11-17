@@ -9717,6 +9717,101 @@ function runTests() {
     check("invalid scene text does not crash", sceneBadSafe && sceneBadRes && sceneBadRes.error && sceneEmptyRes && sceneEmptyRes.error && sceneJunkRes && sceneJunkRes.error);
     check("invalid scene text leaves the current world intact", !!world && !!ball && mode === "play" && pins.length >= 2);
 
+    {
+      // Regression Zettel "Würfel kommt nicht zur Ruhe": schwerer Klotz (rund
+      // 20 kg) an einem Seil von einer Säule oder einem Bodennagel, angehoben
+      // und fallen gelassen. Früher teleportierte die Seilkorrektur den Klotz
+      // ohne seine Geschwindigkeit, und die leichten Perlen klemmten unter ihm:
+      // Er steckte im Boden und zappelte endlos.
+      const wfCorners = (body) => {
+        const meta = bodyMeta.get(body);
+        return meta.outline.local.map((p) => body.getWorldPoint(V(p.x, p.y)));
+      };
+      const wfSink = (body) => {
+        let worst = 0;
+        for (const p of wfCorners(body)) if (p.y < 1.3) worst = Math.max(worst, 1.3 - p.y);
+        return worst;
+      };
+      const wfBuild = (anchorKind, pinLocal) => {
+        buildLevel(LEVELS.sandbox);
+        world.destroyBody(ball);
+        ball = null;
+        stars = [];
+        let anchorAt;
+        if (anchorKind === "pillar") {
+          addStaticSolid([[7.1, 1.3], [8.46, 1.3], [8.46, 11.48], [7.1, 11.48]], "#3f8f55");
+          anchorAt = { x: 7.78, y: 11.04 };
+        } else anchorAt = { x: 12, y: 1.5 };
+        const wfBox = makeBox({ x: 17.16, y: 2.99, hw: 2.0, hh: 1.67, density: 1.5 });
+        for (let i = 0; i < 30; i++) step(1 / 60);
+        const wfPinA = rememberPin(anchorAt.x, anchorAt.y, ground, true);
+        const c = wfBox.getWorldPoint(V(pinLocal[0], pinLocal[1]));
+        const wfPinB = rememberPin(c.x, c.y, wfBox, true);
+        const wfRope = spawnRope(wfPinA, wfPinB, [anchorAt, { x: (anchorAt.x + c.x) / 2, y: (anchorAt.y + c.y) / 2 }, { x: c.x, y: c.y }]);
+        for (let i = 0; i < 120; i++) step(1 / 60);
+        return { box: wfBox, rope: wfRope, pa: wfPinA, pb: wfPinB };
+      };
+      const wfDrop = (rig, h) => {
+        const p = rig.box.getPosition();
+        rig.box.setTransform(V(p.x, p.y + h), rig.box.getAngle());
+        rig.box.setLinearVelocity(V(0, 0));
+        rig.box.setAngularVelocity(0);
+        rig.box.setAwake(true);
+        let maxSink = 0;
+        let maxChord = 0;
+        let speedSum = 0;
+        for (let i = 0; i < 300; i++) {
+          step(1 / 60);
+          maxSink = Math.max(maxSink, wfSink(rig.box));
+          // Das Anheben ist ein Teleport über die Seillänge hinaus; der erste
+          // Schritt holt ihn zurück und zählt deshalb nicht.
+          if (i >= 2) maxChord = Math.max(maxChord, dist(pinWorld(rig.pa), pinWorld(rig.pb)) / rig.rope.restLength);
+          if (i >= 240) {
+            const v = rig.box.getLinearVelocity();
+            speedSum += Math.hypot(v.x, v.y) + Math.abs(rig.box.getAngularVelocity()) * 2;
+          }
+        }
+        return {
+          maxSink,
+          endSink: wfSink(rig.box),
+          meanV: speedSum / 60,
+          endChord: dist(pinWorld(rig.pa), pinWorld(rig.pb)) / rig.rope.restLength,
+          maxChord,
+        };
+      };
+      let wfWorst = { maxSink: 0, endSink: 0, meanV: 0, endChord: 0, maxChord: 0 };
+      let wfRuns = 0;
+      for (const wfAnchor of ["pillar", "floor"]) {
+        for (const wfPinLocal of [[0, 1.5], [1.85, 1.5], [-1.85, 1.5]]) {
+          const rig = wfBuild(wfAnchor, wfPinLocal);
+          check("rope to a heavy box gets a chord joint (" + wfAnchor + ")", !!rig.rope && !!rig.rope.chordJoint);
+          for (const h of [2, 4, 6]) {
+            const res = wfDrop(rig, h);
+            wfRuns++;
+            for (const k of Object.keys(wfWorst)) wfWorst[k] = Math.max(wfWorst[k], res[k]);
+          }
+        }
+      }
+      lines.push("INFO wuerfel drops " + wfRuns + " maxSink " + wfWorst.maxSink.toFixed(3) + " endSink " + wfWorst.endSink.toFixed(3)
+        + " meanV " + wfWorst.meanV.toFixed(3) + " chord end " + wfWorst.endChord.toFixed(4) + " max " + wfWorst.maxChord.toFixed(4));
+      check("dropped box on a rope does not sink into the floor", wfWorst.maxSink < 0.1 && wfWorst.endSink < 0.02);
+      check("dropped box on a rope comes to rest", wfWorst.meanV < 0.1);
+      check("rope to a dropped box stays at rest length", wfWorst.endChord < 1.012 && wfWorst.maxChord < 1.016);
+
+      // Nach Zettel-Export und -Import hängt die Sehne wieder dran.
+      const wfRig = wfBuild("pillar", [1.85, 1.5]);
+      const wfText = encodeSceneTextSync(captureScene());
+      const wfLoad = loadSceneFromTextSync(wfText);
+      const wfRope = drawings.find((d) => d.kind === "rope");
+      const wfBoxBack = wfRope && wfRope.pinB && wfRope.pinB.body;
+      check("scene import restores the rope chord joint", !!(wfLoad && wfLoad.ok) && !!wfRope && !!wfRope.chordJoint && !!wfBoxBack && wfBoxBack !== wfRig.box);
+      if (wfRope && wfBoxBack) {
+        const wfRes = wfDrop({ box: wfBoxBack, rope: wfRope, pa: wfRope.pinA, pb: wfRope.pinB }, 4);
+        lines.push("INFO wuerfel after import sink " + wfRes.maxSink.toFixed(3) + " meanV " + wfRes.meanV.toFixed(3) + " chord " + wfRes.endChord.toFixed(4));
+        check("imported box on a rope comes to rest above the floor", wfRes.maxSink < 0.1 && wfRes.meanV < 0.1 && wfRes.endChord < 1.012);
+      }
+    }
+
     mountTunePanel();
     check("tune panel has scene copy and load controls", !!document.getElementById("tune-scene-copy") && !!document.getElementById("tune-scene-load") && !!document.getElementById("tune-scene-text"));
     const scenePanel = document.getElementById("tune-panel");
