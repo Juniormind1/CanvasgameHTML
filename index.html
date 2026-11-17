@@ -2249,10 +2249,11 @@ function pinHoldsBody(pin, body) {
   return pin.joints.some((j) => j && (j.getBodyA() === body || j.getBodyB() === body));
 }
 
-function attachExistingPins(body, meta) {
+function attachExistingPins(body, meta, except) {
   let n = 0;
   for (const pin of pins) {
     if (pin.body === body) continue;
+    if (except && except.has(pin.body)) continue;
     if (pinHoldsBody(pin, body)) continue;
     const wp = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
     if (!containsMeta(meta, wp.x, wp.y)) continue;
@@ -3432,12 +3433,97 @@ function cycleNailMotor(pin) {
   return pin.motor;
 }
 
+// Nagel-Nachbarn eines Körpers: [{ other, pin, joint }] über alle Nagel-Joints.
+function nailNeighbors(body) {
+  const out = [];
+  for (const pin of pins) {
+    for (const j of pin.joints) {
+      if (!j) continue;
+      const a = j.getBodyA();
+      const b = j.getBodyB();
+      if (a === body && b !== body) out.push({ other: b, pin, joint: j });
+      else if (b === body && a !== body) out.push({ other: a, pin, joint: j });
+    }
+  }
+  return out;
+}
+
+// Führt die Nagelkette von `start` (ohne über `skip` zu gehen) zum Boden,
+// zu einem statischen oder verankerten Körper?
+function nailChainFixed(start, skip) {
+  if (!start) return false;
+  if (!start.isDynamic()) return true;
+  const seen = new Set([start, skip]);
+  const queue = [start];
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const n of nailNeighbors(cur)) {
+      if (seen.has(n.other)) continue;
+      if (!n.other.isDynamic()) return true;
+      seen.add(n.other);
+      queue.push(n.other);
+    }
+  }
+  return false;
+}
+
+// Ein Nagel am gezogenen Körper ist nur dann ein fester Drehpunkt, wenn seine
+// Kette zum Boden, zu einem statischen oder verankerten Körper führt.
+function nailJointPivot(body, j) {
+  const other = j.getBodyA() === body ? j.getBodyB() : j.getBodyA();
+  return nailChainFixed(other, body);
+}
+
+// Freie Nagelgruppe: alle über Nägel verbundenen dynamischen Körper. Hat sie
+// keinen festen Halt, wird sie als Ganzes gezogen. Liefert null, wenn der
+// Körper keine Partner hat oder die Kette irgendwo festhängt.
+function freeNailGroup(body) {
+  if (!body || !body.isDynamic()) return null;
+  const group = [body];
+  const seen = new Set(group);
+  for (let i = 0; i < group.length; i++) {
+    for (const n of nailNeighbors(group[i])) {
+      if (!n.other.isDynamic()) return null;
+      if (seen.has(n.other)) continue;
+      seen.add(n.other);
+      group.push(n.other);
+    }
+  }
+  return group.length > 1 ? group : null;
+}
+
+function dragGroupBodies() {
+  if (!playDrag || !playDrag.body) return [];
+  if (!playDrag.group) return [playDrag.body];
+  return playDrag.group.filter((b) => b === playDrag.body || bodyMeta.has(b));
+}
+
+function inDragGroup(body) {
+  if (!playDrag || !body) return false;
+  if (playDrag.body === body) return true;
+  return !!(playDrag.groupSet && playDrag.groupSet.has(body));
+}
+
+// Partner tragen: dieselbe Verschiebung wie der gezogene Körper. Drehung um
+// die Nägel bleibt der Physik überlassen (sie pendeln an den Gelenken).
+function carryDragGroup(dx, dy) {
+  if (!playDrag || !playDrag.group) return;
+  if (Math.abs(dx) < 1e-12 && Math.abs(dy) < 1e-12) return;
+  for (const b of dragGroupBodies()) {
+    if (b === playDrag.body) continue;
+    const p = b.getPosition();
+    b.setTransform(V(p.x + dx, p.y + dy), b.getAngle());
+    b.setAwake(true);
+  }
+}
+
 function hingeWorldPoints(body) {
   const pts = [];
   for (const pin of pins) {
     for (const j of pin.joints) {
       if (!j) continue;
       if (j.getBodyA() !== body && j.getBodyB() !== body) continue;
+      if (!nailJointPivot(body, j)) continue;
       const wp = pinWorld(pin);
       if (pts.some((p) => Math.hypot(p.x - wp.x, p.y - wp.y) < 0.05)) continue;
       pts.push({ x: wp.x, y: wp.y, pin });
@@ -3520,6 +3606,8 @@ function chaseDrag(dt) {
     return;
   }
   const follow = clampDragFollow(body);
+  const pos0 = body.getPosition();
+  carryDragGroup(follow.clamped.x - pos0.x, follow.clamped.y - pos0.y);
   body.setTransform(V(follow.clamped.x, follow.clamped.y), body.getAngle());
   applyDragPivotImpulse(body, follow.offx, follow.offy, dt);
   body.setAwake(true);
@@ -3558,6 +3646,8 @@ function snapDrag(dt) {
     return;
   }
   const follow = clampDragFollow(body);
+  const pos0 = body.getPosition();
+  carryDragGroup(follow.clamped.x - pos0.x, follow.clamped.y - pos0.y);
   body.setTransform(V(follow.clamped.x, follow.clamped.y), body.getAngle());
   restDragAboutGrab(body, follow.offx, follow.offy);
   body.setAwake(true);
@@ -3568,12 +3658,14 @@ function snapDrag(dt) {
 // Gegriffenen Körper beim Loslassen an alle Nägel heften, die in seiner
 // Form liegen (Innennägel dieses Körpers ausgenommen). Mehrere Nägel
 // halten ihn fest. Ein Nagel in einem anderen Körper verbindet beide.
-function tryPinDragEnd(body) {
+function tryPinDragEnd(body, except) {
   if (!world || !body || body === ball) return 0;
   if (world.isLocked && world.isLocked()) return 0;
   const meta = bodyMeta.get(body);
   if (!meta) return 0;
-  return attachExistingPins(body, meta);
+  // Nägel in Körpern derselben gezogenen Gruppe zählen nicht (sonst würde die
+  // Gruppe beim Loslassen starr verriegelt).
+  return attachExistingPins(body, meta, except);
 }
 
 function beginDrag(x, y) {
@@ -3587,7 +3679,11 @@ function beginDrag(x, y) {
   body.setBullet(true);
   body.setAngularDamping(tuneCode("dragAngDamp", DRAG_ANG_DAMP));
   body.setAwake(true);
-  const mass = Math.max(0.2, body.getMass());
+  // Freie Nagelgruppe (kein Halt am Boden): als Ganzes ziehen, Kraft nach Gesamtmasse.
+  const group = freeNailGroup(body);
+  let groupMass = body.getMass();
+  if (group) for (const b of group) if (b !== body) groupMass += b.getMass();
+  const mass = Math.max(0.2, groupMass);
   const local = body.getLocalPoint(V(x, y));
   const joint = world.createJoint(new planck.MouseJoint({
     bodyA: ground,
@@ -3612,6 +3708,9 @@ function beginDrag(x, y) {
     targets: [],
     free: poseOfBody(body),
     wasFree: true,
+    group: group || null,
+    groupSet: group ? new Set(group) : null,
+    groupFree: group ? new Map(group.map((b) => [b, poseOfBody(b)])) : null,
   };
   return true;
 }
@@ -3636,11 +3735,18 @@ function endDrag() {
   drag.body.setAngularDamping(drag.angularDamping);
   drag.body.setAwake(true);
   dragFresh.set(drag.body, 0);
+  if (drag.group) {
+    for (const b of drag.group) {
+      if (b === drag.body || !bodyMeta.has(b)) continue;
+      b.setAwake(true);
+      dragFresh.set(b, 0);
+    }
+  }
 }
 
 function dragBodyHot(body) {
   if (!body) return false;
-  if (playDrag && playDrag.body === body) return true;
+  if (inDragGroup(body)) return true;
   return dragFresh.has(body);
 }
 
@@ -3696,8 +3802,10 @@ function nailLinked(a, b) {
   return false;
 }
 
+// Am Griff stößt der gezogene Körper (bzw. seine ganze freie Nagelgruppe) mit
+// nichts zusammen; innerhalb der Gruppe gilt weiter die Nagel-Regel.
 function dragGhostBody(body) {
-  return !!(playDrag && playDrag.body === body && playDrag.noCollide);
+  return !!(playDrag && playDrag.noCollide && inDragGroup(body));
 }
 
 // Kontaktfilter für pre-solve (und begin-contact).
@@ -3829,6 +3937,7 @@ function dragPinTargets(body) {
   const out = [];
   for (const pin of pins) {
     if (pin.body === body || pinHoldsBody(pin, body)) continue;
+    if (playDrag && playDrag.body === body && inDragGroup(pin.body)) continue;
     const wp = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
     if (containsMeta(meta, wp.x, wp.y)) out.push(pin);
   }
@@ -3842,9 +3951,62 @@ function lerpPose(p, q, t) {
   return { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, a: p.a + da * t };
 }
 
+// Überlappt eine der Posen (Map Körper → Pose) etwas außerhalb der Gruppe?
+// `hosts` sind Nagelwirte, an die sich der gezogene Körper heften würde.
+function groupOverlapAt(poses, hosts) {
+  const skip = new Set(poses.keys());
+  for (const [b, pose] of poses) {
+    const s2 = new Set(skip);
+    if (hosts && b === playDrag.body) for (const h of hosts) s2.add(h);
+    if (overlapAtPose(b, pose, s2)) return true;
+  }
+  return false;
+}
+
+function lerpPoses(from, now, t) {
+  const out = new Map();
+  for (const [b, p] of now) out.set(b, lerpPose(from.get(b) || p, p, t));
+  return out;
+}
+
+// Freie Nagelgruppe: Geist, Schatten und Rücksprung gelten für alle Körper.
+function updateDragGhostGroup() {
+  const body = playDrag.body;
+  const now = new Map();
+  for (const b of dragGroupBodies()) now.set(b, poseOfBody(b));
+  const targets = dragPinTargets(body);
+  const hosts = new Set(targets.map((p) => p.body));
+  const hit = groupOverlapAt(now, hosts);
+  playDrag.targets = hit ? [] : targets;
+  playDrag.ghost = hit;
+  if (!groupOverlapAt(now, null)) {
+    playDrag.groupFree = now;
+    playDrag.free = now.get(body);
+    playDrag.wasFree = true;
+    return;
+  }
+  if (playDrag.wasFree && playDrag.groupFree) {
+    let lo = 0;
+    let hi = 1;
+    const from = playDrag.groupFree;
+    for (let i = 0; i < GHOST_BISECT; i++) {
+      const t = (lo + hi) / 2;
+      if (groupOverlapAt(lerpPoses(from, now, t), null)) hi = t;
+      else lo = t;
+    }
+    playDrag.groupFree = lerpPoses(from, now, lo);
+    playDrag.free = playDrag.groupFree.get(body);
+  }
+  playDrag.wasFree = false;
+}
+
 // Nach jedem Physikschritt: Geist-Zustand und letzte freie Pose nachführen.
 function updateDragGhost() {
   if (!playDrag || !playDrag.body || !playDrag.noCollide) return;
+  if (playDrag.group) {
+    updateDragGhostGroup();
+    return;
+  }
   const body = playDrag.body;
   const now = poseOfBody(body);
   const targets = dragPinTargets(body);
@@ -3875,6 +4037,16 @@ function updateDragGhost() {
 // Geist losgelassen: zurück an die letzte freie Pose, ohne Tempo.
 function restoreDragFree(drag) {
   if (!drag || !drag.body || !drag.free || !world) return false;
+  if (drag.group && drag.groupFree) {
+    for (const [b, pose] of drag.groupFree) {
+      if (b !== drag.body && !bodyMeta.has(b)) continue;
+      b.setTransform(V(pose.x, pose.y), pose.a);
+      b.setLinearVelocity(V(0, 0));
+      b.setAngularVelocity(0);
+      b.setAwake(true);
+    }
+    return true;
+  }
   const body = drag.body;
   body.setTransform(V(drag.free.x, drag.free.y), drag.free.a);
   body.setLinearVelocity(V(0, 0));
@@ -4858,11 +5030,12 @@ function renderPlay() {
   }
   for (const rocket of rockets) drawRocket(rocket);
   // Ebenen: hinten nach vorn; der Körper an der Maus kommt ganz zuletzt.
+  // Eine freie Nagelgruppe kommt als Ganzes nach vorn, in ihrer Ebenenfolge.
   const held = playDrag && playDrag.body ? playDrag.body : null;
-  let heldDraw = null;
+  const heldDraws = [];
   for (const draw of drawingsByLayer()) {
-    if (held && draw.body === held) {
-      heldDraw = draw;
+    if (held && draw.body && draw.kind !== "rope" && inDragGroup(draw.body)) {
+      heldDraws.push(draw);
       continue;
     }
     drawDrawing(draw);
@@ -4871,7 +5044,7 @@ function renderPlay() {
   for (const pin of pins) drawPin(pin);
   for (const star of stars) drawStar(star);
   drawBall();
-  if (heldDraw) drawHeldDrawing(heldDraw);
+  if (heldDraws.length) drawHeldDrawings(heldDraws);
   if (pointer && pointer.pts && pointer.pts.length) {
     crayonPath(pointer.pts, MAT.ink, pointer.pts.some((p) => p.thick) ? "live" : THICK);
   }
@@ -4900,19 +5073,25 @@ function drawDrawing(draw) {
   }
 }
 
-// Gezogener Körper: ganz vorn. Als Geist halb durchsichtig, dazu ein blasser
-// Schatten an der letzten freien Pose. Über einem Nagel wird der Nagel markiert.
-function drawHeldDrawing(draw) {
+// Gezogener Körper (bzw. freie Nagelgruppe): ganz vorn. Als Geist halb
+// durchsichtig, dazu je ein blasser Schatten an der letzten freien Pose. Über einem Nagel wird der Nagel markiert.
+function drawHeldDrawings(draws) {
   const drag = playDrag;
   if (drag && drag.ghost && drag.free) {
-    drawPose = { body: draw.body, x: drag.free.x, y: drag.free.y, a: drag.free.a };
-    inkAlpha = GHOST_SHADOW_ALPHA;
-    drawDrawing(draw);
-    drawPose = null;
+    for (const draw of draws) {
+      const pose = drag.groupFree ? drag.groupFree.get(draw.body) : (draw.body === drag.body ? drag.free : null);
+      if (!pose) continue;
+      drawPose = { body: draw.body, x: pose.x, y: pose.y, a: pose.a };
+      inkAlpha = GHOST_SHADOW_ALPHA;
+      drawDrawing(draw);
+      drawPose = null;
+    }
   }
   inkAlpha = drag && drag.ghost ? GHOST_ALPHA : 1;
-  drawDrawing(draw);
+  for (const draw of draws) drawDrawing(draw);
   inkAlpha = 1;
+  // Die Nägel, die die Gruppe zusammenhalten, bleiben sichtbar.
+  if (drag && drag.group) for (const pin of pins) if (inDragGroup(pin.body)) drawPin(pin);
   if (drag && !drag.ghost && drag.targets && drag.targets.length) {
     for (const pin of drag.targets) {
       drawPin(pin);
@@ -6692,12 +6871,12 @@ function onPointerUp(e) {
   }
   if (current.dragging || playDrag || current.grab) {
     const held = playDrag && playDrag.body
-      ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)), ghost: !!playDrag.ghost }
+      ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)), ghost: !!playDrag.ghost, group: playDrag.groupSet || null }
       : null;
     // Ein Geist springt in endDrag an seinen Schatten zurück und heftet sich nicht an.
     endDrag();
     if (held && mode === "play") {
-      const pinned = held.ghost ? 0 : tryPinDragEnd(held.body);
+      const pinned = held.ghost ? 0 : tryPinDragEnd(held.body, held.group);
       if (!pinned) tryAnchorDragEnd(held.body, { x: held.at.x, y: held.at.y }, current.trail);
     }
     return;
@@ -10516,6 +10695,103 @@ function runTests() {
       const gsDPinned = gsPin.joints.some((j) => j && (j.getBodyA() === gsD || j.getBodyB() === gsD));
       check("over a nail but inside a third body stays a ghost and does not pin", gsThirdGhost && !gsDPinned && !overlapAtPose(gsD, poseOfBody(gsD), null));
       world.setGravity(V(0, -24));
+    }
+
+    {
+      // Zettel 2: Dreieck an einem Nagel im freien Viereck (kein Bodennagel).
+      // Die Gruppe folgt der Maus als Ganzes, egal an welchem Teil man zieht.
+      buildLevel(LEVELS["sandbox"]);
+      const fgQuadDraw = spawnSolid([{ x: 11.684, y: 1.315 }, { x: 17.307, y: 1.315 }, { x: 17.307, y: 3.083 }, { x: 11.684, y: 3.083 }], {});
+      const fgPin = rememberPin(16.728, 2.302, fgQuadDraw.body, true);
+      const fgTriDraw = spawnSolid([{ x: 14.721, y: 5.167 }, { x: 13.682, y: 1.315 }, { x: 17.367, y: 2.22 }], {});
+      const fgQuad = fgQuadDraw.body;
+      const fgTri = fgTriDraw.body;
+      const fgJoint = fgPin.joints.find((j) => j && nailJointOther(fgPin, j) === fgTri);
+      for (let i = 0; i < 30; i++) step(1 / 60);
+      const fgJointErr = () => {
+        const a = fgJoint.getAnchorA();
+        const b = fgJoint.getAnchorB();
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      };
+      const fgDrag = (body, from, dx, dy) => {
+        const q0 = fgQuad.getPosition().clone();
+        const t0 = fgTri.getPosition().clone();
+        beginDrag(from.x, from.y);
+        const grabbed = !!playDrag && playDrag.body === body;
+        const grouped = !!playDrag && !!playDrag.group && playDrag.group.length === 2;
+        let err = 0;
+        for (let i = 1; i <= 60; i++) {
+          moveDrag(from.x + dx * i / 60, from.y + dy * i / 60);
+          step(1 / 60);
+          err = Math.max(err, fgJointErr());
+        }
+        for (let i = 0; i < 40; i++) {
+          step(1 / 60);
+          err = Math.max(err, fgJointErr());
+        }
+        const ghost = !!playDrag && !!playDrag.ghost;
+        const grabAt = playDrag ? body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)) : V(0, 0);
+        const grabErr = Math.hypot(grabAt.x - from.x - dx, grabAt.y - from.y - dy);
+        const q1 = fgQuad.getPosition().clone();
+        const t1 = fgTri.getPosition().clone();
+        endDrag();
+        return {
+          grabbed, grouped, err, ghost, grabErr,
+          dq: Math.hypot(q1.x - q0.x, q1.y - q0.y),
+          dt: Math.hypot(t1.x - t0.x, t1.y - t0.y),
+        };
+      };
+      check("a nail in a free body is no fixed pivot", hingeWorldPoints(fgQuad).length === 0 && hingeWorldPoints(fgTri).length === 0 && !!fgJoint);
+      const fgInfo = (name, r) => lines.push("INFO free group " + name + ": quad " + r.dq.toFixed(2) + " m, triangle " + r.dt.toFixed(2)
+        + " m, joint err " + (r.err * 100).toFixed(3) + " cm, grab err " + (r.grabErr * 100).toFixed(2) + " cm, ghost " + r.ghost);
+      // Ohne Schwerkraft: reines Mitziehen, beide Körper legen die Zugstrecke zurück.
+      world.setGravity(V(0, 0));
+      for (const b of [fgQuad, fgTri]) {
+        b.setLinearVelocity(V(0, 0));
+        b.setAngularVelocity(0);
+      }
+      const fgQ = fgDrag(fgQuad, { x: 12.6, y: 2.2 }, 0, 4);
+      fgInfo("quad drag 4 m (g=0)", fgQ);
+      check("dragging the free quad drags the nailed triangle along", fgQ.grabbed && fgQ.grouped && Math.abs(fgQ.dq - 4) < 0.8 && Math.abs(fgQ.dt - 4) < 0.8 && fgQ.err < 0.01);
+      const fgT = fgDrag(fgTri, fgTri.getWorldCenter().clone(), 4, 0);
+      fgInfo("triangle drag 4 m (g=0)", fgT);
+      check("dragging the nailed triangle drags the free quad along", fgT.grabbed && fgT.grouped && Math.abs(fgT.dt - 4) < 0.8 && Math.abs(fgT.dq - 4) < 0.8 && fgT.err < 0.01);
+      // Mit Schwerkraft: Griff folgt der Maus, der Partner hängt am Nagel und pendelt mit.
+      world.setGravity(V(0, -24));
+      for (let i = 0; i < 120; i++) step(1 / 60);
+      const fgQg = fgDrag(fgQuad, fgQuad.getWorldPoint(V(-2.3, 0)).clone(), 2, 4);
+      fgInfo("quad drag with gravity", fgQg);
+      check("with gravity the grab follows and the triangle hangs on the nail", fgQg.grabbed && fgQg.grouped && fgQg.grabErr < 0.05 && fgQg.dq > 2 && fgQg.dt > 2 && fgQg.err < 0.01);
+      for (let i = 0; i < 120; i++) step(1 / 60);
+      const fgTg = fgDrag(fgTri, fgTri.getWorldCenter().clone(), -2, 4);
+      fgInfo("triangle drag with gravity", fgTg);
+      check("with gravity the quad hangs on the dragged triangle", fgTg.grabbed && fgTg.grouped && fgTg.grabErr < 0.05 && fgTg.dq > 2 && fgTg.dt > 2 && fgTg.err < 0.01);
+      // Die ganze Gruppe ist Geist: in den Boden ziehen, loslassen, beide springen zurück.
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const fgQc = fgQuad.getWorldCenter().clone();
+      beginDrag(fgQc.x, fgQc.y);
+      let fgGhost = false;
+      for (let i = 1; i <= 40; i++) {
+        moveDrag(fgQc.x, fgQc.y - 2.5 * i / 40);
+        step(1 / 60);
+        if (playDrag.ghost) fgGhost = true;
+      }
+      const fgFree = playDrag.groupFree ? new Map(playDrag.groupFree) : null;
+      const fgPassThrough = dragGhostBody(fgQuad) && dragGhostBody(fgTri);
+      endDrag();
+      const fgBack = !!fgFree && [fgQuad, fgTri].every((b) => {
+        const f = fgFree.get(b);
+        const p = b.getPosition();
+        const v = b.getLinearVelocity();
+        return f && Math.hypot(p.x - f.x, p.y - f.y) < 1e-6 && Math.hypot(v.x, v.y) < 1e-9 && Math.abs(b.getAngularVelocity()) < 1e-9
+          && !overlapAtPose(b, poseOfBody(b), new Set([fgQuad, fgTri]));
+      });
+      check("a free nail group is a ghost as a whole and jumps back as a whole", fgPassThrough && fgGhost && fgBack);
+      // Mit Bodennagel bleibt der Nagel ein Drehpunkt (unverändert).
+      const fgGP = fgQuad.getWorldPoint(fgQuad.getLocalCenter());
+      const fgGPin = rememberPin(fgGP.x, fgGP.y, ground, true);
+      attachExistingPins(fgQuad, bodyMeta.get(fgQuad));
+      check("with a ground nail the quad keeps its fixed pivot and is no free group", hingeWorldPoints(fgQuad).length === 1 && hingeWorldPoints(fgTri).length === 1 && !freeNailGroup(fgQuad) && fgGPin.joints.length === 1);
     }
 
     mountTunePanel();

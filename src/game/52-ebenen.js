@@ -37,8 +37,10 @@ function nailLinked(a, b) {
   return false;
 }
 
+// Am Griff stößt der gezogene Körper (bzw. seine ganze freie Nagelgruppe) mit
+// nichts zusammen; innerhalb der Gruppe gilt weiter die Nagel-Regel.
 function dragGhostBody(body) {
-  return !!(playDrag && playDrag.body === body && playDrag.noCollide);
+  return !!(playDrag && playDrag.noCollide && inDragGroup(body));
 }
 
 // Kontaktfilter für pre-solve (und begin-contact).
@@ -170,6 +172,7 @@ function dragPinTargets(body) {
   const out = [];
   for (const pin of pins) {
     if (pin.body === body || pinHoldsBody(pin, body)) continue;
+    if (playDrag && playDrag.body === body && inDragGroup(pin.body)) continue;
     const wp = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
     if (containsMeta(meta, wp.x, wp.y)) out.push(pin);
   }
@@ -183,9 +186,62 @@ function lerpPose(p, q, t) {
   return { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, a: p.a + da * t };
 }
 
+// Überlappt eine der Posen (Map Körper → Pose) etwas außerhalb der Gruppe?
+// `hosts` sind Nagelwirte, an die sich der gezogene Körper heften würde.
+function groupOverlapAt(poses, hosts) {
+  const skip = new Set(poses.keys());
+  for (const [b, pose] of poses) {
+    const s2 = new Set(skip);
+    if (hosts && b === playDrag.body) for (const h of hosts) s2.add(h);
+    if (overlapAtPose(b, pose, s2)) return true;
+  }
+  return false;
+}
+
+function lerpPoses(from, now, t) {
+  const out = new Map();
+  for (const [b, p] of now) out.set(b, lerpPose(from.get(b) || p, p, t));
+  return out;
+}
+
+// Freie Nagelgruppe: Geist, Schatten und Rücksprung gelten für alle Körper.
+function updateDragGhostGroup() {
+  const body = playDrag.body;
+  const now = new Map();
+  for (const b of dragGroupBodies()) now.set(b, poseOfBody(b));
+  const targets = dragPinTargets(body);
+  const hosts = new Set(targets.map((p) => p.body));
+  const hit = groupOverlapAt(now, hosts);
+  playDrag.targets = hit ? [] : targets;
+  playDrag.ghost = hit;
+  if (!groupOverlapAt(now, null)) {
+    playDrag.groupFree = now;
+    playDrag.free = now.get(body);
+    playDrag.wasFree = true;
+    return;
+  }
+  if (playDrag.wasFree && playDrag.groupFree) {
+    let lo = 0;
+    let hi = 1;
+    const from = playDrag.groupFree;
+    for (let i = 0; i < GHOST_BISECT; i++) {
+      const t = (lo + hi) / 2;
+      if (groupOverlapAt(lerpPoses(from, now, t), null)) hi = t;
+      else lo = t;
+    }
+    playDrag.groupFree = lerpPoses(from, now, lo);
+    playDrag.free = playDrag.groupFree.get(body);
+  }
+  playDrag.wasFree = false;
+}
+
 // Nach jedem Physikschritt: Geist-Zustand und letzte freie Pose nachführen.
 function updateDragGhost() {
   if (!playDrag || !playDrag.body || !playDrag.noCollide) return;
+  if (playDrag.group) {
+    updateDragGhostGroup();
+    return;
+  }
   const body = playDrag.body;
   const now = poseOfBody(body);
   const targets = dragPinTargets(body);
@@ -216,6 +272,16 @@ function updateDragGhost() {
 // Geist losgelassen: zurück an die letzte freie Pose, ohne Tempo.
 function restoreDragFree(drag) {
   if (!drag || !drag.body || !drag.free || !world) return false;
+  if (drag.group && drag.groupFree) {
+    for (const [b, pose] of drag.groupFree) {
+      if (b !== drag.body && !bodyMeta.has(b)) continue;
+      b.setTransform(V(pose.x, pose.y), pose.a);
+      b.setLinearVelocity(V(0, 0));
+      b.setAngularVelocity(0);
+      b.setAwake(true);
+    }
+    return true;
+  }
   const body = drag.body;
   body.setTransform(V(drag.free.x, drag.free.y), drag.free.a);
   body.setLinearVelocity(V(0, 0));

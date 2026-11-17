@@ -436,11 +436,12 @@ function renderPlay() {
   }
   for (const rocket of rockets) drawRocket(rocket);
   // Ebenen: hinten nach vorn; der Körper an der Maus kommt ganz zuletzt.
+  // Eine freie Nagelgruppe kommt als Ganzes nach vorn, in ihrer Ebenenfolge.
   const held = playDrag && playDrag.body ? playDrag.body : null;
-  let heldDraw = null;
+  const heldDraws = [];
   for (const draw of drawingsByLayer()) {
-    if (held && draw.body === held) {
-      heldDraw = draw;
+    if (held && draw.body && draw.kind !== "rope" && inDragGroup(draw.body)) {
+      heldDraws.push(draw);
       continue;
     }
     drawDrawing(draw);
@@ -449,7 +450,7 @@ function renderPlay() {
   for (const pin of pins) drawPin(pin);
   for (const star of stars) drawStar(star);
   drawBall();
-  if (heldDraw) drawHeldDrawing(heldDraw);
+  if (heldDraws.length) drawHeldDrawings(heldDraws);
   if (pointer && pointer.pts && pointer.pts.length) {
     crayonPath(pointer.pts, MAT.ink, pointer.pts.some((p) => p.thick) ? "live" : THICK);
   }
@@ -478,19 +479,25 @@ function drawDrawing(draw) {
   }
 }
 
-// Gezogener Körper: ganz vorn. Als Geist halb durchsichtig, dazu ein blasser
-// Schatten an der letzten freien Pose. Über einem Nagel wird der Nagel markiert.
-function drawHeldDrawing(draw) {
+// Gezogener Körper (bzw. freie Nagelgruppe): ganz vorn. Als Geist halb
+// durchsichtig, dazu je ein blasser Schatten an der letzten freien Pose. Über einem Nagel wird der Nagel markiert.
+function drawHeldDrawings(draws) {
   const drag = playDrag;
   if (drag && drag.ghost && drag.free) {
-    drawPose = { body: draw.body, x: drag.free.x, y: drag.free.y, a: drag.free.a };
-    inkAlpha = GHOST_SHADOW_ALPHA;
-    drawDrawing(draw);
-    drawPose = null;
+    for (const draw of draws) {
+      const pose = drag.groupFree ? drag.groupFree.get(draw.body) : (draw.body === drag.body ? drag.free : null);
+      if (!pose) continue;
+      drawPose = { body: draw.body, x: pose.x, y: pose.y, a: pose.a };
+      inkAlpha = GHOST_SHADOW_ALPHA;
+      drawDrawing(draw);
+      drawPose = null;
+    }
   }
   inkAlpha = drag && drag.ghost ? GHOST_ALPHA : 1;
-  drawDrawing(draw);
+  for (const draw of draws) drawDrawing(draw);
   inkAlpha = 1;
+  // Die Nägel, die die Gruppe zusammenhalten, bleiben sichtbar.
+  if (drag && drag.group) for (const pin of pins) if (inDragGroup(pin.body)) drawPin(pin);
   if (drag && !drag.ghost && drag.targets && drag.targets.length) {
     for (const pin of drag.targets) {
       drawPin(pin);

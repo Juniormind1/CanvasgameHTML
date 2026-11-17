@@ -2606,6 +2606,103 @@ function runTests() {
       world.setGravity(V(0, -24));
     }
 
+    {
+      // Zettel 2: Dreieck an einem Nagel im freien Viereck (kein Bodennagel).
+      // Die Gruppe folgt der Maus als Ganzes, egal an welchem Teil man zieht.
+      buildLevel(LEVELS["sandbox"]);
+      const fgQuadDraw = spawnSolid([{ x: 11.684, y: 1.315 }, { x: 17.307, y: 1.315 }, { x: 17.307, y: 3.083 }, { x: 11.684, y: 3.083 }], {});
+      const fgPin = rememberPin(16.728, 2.302, fgQuadDraw.body, true);
+      const fgTriDraw = spawnSolid([{ x: 14.721, y: 5.167 }, { x: 13.682, y: 1.315 }, { x: 17.367, y: 2.22 }], {});
+      const fgQuad = fgQuadDraw.body;
+      const fgTri = fgTriDraw.body;
+      const fgJoint = fgPin.joints.find((j) => j && nailJointOther(fgPin, j) === fgTri);
+      for (let i = 0; i < 30; i++) step(1 / 60);
+      const fgJointErr = () => {
+        const a = fgJoint.getAnchorA();
+        const b = fgJoint.getAnchorB();
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      };
+      const fgDrag = (body, from, dx, dy) => {
+        const q0 = fgQuad.getPosition().clone();
+        const t0 = fgTri.getPosition().clone();
+        beginDrag(from.x, from.y);
+        const grabbed = !!playDrag && playDrag.body === body;
+        const grouped = !!playDrag && !!playDrag.group && playDrag.group.length === 2;
+        let err = 0;
+        for (let i = 1; i <= 60; i++) {
+          moveDrag(from.x + dx * i / 60, from.y + dy * i / 60);
+          step(1 / 60);
+          err = Math.max(err, fgJointErr());
+        }
+        for (let i = 0; i < 40; i++) {
+          step(1 / 60);
+          err = Math.max(err, fgJointErr());
+        }
+        const ghost = !!playDrag && !!playDrag.ghost;
+        const grabAt = playDrag ? body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)) : V(0, 0);
+        const grabErr = Math.hypot(grabAt.x - from.x - dx, grabAt.y - from.y - dy);
+        const q1 = fgQuad.getPosition().clone();
+        const t1 = fgTri.getPosition().clone();
+        endDrag();
+        return {
+          grabbed, grouped, err, ghost, grabErr,
+          dq: Math.hypot(q1.x - q0.x, q1.y - q0.y),
+          dt: Math.hypot(t1.x - t0.x, t1.y - t0.y),
+        };
+      };
+      check("a nail in a free body is no fixed pivot", hingeWorldPoints(fgQuad).length === 0 && hingeWorldPoints(fgTri).length === 0 && !!fgJoint);
+      const fgInfo = (name, r) => lines.push("INFO free group " + name + ": quad " + r.dq.toFixed(2) + " m, triangle " + r.dt.toFixed(2)
+        + " m, joint err " + (r.err * 100).toFixed(3) + " cm, grab err " + (r.grabErr * 100).toFixed(2) + " cm, ghost " + r.ghost);
+      // Ohne Schwerkraft: reines Mitziehen, beide Körper legen die Zugstrecke zurück.
+      world.setGravity(V(0, 0));
+      for (const b of [fgQuad, fgTri]) {
+        b.setLinearVelocity(V(0, 0));
+        b.setAngularVelocity(0);
+      }
+      const fgQ = fgDrag(fgQuad, { x: 12.6, y: 2.2 }, 0, 4);
+      fgInfo("quad drag 4 m (g=0)", fgQ);
+      check("dragging the free quad drags the nailed triangle along", fgQ.grabbed && fgQ.grouped && Math.abs(fgQ.dq - 4) < 0.8 && Math.abs(fgQ.dt - 4) < 0.8 && fgQ.err < 0.01);
+      const fgT = fgDrag(fgTri, fgTri.getWorldCenter().clone(), 4, 0);
+      fgInfo("triangle drag 4 m (g=0)", fgT);
+      check("dragging the nailed triangle drags the free quad along", fgT.grabbed && fgT.grouped && Math.abs(fgT.dt - 4) < 0.8 && Math.abs(fgT.dq - 4) < 0.8 && fgT.err < 0.01);
+      // Mit Schwerkraft: Griff folgt der Maus, der Partner hängt am Nagel und pendelt mit.
+      world.setGravity(V(0, -24));
+      for (let i = 0; i < 120; i++) step(1 / 60);
+      const fgQg = fgDrag(fgQuad, fgQuad.getWorldPoint(V(-2.3, 0)).clone(), 2, 4);
+      fgInfo("quad drag with gravity", fgQg);
+      check("with gravity the grab follows and the triangle hangs on the nail", fgQg.grabbed && fgQg.grouped && fgQg.grabErr < 0.05 && fgQg.dq > 2 && fgQg.dt > 2 && fgQg.err < 0.01);
+      for (let i = 0; i < 120; i++) step(1 / 60);
+      const fgTg = fgDrag(fgTri, fgTri.getWorldCenter().clone(), -2, 4);
+      fgInfo("triangle drag with gravity", fgTg);
+      check("with gravity the quad hangs on the dragged triangle", fgTg.grabbed && fgTg.grouped && fgTg.grabErr < 0.05 && fgTg.dq > 2 && fgTg.dt > 2 && fgTg.err < 0.01);
+      // Die ganze Gruppe ist Geist: in den Boden ziehen, loslassen, beide springen zurück.
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      const fgQc = fgQuad.getWorldCenter().clone();
+      beginDrag(fgQc.x, fgQc.y);
+      let fgGhost = false;
+      for (let i = 1; i <= 40; i++) {
+        moveDrag(fgQc.x, fgQc.y - 2.5 * i / 40);
+        step(1 / 60);
+        if (playDrag.ghost) fgGhost = true;
+      }
+      const fgFree = playDrag.groupFree ? new Map(playDrag.groupFree) : null;
+      const fgPassThrough = dragGhostBody(fgQuad) && dragGhostBody(fgTri);
+      endDrag();
+      const fgBack = !!fgFree && [fgQuad, fgTri].every((b) => {
+        const f = fgFree.get(b);
+        const p = b.getPosition();
+        const v = b.getLinearVelocity();
+        return f && Math.hypot(p.x - f.x, p.y - f.y) < 1e-6 && Math.hypot(v.x, v.y) < 1e-9 && Math.abs(b.getAngularVelocity()) < 1e-9
+          && !overlapAtPose(b, poseOfBody(b), new Set([fgQuad, fgTri]));
+      });
+      check("a free nail group is a ghost as a whole and jumps back as a whole", fgPassThrough && fgGhost && fgBack);
+      // Mit Bodennagel bleibt der Nagel ein Drehpunkt (unverändert).
+      const fgGP = fgQuad.getWorldPoint(fgQuad.getLocalCenter());
+      const fgGPin = rememberPin(fgGP.x, fgGP.y, ground, true);
+      attachExistingPins(fgQuad, bodyMeta.get(fgQuad));
+      check("with a ground nail the quad keeps its fixed pivot and is no free group", hingeWorldPoints(fgQuad).length === 1 && hingeWorldPoints(fgTri).length === 1 && !freeNailGroup(fgQuad) && fgGPin.joints.length === 1);
+    }
+
     mountTunePanel();
     check("tune panel has scene copy and load controls", !!document.getElementById("tune-scene-copy") && !!document.getElementById("tune-scene-load") && !!document.getElementById("tune-scene-text"));
     const scenePanel = document.getElementById("tune-panel");

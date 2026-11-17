@@ -195,10 +195,11 @@ function pinHoldsBody(pin, body) {
   return pin.joints.some((j) => j && (j.getBodyA() === body || j.getBodyB() === body));
 }
 
-function attachExistingPins(body, meta) {
+function attachExistingPins(body, meta, except) {
   let n = 0;
   for (const pin of pins) {
     if (pin.body === body) continue;
+    if (except && except.has(pin.body)) continue;
     if (pinHoldsBody(pin, body)) continue;
     const wp = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
     if (!containsMeta(meta, wp.x, wp.y)) continue;

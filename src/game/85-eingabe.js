@@ -243,12 +243,12 @@ function onPointerUp(e) {
   }
   if (current.dragging || playDrag || current.grab) {
     const held = playDrag && playDrag.body
-      ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)), ghost: !!playDrag.ghost }
+      ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)), ghost: !!playDrag.ghost, group: playDrag.groupSet || null }
       : null;
     // Ein Geist springt in endDrag an seinen Schatten zurück und heftet sich nicht an.
     endDrag();
     if (held && mode === "play") {
-      const pinned = held.ghost ? 0 : tryPinDragEnd(held.body);
+      const pinned = held.ghost ? 0 : tryPinDragEnd(held.body, held.group);
       if (!pinned) tryAnchorDragEnd(held.body, { x: held.at.x, y: held.at.y }, current.trail);
     }
     return;
