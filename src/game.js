@@ -176,7 +176,7 @@ addLevel("die-wippe", {
 
 addLevel("das-seil", {
   name: "Das Seil",
-  hint: "Eine Linie von Nagel zu Nagel wird ein Seil. Es hängt durch und trägt die Kugel.",
+  hint: "Eine Linie von Nagel zu Nagel wird ein Seil so lang wie der Strich. Schlenker machen es länger.",
   ball: [4.2, 8.42],
   stars: [[16, 6.3]],
   pins: [[8.3, 11.2], [23.7, 11.2]],
@@ -1736,77 +1736,338 @@ function spawnRoller(x, y, r) {
   return draw;
 }
 
-function spawnRope(pinA, pinB, stroke) {
-  const start = pinWorld(pinA);
-  const end = pinWorld(pinB);
-  let pts = stroke.map((p) => ({ x: p.x, y: p.y }));
-  if (pts.length < 2) pts = [start, end];
-  pts[0] = start;
-  pts[pts.length - 1] = end;
-  const mid = pts[Math.floor(pts.length / 2)];
-  const lineD = distPointSeg(mid.x, mid.y, start.x, start.y, end.x, end.y);
-  if (lineD < 0.35) {
-    pts = pts.map((p) => ({ x: p.x, y: p.y }));
-    const samplesHint = [];
-    const steps = Math.max(4, Math.round(dist(start, end) / 0.6));
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      const sag = Math.sin(t * Math.PI) * Math.min(1.6, dist(start, end) * 0.18);
-      samplesHint.push({
-        x: start.x + (end.x - start.x) * t,
-        y: start.y + (end.y - start.y) * t - sag,
-      });
-    }
-    pts = samplesHint;
+const ROPE_SPACING = 0.22;
+const ROPE_BEAD_R = 0.10;
+const ROPE_BEAD_DENSITY = 1.6;
+const ROPE_MAX_STRETCH = 1.01;
+
+function pathLength(pts) {
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += dist(pts[i - 1], pts[i]);
+  return len;
+}
+
+function ropeChainLength(draw) {
+  if (!draw || !draw.bodies) return 0;
+  let len = 0;
+  let prev = null;
+  for (const body of draw.bodies) {
+    if (!body || (typeof body.isValid === "function" && !body.isValid())) continue;
+    const p = body.getPosition();
+    if (prev) len += dist(prev, p);
+    prev = { x: p.x, y: p.y };
   }
-  const samples = resample(pts, 0.5);
-  if (samples.length < 2) return null;
-  const ropeId = ropeSeq++;
-  const bodies = [];
-  for (const p of samples) {
-    const body = world.createDynamicBody({
-      position: V(p.x, p.y),
-      linearDamping: 1.4,
-      angularDamping: 1.4,
-    });
-    body.createFixture(new planck.Circle(0.075), fixtureOpt({
-      density: 0.45,
-      friction: 0.45,
-      restitution: 0,
-      filterGroupIndex: -2,
-    }));
-    track(body, { kind: "rope", ropeId });
-    bodies.push(body);
-  }
-  for (let i = 0; i < bodies.length - 1; i++) {
-    world.createJoint(new planck.DistanceJoint({
-      bodyA: bodies[i],
-      bodyB: bodies[i + 1],
-      localAnchorA: V(0, 0),
-      localAnchorB: V(0, 0),
-      frequencyHz: 7,
-      dampingRatio: 0.6,
-      collideConnected: false,
-    }));
-  }
-  world.createJoint(new planck.RevoluteJoint({
+  return len;
+}
+
+function attachRopePins(targetWorld, pinA, pinB, bodies) {
+  const endA = targetWorld.createJoint(new planck.RevoluteJoint({
     bodyA: pinA.body,
     bodyB: bodies[0],
     localAnchorA: V(pinA.local.x, pinA.local.y),
     localAnchorB: V(0, 0),
     collideConnected: false,
   }));
-  world.createJoint(new planck.RevoluteJoint({
+  const endB = targetWorld.createJoint(new planck.RevoluteJoint({
     bodyA: pinB.body,
     bodyB: bodies[bodies.length - 1],
     localAnchorA: V(pinB.local.x, pinB.local.y),
     localAnchorB: V(0, 0),
     collideConnected: false,
   }));
-  drawings.push({ kind: "rope", ropeId, bodies, color: MAT.hemp });
+  return [endA, endB];
+}
+
+function linkRopeSegment(targetWorld, a, b, length) {
+  const distJ = targetWorld.createJoint(new planck.DistanceJoint({
+    bodyA: a,
+    bodyB: b,
+    localAnchorA: V(0, 0),
+    localAnchorB: V(0, 0),
+    length,
+    frequencyHz: 0,
+    dampingRatio: 0,
+    collideConnected: false,
+  }));
+  const ropeJ = targetWorld.createJoint(new planck.RopeJoint({
+    bodyA: a,
+    bodyB: b,
+    localAnchorA: V(0, 0),
+    localAnchorB: V(0, 0),
+    maxLength: length * ROPE_MAX_STRETCH,
+    collideConnected: false,
+  }));
+  return { dist: distJ, rope: ropeJ, length };
+}
+
+function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
+  const start = pinWorld(pinA);
+  const end = pinWorld(pinB);
+  let pts = (stroke && stroke.length >= 2) ? stroke.map((p) => ({ x: p.x, y: p.y })) : [start, end];
+  pts[0] = { x: start.x, y: start.y };
+  pts[pts.length - 1] = { x: end.x, y: end.y };
+  const restLength = pathLength(pts);
+  if (restLength < 0.08) return null;
+  const samples = resample(pts, ROPE_SPACING);
+  if (samples.length < 2) return null;
+  const ropeId = ropeSeq++;
+  const bodies = [];
+  for (const p of samples) {
+    const body = targetWorld.createDynamicBody({
+      position: V(p.x, p.y),
+      bullet: true,
+      linearDamping: 0.8,
+      angularDamping: 0.8,
+    });
+    body.createFixture(new planck.Circle(ROPE_BEAD_R), fixtureOpt({
+      density: ROPE_BEAD_DENSITY,
+      friction: 0.45,
+      restitution: 0,
+      filterGroupIndex: -2,
+    }));
+    if (trackFn) trackFn(body, { kind: "rope", ropeId });
+    bodies.push(body);
+  }
+  const segJoints = [];
+  for (let i = 0; i < bodies.length - 1; i++) {
+    const d = dist(samples[i], samples[i + 1]) || ROPE_SPACING;
+    segJoints.push(linkRopeSegment(targetWorld, bodies[i], bodies[i + 1], d));
+  }
+  const endJoints = attachRopePins(targetWorld, pinA, pinB, bodies);
+  // Spanne zwischen den Endgliedern, nicht zwischen den Nägeln: die Nägel
+  // sitzen oft auf statischen Körpern, ein Joint dort würde nichts halten.
+  const spanJoint = targetWorld.createJoint(new planck.RopeJoint({
+    bodyA: bodies[0],
+    bodyB: bodies[bodies.length - 1],
+    localAnchorA: V(0, 0),
+    localAnchorB: V(0, 0),
+    maxLength: restLength * ROPE_MAX_STRETCH,
+    collideConnected: false,
+  }));
+  return {
+    kind: "rope",
+    ropeId,
+    bodies,
+    color: MAT.hemp,
+    restLength,
+    segJoints,
+    endJoints,
+    spanJoint,
+    pinA,
+    pinB,
+  };
+}
+
+function pinBodyMass(pin) {
+  if (!pin || !pin.body || !pin.body.isDynamic()) return 0;
+  const m = pin.body.getMass();
+  return m > 1e-8 ? m : 0;
+}
+
+function movePinWithBead(pin, dx, dy) {
+  if (!pin || !pin.body || !pin.body.isDynamic()) return;
+  const p = pin.body.getPosition();
+  pin.body.setPosition(V(p.x + dx, p.y + dy));
+}
+
+function tightenRopeDraw(draw, passes) {
+  if (!draw || !draw.bodies || !draw.segJoints) return;
+  const bodies = draw.bodies;
+  const n = bodies.length;
+  if (n < 2) return;
+  const inv = [];
+  for (let i = 0; i < n; i++) {
+    const body = bodies[i];
+    if (!body || (typeof body.isValid === "function" && !body.isValid()) || !body.isDynamic()) inv[i] = 0;
+    else {
+      const m = body.getMass();
+      inv[i] = m > 1e-8 ? 1 / m : 0;
+    }
+  }
+  const massA = pinBodyMass(draw.pinA);
+  const massB = pinBodyMass(draw.pinB);
+  if (massA > 0) inv[0] = 1 / (massA + (1 / (inv[0] || 1e9)));
+  else inv[0] = 0;
+  if (massB > 0) inv[n - 1] = 1 / (massB + (1 / (inv[n - 1] || 1e9)));
+  else inv[n - 1] = 0;
+  const reps = passes || Math.max(50, bodies.length * 2);
+  for (let rep = 0; rep < reps; rep++) {
+    for (let i = 0; i < draw.segJoints.length; i++) {
+      const rest = draw.segJoints[i].length;
+      const A = bodies[i];
+      const B = bodies[i + 1];
+      if (!A || !B) continue;
+      const pa = A.getPosition();
+      const pb = B.getPosition();
+      const dx = pb.x - pa.x;
+      const dy = pb.y - pa.y;
+      const d = Math.hypot(dx, dy) || 1e-9;
+      if (d <= rest * 1.0005) continue;
+      const wA = inv[i];
+      const wB = inv[i + 1];
+      const w = wA + wB;
+      if (w <= 0) continue;
+      const nx = dx / d;
+      const ny = dy / d;
+      const excess = d - rest;
+      if (wA) {
+        const mx = nx * excess * (wA / w);
+        const my = ny * excess * (wA / w);
+        A.setPosition(V(pa.x + mx, pa.y + my));
+        if (i === 0) movePinWithBead(draw.pinA, mx, my);
+        const va = A.getLinearVelocity();
+        const sep = va.x * nx + va.y * ny;
+        if (sep < 0) {
+          A.setLinearVelocity(V(va.x - sep * nx, va.y - sep * ny));
+          if (i === 0 && draw.pinA && draw.pinA.body && draw.pinA.body.isDynamic()) {
+            const pv = draw.pinA.body.getLinearVelocity();
+            const ps = pv.x * nx + pv.y * ny;
+            if (ps < 0) draw.pinA.body.setLinearVelocity(V(pv.x - ps * nx, pv.y - ps * ny));
+          }
+        }
+      }
+      if (wB) {
+        const qb = B.getPosition();
+        const mx = nx * excess * (wB / w);
+        const my = ny * excess * (wB / w);
+        B.setPosition(V(qb.x - mx, qb.y - my));
+        if (i === n - 2) movePinWithBead(draw.pinB, -mx, -my);
+        const vb = B.getLinearVelocity();
+        const sep = vb.x * nx + vb.y * ny;
+        if (sep > 0) {
+          B.setLinearVelocity(V(vb.x - sep * nx, vb.y - sep * ny));
+          if (i === n - 2 && draw.pinB && draw.pinB.body && draw.pinB.body.isDynamic()) {
+            const pv = draw.pinB.body.getLinearVelocity();
+            const ps = pv.x * nx + pv.y * ny;
+            if (ps > 0) draw.pinB.body.setLinearVelocity(V(pv.x - ps * nx, pv.y - ps * ny));
+          }
+        }
+      }
+    }
+  }
+  if (massA <= 0 && draw.pinA && bodies[0]) {
+    const p = pinWorld(draw.pinA);
+    bodies[0].setTransform(V(p.x, p.y), bodies[0].getAngle());
+    bodies[0].setLinearVelocity(V(0, 0));
+  }
+  if (massB <= 0 && draw.pinB && bodies[n - 1]) {
+    const p = pinWorld(draw.pinB);
+    bodies[n - 1].setTransform(V(p.x, p.y), bodies[n - 1].getAngle());
+    bodies[n - 1].setLinearVelocity(V(0, 0));
+  }
+}
+
+function limitRopeChord(draw) {
+  if (!draw || !draw.pinA || !draw.pinB || draw.restLength == null) return;
+  const a = pinWorld(draw.pinA);
+  const b = pinWorld(draw.pinB);
+  const chord = dist(a, b);
+  const maxL = draw.restLength * ROPE_MAX_STRETCH;
+  if (chord <= maxL + 1e-6) return;
+  const massA = pinBodyMass(draw.pinA);
+  const massB = pinBodyMass(draw.pinB);
+  const wA = massA > 0 ? 1 / massA : 0;
+  const wB = massB > 0 ? 1 / massB : 0;
+  const w = wA + wB;
+  if (w <= 0) return;
+  const nx = (b.x - a.x) / chord;
+  const ny = (b.y - a.y) / chord;
+  const excess = chord - maxL;
+  if (wA) {
+    const mx = nx * excess * (wA / w);
+    const my = ny * excess * (wA / w);
+    movePinWithBead(draw.pinA, mx, my);
+    if (draw.bodies[0]) {
+      const p = draw.bodies[0].getPosition();
+      draw.bodies[0].setPosition(V(p.x + mx, p.y + my));
+    }
+  }
+  if (wB) {
+    const mx = nx * excess * (wB / w);
+    const my = ny * excess * (wB / w);
+    movePinWithBead(draw.pinB, -mx, -my);
+    const last = draw.bodies[draw.bodies.length - 1];
+    if (last) {
+      const p = last.getPosition();
+      last.setPosition(V(p.x - mx, p.y - my));
+    }
+  }
+}
+
+function scaleRopeToRest(draw) {
+  if (!draw || !draw.bodies || draw.restLength == null) return;
+  if (pinBodyMass(draw.pinA) > 0 || pinBodyMass(draw.pinB) > 0) return;
+  const bodies = draw.bodies.filter((b) => b && (typeof b.isValid !== "function" || b.isValid()));
+  if (bodies.length < 3) return;
+  const pts = bodies.map((b) => {
+    const p = b.getPosition();
+    return { x: p.x, y: p.y };
+  });
+  const live = pathLength(pts);
+  const maxL = draw.restLength * ROPE_MAX_STRETCH;
+  if (live <= maxL) return;
+  const a = pts[0];
+  const b = pts[pts.length - 1];
+  const chord = dist(a, b) || 1e-9;
+  const frac = [];
+  let acc = 0;
+  frac[0] = 0;
+  for (let i = 1; i < pts.length; i++) {
+    acc += dist(pts[i - 1], pts[i]);
+    frac[i] = acc;
+  }
+  const total = acc || 1;
+  const chordPts = pts.map((_, i) => ({
+    x: a.x + (b.x - a.x) * (frac[i] / total),
+    y: a.y + (b.y - a.y) * (frac[i] / total),
+  }));
+  let lo = 0;
+  let hi = 1;
+  let best = 1;
+  for (let k = 0; k < 12; k++) {
+    const t = (lo + hi) / 2;
+    let len = 0;
+    let px = pts[0].x;
+    let py = pts[0].y;
+    for (let i = 1; i < pts.length; i++) {
+      const x = pts[i].x + (chordPts[i].x - pts[i].x) * t;
+      const y = pts[i].y + (chordPts[i].y - pts[i].y) * t;
+      len += Math.hypot(x - px, y - py);
+      px = x;
+      py = y;
+    }
+    if (len > maxL) lo = t;
+    else {
+      hi = t;
+      best = t;
+    }
+  }
+  for (let i = 1; i < bodies.length - 1; i++) {
+    const x = pts[i].x + (chordPts[i].x - pts[i].x) * best;
+    const y = pts[i].y + (chordPts[i].y - pts[i].y) * best;
+    bodies[i].setPosition(V(x, y));
+  }
+}
+
+function tightenRopes(list) {
+  const src = list || drawings;
+  for (const draw of src) {
+    if (draw && draw.kind === "rope") {
+      tightenRopeDraw(draw);
+      limitRopeChord(draw);
+      scaleRopeToRest(draw);
+    }
+  }
+}
+
+function spawnRope(pinA, pinB, stroke) {
+  if (!world) return null;
+  const draw = buildRope(world, pinA, pinB, stroke, track);
+  if (!draw) return null;
+  drawings.push(draw);
   stats.shapes += 1;
   stats.ropes += 1;
-  return drawings[drawings.length - 1];
+  return draw;
 }
 
 function resample(pts, spacing) {
@@ -1942,7 +2203,7 @@ function commitStrokeApply(drawnPts, rawInk) {
   if (!closed) {
     const a = nearestPin(pts[0].x, pts[0].y, 0.55);
     const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55);
-    if (a && b && a !== b) return spawnRope(a, b, pts);
+    if (a && b && a !== b) return spawnRope(a, b, ink);
   }
   if (closed && !selfIntersects(pts, true) && Math.abs(signedArea(pts)) >= 0.05) {
     const solid = spawnSolid(regularizeClosed(pts), {});
@@ -2761,7 +3022,9 @@ function step(dt) {
   if (simTime > 0.35) {
     for (const rocket of rockets) rocket.armed = true;
   }
-  world.step(dt, 10, 8);
+  const ropeLive = drawings.some((d) => d.kind === "rope" && d.bodies && d.bodies.length);
+  world.step(dt, ropeLive ? 20 : 10, ropeLive ? 16 : 8);
+  if (ropeLive) tightenRopes();
   snapDrag();
   handleContacts();
   stepDragFresh(dt);
@@ -3773,7 +4036,7 @@ function renderHelp() {
     "Ein runder Strich wird eine Kugel. Sie rollt und gibt ihren Schwung weiter.",
     "Winziger Kreis auf einem Körper oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
-    "Linie von Nagel zu Nagel: Seil.",
+    "Linie von Nagel zu Nagel: Seil, so lang wie der Strich, mit allen Schlenkern.",
     "Klick in einen Gegenstand zieht ihn. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
@@ -4428,7 +4691,15 @@ function runTests() {
     const pb = pins[1];
     const aw = pinWorld(pa);
     const bw = pinWorld(pb);
-    commitStroke([aw, bw], "#2b2b2b");
+    const sagMx = (aw.x + bw.x) / 2;
+    const sagCurve = [
+      aw,
+      { x: aw.x + (bw.x - aw.x) * 0.25, y: Math.min(aw.y, bw.y) - 0.9 },
+      { x: sagMx, y: Math.min(aw.y, bw.y) - 1.3 },
+      { x: aw.x + (bw.x - aw.x) * 0.75, y: Math.min(aw.y, bw.y) - 0.9 },
+      bw,
+    ];
+    commitStroke(sagCurve, "#2b2b2b");
     const rope = drawings.find((d) => d.kind === "rope");
     check("rope created", !!rope);
     for (let i = 0; i < 120; i++) step(1 / 60);
@@ -4436,6 +4707,47 @@ function runTests() {
       const mid = rope.bodies[Math.floor(rope.bodies.length / 2)].getPosition();
       check("rope sags", mid.y < Math.min(aw.y, bw.y) - 0.45);
     } else lines.push("FAIL rope sags");
+
+    buildLevel(LEVELS["das-seil"]);
+    const hangPa = pins[0];
+    const hangPb = pins[1];
+    const hangAw = pinWorld(hangPa);
+    const hangBw = pinWorld(hangPb);
+    const hangMx = (hangAw.x + hangBw.x) / 2;
+    const hangSmooth = [
+      hangAw,
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.5, y: hangAw.y - 2.2 },
+      hangBw,
+    ];
+    const hangZig = [
+      hangAw,
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.2, y: hangAw.y - 1.4 },
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.4, y: hangAw.y - 0.2 },
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.6, y: hangAw.y - 1.4 },
+      { x: hangAw.x + (hangBw.x - hangAw.x) * 0.8, y: hangAw.y - 0.2 },
+      hangBw,
+    ];
+    const smoothLen = pathLength(hangSmooth);
+    const zigLen = pathLength(hangZig);
+    commitStroke(hangSmooth, "#2b2b2b");
+    const hangSmoothRope = drawings.find((d) => d.kind === "rope");
+    check("smooth hanging rope keeps the stroke length", !!hangSmoothRope && Math.abs(hangSmoothRope.restLength - smoothLen) < 0.08);
+    const hangBallY0 = hangAw.y - 1.2;
+    ball.setTransform(V(hangMx, hangBallY0), 0);
+    ball.setLinearVelocity(V(0, 0));
+    ball.setAngularVelocity(0);
+    for (let i = 0; i < 240; i++) step(1 / 60);
+    const hangLive = hangSmoothRope ? ropeChainLength(hangSmoothRope) : 99;
+    const hangBall = ball.getPosition();
+    const hangFinite = Number.isFinite(hangLive) && Number.isFinite(hangBall.x) && Number.isFinite(hangBall.y);
+    check("rope under a ball stays within 102 percent of its drawn length", !!hangSmoothRope && hangFinite && hangLive <= hangSmoothRope.restLength * 1.02);
+    check("rope under a ball does not drop it to the ground", hangFinite && hangBall.y > 8.4);
+    lines.push("INFO rope-load live=" + hangLive.toFixed(3) + " rest=" + (hangSmoothRope ? hangSmoothRope.restLength.toFixed(3) : "none") + " ball=" + hangBall.x.toFixed(2) + "," + hangBall.y.toFixed(2));
+    buildLevel(LEVELS["das-seil"]);
+    commitStroke(hangZig, "#2b2b2b");
+    const hangZigRope = drawings.find((d) => d.kind === "rope");
+    lines.push("INFO rope-wiggle rest=" + (hangZigRope ? hangZigRope.restLength.toFixed(3) : "none") + " zig=" + zigLen.toFixed(3) + " smooth=" + smoothLen.toFixed(3));
+    check("a wiggly stroke makes a longer rope than a smooth curve", !!hangZigRope && hangZigRope.restLength > zigLen - 0.08 && hangZigRope.restLength > smoothLen + 0.25);
 
     buildLevel(LEVELS["zuendung"]);
     for (let i = 0; i < 30; i++) step(1 / 60);
