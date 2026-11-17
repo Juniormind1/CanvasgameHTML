@@ -1394,6 +1394,7 @@ const DRAG_MAX_V = 22;                        // m/s, Deckel für die Greifpunkt
 const GRAB_EDGE = 0.35;                       // m, Randzone: Abstand zur Kontur, sofort greifen
 const GRAB_ADOPT = 0.8;                       // m, Zug aus der Innenfläche wird zum Griff
 const GRAB_MIN_INTERIOR = 0.15;               // zusätzlicher Inkreis, damit ein Kringel Platz hat
+const GRAB_BALL_MIN_R = 0.5;                  // m, kleinere gezeichnete Kugeln greifen überall
 const TUNE_SPEC = [
   { group: "Kreis", key: "maxCv", label: "Radiusstreuung", min: 0.02, max: 0.30, step: 0.005, def: CIRCLE_MAX_CV, fmt: (v) => (v * 100).toFixed(1) + " %" },
   { group: "Kreis", key: "samples", label: "Abtastpunkte", min: 16, max: 128, step: 8, def: CIRCLE_SAMPLES, int: true },
@@ -6741,9 +6742,18 @@ function distToPolyEdges(x, y, polyPts) {
   return best;
 }
 
+// Gezeichnete Kugeln (nicht die Spielkugel) haben eine Innenfläche wie andere
+// Formen, sobald der Radius mindestens GRAB_BALL_MIN_R ist: Kringel macht dort
+// einen Nagel, ein langer Zug aus der Mitte greift, der Rand greift sofort.
+function circleInradius(meta) {
+  let r = 0;
+  for (const c of meta.circles) r = Math.max(r, c.r - Math.hypot(c.x, c.y));
+  return r;
+}
+
 function bodyInradius(meta) {
   if (!meta) return 0;
-  if (meta.circles && meta.circles.length) return 0;
+  if (meta.circles && meta.circles.length) return circleInradius(meta);
   if (!meta.outline || !meta.outline.closed) return 0;
   const local = meta.outline.local;
   if (!pointInPoly(0, 0, local) && distToPoly(0, 0, local) > 0) return 0;
@@ -6752,7 +6762,12 @@ function bodyInradius(meta) {
 
 function contourClearance(meta, x, y) {
   if (!meta || !meta.body) return 0;
-  if (meta.circles && meta.circles.length) return 0;
+  if (meta.circles && meta.circles.length) {
+    const cp = meta.body.getLocalPoint(V(x, y));
+    let best = 0;
+    for (const c of meta.circles) best = Math.max(best, c.r - Math.hypot(cp.x - c.x, cp.y - c.y));
+    return best;
+  }
   if (!meta.outline || !meta.outline.closed) return 0;
   const lp = meta.body.getLocalPoint(V(x, y));
   if (!pointInPoly(lp.x, lp.y, meta.outline.local)) return 0;
@@ -6761,8 +6776,9 @@ function contourClearance(meta, x, y) {
 
 function bodyAlwaysGrab(draw) {
   if (!draw) return false;
-  if (draw.kind === "roller" || draw.kind === "blob" || draw.kind === "wire" || draw.kind === "rope") return true;
+  if (draw.kind === "wire" || draw.kind === "rope") return true;
   if (draw.meta && draw.meta.kind === "ball") return true;
+  if (draw.meta && draw.meta.circles && draw.meta.circles.length && bodyInradius(draw.meta) < GRAB_BALL_MIN_R) return true;
   const need = tuneCode("grabEdge", GRAB_EDGE) + GRAB_MIN_INTERIOR;
   return bodyInradius(draw.meta) <= need;
 }
@@ -10792,6 +10808,34 @@ function runTests() {
       const fgGPin = rememberPin(fgGP.x, fgGP.y, ground, true);
       attachExistingPins(fgQuad, bodyMeta.get(fgQuad));
       check("with a ground nail the quad keeps its fixed pivot and is no free group", hingeWorldPoints(fgQuad).length === 1 && hingeWorldPoints(fgTri).length === 1 && !freeNailGroup(fgQuad) && fgGPin.joints.length === 1);
+    }
+
+    {
+      // Gezeichnete Kugel (r = 1 m): Kringel in der Mitte ist ein Nagel in ihr,
+      // ein langer Zug aus der Mitte greift sie, der Rand greift sofort.
+      buildLevel(LEVELS["ein-klotz"]);
+      world.setGravity(V(0, 0));
+      const kgDraw = spawnRoller(14, 6, 1);
+      const kg = kgDraw.body;
+      const kgSmall = spawnRoller(20, 6, 0.4);
+      check("a drawn ball r=1 has an interior, its rim grabs at once", pressKind(14, 6) === "draw" && pressKind(14.85, 6) === "drag");
+      check("a small drawn ball still grabs everywhere", pressKind(20, 6) === "drag");
+      const kgPinsBefore = pins.length;
+      commitStroke(ring(14, 6, 0.16), "#2b2b2b");
+      const kgNail = pins.find((pin) => pin.userMade && pin.body === kg);
+      check("a small loop in a drawn ball is a nail in that ball", !!kgNail && pins.length === kgPinsBefore + 1 && Math.hypot(pinWorld(kgNail).x - 14, pinWorld(kgNail).y - 6) < 0.1);
+      const kgTrail = [{ x: 14.2, y: 6.3 }, { x: 14.6, y: 6.6 }, { x: 15.0, y: 7.0 }];
+      pointer = { id: 93, pts: kgTrail.slice(), trail: kgTrail.slice(), moved: true, grab: null, dragging: false };
+      const kgAdopt = tryAdoptCenterGrab(pointer.trail);
+      check("a long stroke from inside a drawn ball grabs it", kgAdopt && !!playDrag && playDrag.body === kg);
+      endDrag();
+      pointer = null;
+      const kgLoopTrail = ring(14.2, 5.8, 0.16);
+      pointer = { id: 94, pts: kgLoopTrail.slice(), trail: kgLoopTrail.slice(), moved: true, grab: null, dragging: false };
+      check("a small loop in a drawn ball does not grab it", !tryAdoptCenterGrab(pointer.trail) && !playDrag);
+      pointer = null;
+      void kgSmall;
+      world.setGravity(V(0, -24));
     }
 
     mountTunePanel();

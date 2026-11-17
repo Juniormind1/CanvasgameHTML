@@ -8,6 +8,7 @@ const DRAG_MAX_V = 22;                        // m/s, Deckel für die Greifpunkt
 const GRAB_EDGE = 0.35;                       // m, Randzone: Abstand zur Kontur, sofort greifen
 const GRAB_ADOPT = 0.8;                       // m, Zug aus der Innenfläche wird zum Griff
 const GRAB_MIN_INTERIOR = 0.15;               // zusätzlicher Inkreis, damit ein Kringel Platz hat
+const GRAB_BALL_MIN_R = 0.5;                  // m, kleinere gezeichnete Kugeln greifen überall
 const TUNE_SPEC = [
   { group: "Kreis", key: "maxCv", label: "Radiusstreuung", min: 0.02, max: 0.30, step: 0.005, def: CIRCLE_MAX_CV, fmt: (v) => (v * 100).toFixed(1) + " %" },
   { group: "Kreis", key: "samples", label: "Abtastpunkte", min: 16, max: 128, step: 8, def: CIRCLE_SAMPLES, int: true },

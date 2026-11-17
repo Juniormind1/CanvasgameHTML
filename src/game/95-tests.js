@@ -2703,6 +2703,34 @@ function runTests() {
       check("with a ground nail the quad keeps its fixed pivot and is no free group", hingeWorldPoints(fgQuad).length === 1 && hingeWorldPoints(fgTri).length === 1 && !freeNailGroup(fgQuad) && fgGPin.joints.length === 1);
     }
 
+    {
+      // Gezeichnete Kugel (r = 1 m): Kringel in der Mitte ist ein Nagel in ihr,
+      // ein langer Zug aus der Mitte greift sie, der Rand greift sofort.
+      buildLevel(LEVELS["ein-klotz"]);
+      world.setGravity(V(0, 0));
+      const kgDraw = spawnRoller(14, 6, 1);
+      const kg = kgDraw.body;
+      const kgSmall = spawnRoller(20, 6, 0.4);
+      check("a drawn ball r=1 has an interior, its rim grabs at once", pressKind(14, 6) === "draw" && pressKind(14.85, 6) === "drag");
+      check("a small drawn ball still grabs everywhere", pressKind(20, 6) === "drag");
+      const kgPinsBefore = pins.length;
+      commitStroke(ring(14, 6, 0.16), "#2b2b2b");
+      const kgNail = pins.find((pin) => pin.userMade && pin.body === kg);
+      check("a small loop in a drawn ball is a nail in that ball", !!kgNail && pins.length === kgPinsBefore + 1 && Math.hypot(pinWorld(kgNail).x - 14, pinWorld(kgNail).y - 6) < 0.1);
+      const kgTrail = [{ x: 14.2, y: 6.3 }, { x: 14.6, y: 6.6 }, { x: 15.0, y: 7.0 }];
+      pointer = { id: 93, pts: kgTrail.slice(), trail: kgTrail.slice(), moved: true, grab: null, dragging: false };
+      const kgAdopt = tryAdoptCenterGrab(pointer.trail);
+      check("a long stroke from inside a drawn ball grabs it", kgAdopt && !!playDrag && playDrag.body === kg);
+      endDrag();
+      pointer = null;
+      const kgLoopTrail = ring(14.2, 5.8, 0.16);
+      pointer = { id: 94, pts: kgLoopTrail.slice(), trail: kgLoopTrail.slice(), moved: true, grab: null, dragging: false };
+      check("a small loop in a drawn ball does not grab it", !tryAdoptCenterGrab(pointer.trail) && !playDrag);
+      pointer = null;
+      void kgSmall;
+      world.setGravity(V(0, -24));
+    }
+
     mountTunePanel();
     check("tune panel has scene copy and load controls", !!document.getElementById("tune-scene-copy") && !!document.getElementById("tune-scene-load") && !!document.getElementById("tune-scene-text"));
     const scenePanel = document.getElementById("tune-panel");

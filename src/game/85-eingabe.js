@@ -113,9 +113,18 @@ function distToPolyEdges(x, y, polyPts) {
   return best;
 }
 
+// Gezeichnete Kugeln (nicht die Spielkugel) haben eine Innenfläche wie andere
+// Formen, sobald der Radius mindestens GRAB_BALL_MIN_R ist: Kringel macht dort
+// einen Nagel, ein langer Zug aus der Mitte greift, der Rand greift sofort.
+function circleInradius(meta) {
+  let r = 0;
+  for (const c of meta.circles) r = Math.max(r, c.r - Math.hypot(c.x, c.y));
+  return r;
+}
+
 function bodyInradius(meta) {
   if (!meta) return 0;
-  if (meta.circles && meta.circles.length) return 0;
+  if (meta.circles && meta.circles.length) return circleInradius(meta);
   if (!meta.outline || !meta.outline.closed) return 0;
   const local = meta.outline.local;
   if (!pointInPoly(0, 0, local) && distToPoly(0, 0, local) > 0) return 0;
@@ -124,7 +133,12 @@ function bodyInradius(meta) {
 
 function contourClearance(meta, x, y) {
   if (!meta || !meta.body) return 0;
-  if (meta.circles && meta.circles.length) return 0;
+  if (meta.circles && meta.circles.length) {
+    const cp = meta.body.getLocalPoint(V(x, y));
+    let best = 0;
+    for (const c of meta.circles) best = Math.max(best, c.r - Math.hypot(cp.x - c.x, cp.y - c.y));
+    return best;
+  }
   if (!meta.outline || !meta.outline.closed) return 0;
   const lp = meta.body.getLocalPoint(V(x, y));
   if (!pointInPoly(lp.x, lp.y, meta.outline.local)) return 0;
@@ -133,8 +147,9 @@ function contourClearance(meta, x, y) {
 
 function bodyAlwaysGrab(draw) {
   if (!draw) return false;
-  if (draw.kind === "roller" || draw.kind === "blob" || draw.kind === "wire" || draw.kind === "rope") return true;
+  if (draw.kind === "wire" || draw.kind === "rope") return true;
   if (draw.meta && draw.meta.kind === "ball") return true;
+  if (draw.meta && draw.meta.circles && draw.meta.circles.length && bodyInradius(draw.meta) < GRAB_BALL_MIN_R) return true;
   const need = tuneCode("grabEdge", GRAB_EDGE) + GRAB_MIN_INTERIOR;
   return bodyInradius(draw.meta) <= need;
 }
