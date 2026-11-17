@@ -224,6 +224,28 @@ function boot() {
         cam.cy = 4.2;
         cam.zoom = 1.7;
       }
+    } else if (id === "seilwinde") {
+      // Seilwinde: links rechtsrum (spult auf), rechts linksrum (spult ab).
+      buildLevel(LEVELS.sandbox);
+      if (ball) ball.setTransform(V(4, 1.66), 0);
+      const rig = (x, motor) => {
+        const nail = rememberPin(x, 9, ground, true);
+        const box = makeBox({ x, y: 5.0, hw: 0.5, hh: 0.5, color: MAT.wood });
+        const hook = rememberPin(x, 5.5, box, true);
+        spawnRope(nail, hook, [{ x, y: 9 }, { x, y: 7.25 }, { x, y: 5.5 }]);
+        nail.motor = motor;
+        applyNailMotor(nail);
+      };
+      rig(12, -1);
+      rig(20, 1);
+      for (let i = 0; i < 150; i++) step(1 / 60);
+      shotCaptions = [
+        { x: 12, y: 10.2, text: "rechtsrum: spult auf" },
+        { x: 20, y: 10.2, text: "linksrum: spult ab" },
+      ];
+      cam.cx = 16;
+      cam.cy = 6.2;
+      cam.zoom = 1.6;
     } else if (id === "trebuchet" || id === "trebuchet-wurf") {
       showMap();
       setMapDemo("trebuchet");

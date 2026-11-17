@@ -5108,23 +5108,22 @@ function drawPin(pin) {
   ctx.fill();
   ctx.stroke();
   if (motor) {
-    ctx.rotate(motor * simTime * NAIL_MOTOR_SPEED);
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 0.82, -0.95, 0.95);
-    ctx.stroke();
+    // Bildschirm-y zeigt nach unten: Motor +1 (links, gegen den Uhrzeigersinn
+    // in der Welt) dreht auf dem Bildschirm mit negativem Canvas-Winkel.
+    ctx.rotate(-motor * simTime * NAIL_MOTOR_SPEED);
     const ar = r * 0.82;
-    const tip = 0.95;
-    const tx = Math.cos(tip) * ar;
-    const ty = Math.sin(tip) * ar;
-    const dir = motor > 0 ? 1 : -1;
-    const hx = tx - Math.cos(tip) * r * 0.28;
-    const hy = ty - Math.sin(tip) * r * 0.28;
-    const px = -Math.sin(tip) * r * 0.2 * dir;
-    const py = Math.cos(tip) * r * 0.2 * dir;
     ctx.beginPath();
-    ctx.moveTo(tx, ty);
-    ctx.lineTo(hx + px, hy + py);
-    ctx.lineTo(hx - px, hy - py);
+    ctx.arc(0, 0, ar, -0.95, 0.95);
+    ctx.stroke();
+    // Pfeilspitze am vorderen Bogenende, tangential in Drehrichtung.
+    const sgn = motor > 0 ? -1 : 1;           // Canvas-Drehsinn
+    const end = 0.95 * sgn;
+    const tipA = end + sgn * 0.55;
+    const w = r * 0.24;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(tipA) * ar, Math.sin(tipA) * ar);
+    ctx.lineTo(Math.cos(end) * (ar + w), Math.sin(end) * (ar + w));
+    ctx.lineTo(Math.cos(end) * (ar - w), Math.sin(end) * (ar - w));
     ctx.closePath();
     ctx.fillStyle = ctx.strokeStyle;
     ctx.fill();
@@ -8287,6 +8286,28 @@ function boot() {
         cam.cy = 4.2;
         cam.zoom = 1.7;
       }
+    } else if (id === "seilwinde") {
+      // Seilwinde: links rechtsrum (spult auf), rechts linksrum (spult ab).
+      buildLevel(LEVELS.sandbox);
+      if (ball) ball.setTransform(V(4, 1.66), 0);
+      const rig = (x, motor) => {
+        const nail = rememberPin(x, 9, ground, true);
+        const box = makeBox({ x, y: 5.0, hw: 0.5, hh: 0.5, color: MAT.wood });
+        const hook = rememberPin(x, 5.5, box, true);
+        spawnRope(nail, hook, [{ x, y: 9 }, { x, y: 7.25 }, { x, y: 5.5 }]);
+        nail.motor = motor;
+        applyNailMotor(nail);
+      };
+      rig(12, -1);
+      rig(20, 1);
+      for (let i = 0; i < 150; i++) step(1 / 60);
+      shotCaptions = [
+        { x: 12, y: 10.2, text: "rechtsrum: spult auf" },
+        { x: 20, y: 10.2, text: "linksrum: spult ab" },
+      ];
+      cam.cx = 16;
+      cam.cy = 6.2;
+      cam.zoom = 1.6;
     } else if (id === "trebuchet" || id === "trebuchet-wurf") {
       showMap();
       setMapDemo("trebuchet");

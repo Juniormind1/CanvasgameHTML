@@ -334,23 +334,22 @@ function drawPin(pin) {
   ctx.fill();
   ctx.stroke();
   if (motor) {
-    ctx.rotate(motor * simTime * NAIL_MOTOR_SPEED);
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 0.82, -0.95, 0.95);
-    ctx.stroke();
+    // Bildschirm-y zeigt nach unten: Motor +1 (links, gegen den Uhrzeigersinn
+    // in der Welt) dreht auf dem Bildschirm mit negativem Canvas-Winkel.
+    ctx.rotate(-motor * simTime * NAIL_MOTOR_SPEED);
     const ar = r * 0.82;
-    const tip = 0.95;
-    const tx = Math.cos(tip) * ar;
-    const ty = Math.sin(tip) * ar;
-    const dir = motor > 0 ? 1 : -1;
-    const hx = tx - Math.cos(tip) * r * 0.28;
-    const hy = ty - Math.sin(tip) * r * 0.28;
-    const px = -Math.sin(tip) * r * 0.2 * dir;
-    const py = Math.cos(tip) * r * 0.2 * dir;
     ctx.beginPath();
-    ctx.moveTo(tx, ty);
-    ctx.lineTo(hx + px, hy + py);
-    ctx.lineTo(hx - px, hy - py);
+    ctx.arc(0, 0, ar, -0.95, 0.95);
+    ctx.stroke();
+    // Pfeilspitze am vorderen Bogenende, tangential in Drehrichtung.
+    const sgn = motor > 0 ? -1 : 1;           // Canvas-Drehsinn
+    const end = 0.95 * sgn;
+    const tipA = end + sgn * 0.55;
+    const w = r * 0.24;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(tipA) * ar, Math.sin(tipA) * ar);
+    ctx.lineTo(Math.cos(end) * (ar + w), Math.sin(end) * (ar + w));
+    ctx.lineTo(Math.cos(end) * (ar - w), Math.sin(end) * (ar - w));
     ctx.closePath();
     ctx.fillStyle = ctx.strokeStyle;
     ctx.fill();
