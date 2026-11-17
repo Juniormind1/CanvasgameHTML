@@ -98,6 +98,23 @@ function dropRopeChord(draw) {
   draw.chordJoint = null;
 }
 
+function makeRopeBead(targetWorld, x, y, ropeId, trackFn) {
+  const body = targetWorld.createDynamicBody({
+    position: V(x, y),
+    bullet: true,
+    linearDamping: 0.8,
+    angularDamping: 0.8,
+  });
+  body.createFixture(new planck.Circle(ROPE_BEAD_R), fixtureOpt({
+    density: ROPE_BEAD_DENSITY,
+    friction: 0.45,
+    restitution: 0,
+    filterGroupIndex: -2,
+  }));
+  if (trackFn) trackFn(body, { kind: "rope", ropeId });
+  return body;
+}
+
 function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
   const strokePts = (stroke && stroke.length >= 2) ? stroke.map((p) => ({ x: p.x, y: p.y })) : null;
   const start = pinA ? pinWorld(pinA) : (strokePts && strokePts[0]);
@@ -112,22 +129,7 @@ function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
   if (samples.length < 2) return null;
   const ropeId = ropeSeq++;
   const bodies = [];
-  for (const p of samples) {
-    const body = targetWorld.createDynamicBody({
-      position: V(p.x, p.y),
-      bullet: true,
-      linearDamping: 0.8,
-      angularDamping: 0.8,
-    });
-    body.createFixture(new planck.Circle(ROPE_BEAD_R), fixtureOpt({
-      density: ROPE_BEAD_DENSITY,
-      friction: 0.45,
-      restitution: 0,
-      filterGroupIndex: -2,
-    }));
-    if (trackFn) trackFn(body, { kind: "rope", ropeId });
-    bodies.push(body);
-  }
+  for (const p of samples) bodies.push(makeRopeBead(targetWorld, p.x, p.y, ropeId, trackFn));
   const segJoints = [];
   for (let i = 0; i < bodies.length - 1; i++) {
     const d = dist(samples[i], samples[i + 1]) || ROPE_SPACING;
@@ -151,6 +153,7 @@ function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
     bodies,
     color: MAT.hemp,
     restLength,
+    drawnLength: restLength,
     segJoints,
     endJoints,
     spanJoint,
@@ -620,6 +623,7 @@ function cutRopeAtBead(ev) {
   draw.bodies = leftBodies;
   draw.segJoints = leftJoints;
   draw.restLength = leftJoints.reduce((s, j) => s + (j && j.length ? j.length : 0), 0);
+  draw.drawnLength = draw.restLength;
   const ends = draw.endJoints || [null, null];
   draw.endJoints = [ends[0], null];
   const rightPin = draw.pinB;
@@ -635,6 +639,7 @@ function cutRopeAtBead(ev) {
     bodies: rightBodies,
     color: draw.color || MAT.hemp,
     restLength: rightJoints.reduce((s, j) => s + (j && j.length ? j.length : 0), 0),
+    drawnLength: rightJoints.reduce((s, j) => s + (j && j.length ? j.length : 0), 0),
     segJoints: rightJoints,
     endJoints: [null, ends[1]],
     spanJoint: null,
@@ -669,3 +674,163 @@ function spawnRope(pinA, pinB, stroke) {
   return draw;
 }
 
+
+// ---------------------------------------------------------------------------
+// Seilwinde: Ein Motornagel spult jedes Seil, das an ihm hängt.
+// Rechtsrum (im Uhrzeigersinn, Motor -1) verkürzt, linksrum (Motor +1)
+// verlängert, mit Tempo = Drehzahl × Spulenradius. Gespult wird nur das
+// Glied am Nagel: Es wird kürzer oder länger, und wenn es zu kurz wird, fällt
+// die Nachbarperle weg (ihr Glied geht im Nagelglied auf); wird es zu lang,
+// kommt dazwischen eine neue Perle. Keine Perle wird dabei versetzt; den Rest
+// erledigen Löser, Sehne und tightenRopes wie bisher. Die Last bleibt stehen,
+// sobald der Seilzug am Nagel größer ist als Windenmoment / Spulenradius.
+const WINCH_MERGE = 0.06;   // m, kürzeres Nagelglied geht im Nachbarglied auf
+
+function ropeSegSetLength(seg, len) {
+  seg.length = len;
+  if (seg.dist && typeof seg.dist.setLength === "function") seg.dist.setLength(len);
+  if (seg.rope && typeof seg.rope.setMaxLength === "function") seg.rope.setMaxLength(len * ROPE_MAX_STRETCH);
+}
+
+function ropeSegSum(draw) {
+  return draw.segJoints.reduce((s, j) => s + (j && j.length ? j.length : 0), 0);
+}
+
+// restLength um die tatsächliche Änderung der Glieder verschieben (nicht neu
+// summieren: gezeichnete Seile haben durch das Abtasten oft eine etwas
+// kleinere Gliedersumme, ein Sprung würde den Klotz ruckartig anheben).
+function ropeSyncRest(draw, delta) {
+  draw.restLength += delta;
+  const maxL = draw.restLength * ROPE_MAX_STRETCH;
+  if (draw.spanJoint && typeof draw.spanJoint.setMaxLength === "function") draw.spanJoint.setMaxLength(maxL);
+  if (draw.chordJoint && typeof draw.chordJoint.setMaxLength === "function") draw.chordJoint.setMaxLength(maxL);
+}
+
+function dropRopeBead(body) {
+  if (!body) return;
+  bodyMeta.delete(body);
+  world.destroyBody(body);
+}
+
+// Seilzug am Nagel aus dem letzten Löserschritt (Sehne + Endgelenk), in N.
+function ropeEndTension(draw, end, invDt) {
+  let t = 0;
+  if (draw.chordJoint && jointAlive(world, draw.chordJoint)) {
+    const f = draw.chordJoint.getReactionForce(invDt);
+    t += Math.hypot(f.x, f.y);
+  }
+  const ej = draw.endJoints && draw.endJoints[end === "A" ? 0 : 1];
+  if (ej) {
+    const f = ej.getReactionForce(invDt);
+    t += Math.hypot(f.x, f.y);
+  }
+  return t;
+}
+
+// Ändert die Seillänge am Ende `end` ("A" oder "B") um dL (negativ = kürzer).
+function reelRopeEnd(draw, end, dL) {
+  const n = draw.bodies.length;
+  if (n < 2 || !draw.segJoints.length) return 0;
+  const atA = end === "A";
+  // Indizes: e = Nagelperle, f = Nachbar, g = übernächste; Glied k0 = e–f, k1 = f–g.
+  const e = atA ? 0 : n - 1;
+  const f = atA ? 1 : n - 2;
+  const g = atA ? 2 : n - 3;
+  const k0 = atA ? 0 : n - 2;
+  const k1 = atA ? 1 : n - 3;
+  const seg0 = draw.segJoints[k0];
+  const sumBefore = ropeSegSum(draw);
+  let len = seg0.length + dL;
+  if (dL < 0 && len < WINCH_MERGE && n >= 3 && draw.segJoints[k1]) {
+    // Nachbarperle fällt weg, ihr Glied geht im Nagelglied auf.
+    const seg1 = draw.segJoints[k1];
+    const merged = Math.max(0.02, len) + seg1.length;
+    const bead = draw.bodies[f];
+    const a = draw.bodies[e];
+    const c = draw.bodies[g];
+    dropRopeBead(bead);
+    const link = atA ? linkRopeSegment(world, a, c, merged) : linkRopeSegment(world, c, a, merged);
+    if (atA) {
+      draw.bodies.splice(1, 1);
+      draw.segJoints.splice(0, 2, link);
+    } else {
+      draw.bodies.splice(n - 2, 1);
+      draw.segJoints.splice(n - 3, 2, link);
+    }
+  } else if (dL > 0 && len > 2 * ROPE_SPACING) {
+    // Neue Perle zwischen Nagelperle und Nachbar, auf der Verbindungslinie.
+    const a = draw.bodies[e];
+    const b = draw.bodies[f];
+    const pa = a.getPosition();
+    const pb = b.getPosition();
+    const t = (len - ROPE_SPACING) / len;
+    const va = a.getLinearVelocity();
+    const vb = b.getLinearVelocity();
+    const meta = bodyMeta.get(b);
+    const bead = makeRopeBead(world, pa.x + (pb.x - pa.x) * t, pa.y + (pb.y - pa.y) * t, draw.ropeId || (meta && meta.ropeId), track);
+    bead.setLinearVelocity(V(va.x + (vb.x - va.x) * t, va.y + (vb.y - va.y) * t));
+    if (seg0.dist) world.destroyJoint(seg0.dist);
+    if (seg0.rope) world.destroyJoint(seg0.rope);
+    if (atA) {
+      const l0 = linkRopeSegment(world, a, bead, len - ROPE_SPACING);
+      const l1 = linkRopeSegment(world, bead, b, ROPE_SPACING);
+      draw.bodies.splice(1, 0, bead);
+      draw.segJoints.splice(0, 1, l0, l1);
+    } else {
+      const l1 = linkRopeSegment(world, b, bead, ROPE_SPACING);
+      const l0 = linkRopeSegment(world, bead, a, len - ROPE_SPACING);
+      draw.bodies.splice(n - 1, 0, bead);
+      draw.segJoints.splice(n - 2, 1, l1, l0);
+    }
+  } else {
+    ropeSegSetLength(seg0, Math.max(0.02, len));
+  }
+  const delta = ropeSegSum(draw) - sumBefore;
+  ropeSyncRest(draw, delta);
+  return delta;
+}
+
+function winchParams() {
+  const spool = tuneCode("winchSpool", WINCH_SPOOL_R);
+  return {
+    spool,
+    speed: NAIL_MOTOR_SPEED * spool,
+    minLen: tuneCode("winchMin", WINCH_MIN_LEN),
+    maxFactor: tuneCode("winchMaxFactor", WINCH_MAX_FACTOR),
+    maxPull: tuneCode("winchTorque", WINCH_TORQUE) / Math.max(0.01, spool),
+  };
+}
+
+function pinReelsRope(pin) {
+  if (!pin || !pin.motor) return false;
+  return drawings.some((d) => d.kind === "rope" && (d.pinA === pin || d.pinB === pin));
+}
+
+// Vor jedem world.step: alle Seile an laufenden Motornägeln spulen.
+function reelRopes(dt) {
+  if (!world || !(dt > 0)) return;
+  const prm = winchParams();
+  for (const draw of drawings.slice()) {
+    if (draw.kind !== "rope" || !draw.bodies || !draw.segJoints) continue;
+    if (draw.drawnLength == null) draw.drawnLength = draw.restLength;
+    draw.winch = null;
+    for (const end of ["A", "B"]) {
+      const pin = end === "A" ? draw.pinA : draw.pinB;
+      if (!pin || !pin.motor) continue;
+      if (draw.bodies.length < 2) continue;
+      // Motor -1 = rechtsrum (im Uhrzeigersinn) = aufspulen.
+      const dir = pin.motor < 0 ? -1 : 1;
+      const maxLen = draw.drawnLength * prm.maxFactor;
+      const minLen = Math.min(prm.minLen, draw.drawnLength);
+      let want = dir * prm.speed * dt;
+      if (dir < 0) want = Math.max(want, minLen - draw.restLength);
+      else want = Math.min(want, maxLen - draw.restLength);
+      const tension = ropeEndTension(draw, end, 1 / dt);
+      let state = dir < 0 ? "in" : "out";
+      if (Math.abs(want) < 1e-6) state = "limit";
+      else if (dir < 0 && tension > prm.maxPull) state = "stall";
+      draw.winch = { state, tension, pin };
+      if (state === "in" || state === "out") reelRopeEnd(draw, end, want);
+    }
+  }
+}

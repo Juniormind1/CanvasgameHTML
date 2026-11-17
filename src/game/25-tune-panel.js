@@ -9,6 +9,10 @@ const GRAB_EDGE = 0.35;                       // m, Randzone: Abstand zur Kontur
 const GRAB_ADOPT = 0.8;                       // m, Zug aus der Innenfläche wird zum Griff
 const GRAB_MIN_INTERIOR = 0.15;               // zusätzlicher Inkreis, damit ein Kringel Platz hat
 const GRAB_BALL_MIN_R = 0.5;                  // m, kleinere gezeichnete Kugeln greifen überall
+const WINCH_SPOOL_R = 0.3;                    // m, wirksamer Spulenradius am Motornagel
+const WINCH_MIN_LEN = 0.3;                    // m, kürzer spult die Winde nicht
+const WINCH_MAX_FACTOR = 3;                   // höchstens so viel mal die gezeichnete Länge
+const WINCH_TORQUE = 150;                     // N·m, größter Zug = Moment / Spulenradius
 const TUNE_SPEC = [
   { group: "Kreis", key: "maxCv", label: "Radiusstreuung", min: 0.02, max: 0.30, step: 0.005, def: CIRCLE_MAX_CV, fmt: (v) => (v * 100).toFixed(1) + " %" },
   { group: "Kreis", key: "samples", label: "Abtastpunkte", min: 16, max: 128, step: 8, def: CIRCLE_SAMPLES, int: true },
@@ -41,6 +45,10 @@ const TUNE_SPEC = [
   { group: "Seil", key: "ropeCutAngle", label: "Schnitt-Spitze", min: 5, max: 30, step: 1, def: 15, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Seil", key: "ropeCutAlign", label: "Senkrecht-Toleranz", min: 10, max: 45, step: 1, def: 30, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Seil", key: "ropeCutSpeed", label: "Schnitt-Mindesttempo", min: 0.5, max: 8, step: 0.25, def: 2.5, fmt: (v) => Number(v).toFixed(2) + " m/s" },
+  { group: "Seilwinde", key: "winchSpool", label: "Spulenradius", min: 0.05, max: 1.0, step: 0.05, def: WINCH_SPOOL_R, fmt: (v) => Number(v).toFixed(2) + " m (" + (Number(v) * 90 * Math.PI / 180).toFixed(2) + " m/s)" },
+  { group: "Seilwinde", key: "winchMin", label: "Min. Seillänge", min: 0.1, max: 2.0, step: 0.05, def: WINCH_MIN_LEN, fmt: (v) => Number(v).toFixed(2) + " m" },
+  { group: "Seilwinde", key: "winchMaxFactor", label: "Max. Länge", min: 1, max: 6, step: 0.25, def: WINCH_MAX_FACTOR, fmt: (v) => Number(v).toFixed(2) + " × gezeichnet" },
+  { group: "Seilwinde", key: "winchTorque", label: "Windenmoment", min: 10, max: 2000, step: 10, def: WINCH_TORQUE, fmt: (v) => Number(v).toFixed(0) + " N·m" },
   { group: "Griff", key: "dragFreq", label: "Griff-Steifigkeit", min: 1, max: 12, step: 0.5, def: DRAG_FREQ, fmt: (v) => Number(v).toFixed(1) + " Hz" },
   { group: "Griff", key: "dragDamp", label: "Griff-Dämpfung", min: 0.2, max: 1.5, step: 0.05, def: DRAG_DAMPING, fmt: (v) => Number(v).toFixed(2) },
   { group: "Griff", key: "dragForceG", label: "Max. Kraft / Gewicht", min: 2, max: 20, step: 0.5, def: DRAG_FORCE_G, fmt: (v) => Number(v).toFixed(1) + " × mg" },

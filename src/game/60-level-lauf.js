@@ -224,6 +224,7 @@ function handleContacts() {
 function step(dt) {
   if (!world) return;
   chaseDrag(dt);
+  reelRopes(dt);
   simTime += dt;
   if (simTime > 0.35) {
     for (const rocket of rockets) rocket.armed = true;

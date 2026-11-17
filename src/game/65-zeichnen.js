@@ -308,6 +308,24 @@ function drawPin(pin) {
   const motor = pin.motor || 0;
   ctx.save();
   ctx.translate(s.x, s.y);
+  if (motor && pinReelsRope(pin)) {
+    // Seilwinde: Spule im wirksamen Radius, Hanf aufgewickelt.
+    const sr = winchParams().spool * camScale();
+    ctx.save();
+    ctx.globalAlpha = 0.75;
+    ctx.fillStyle = "rgba(201,165,106,0.35)";
+    ctx.strokeStyle = MAT.hemp;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, sr, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(0, 0, sr * 0.72, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.strokeStyle = motor ? (motor > 0 ? "#1f7a4c" : "#8a3a22") : "#24324a";
   ctx.fillStyle = "#f4e6c6";
   ctx.lineWidth = motor ? 2.4 : 2;
