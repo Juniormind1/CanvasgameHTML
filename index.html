@@ -131,6 +131,10 @@ let cradleWorld = null;
 let cradleGround = null;
 let cradleBalls = [];
 let cradleDrag = null;
+let trebWorld = null;
+let trebGround = null;
+let treb = null;
+let mapDemo = "cradle";
 let anchors = [];
 
 const CONFETTI_PAIRS = [
@@ -1957,12 +1961,17 @@ function tightenRopeDraw(draw, passes) {
       inv[i] = m > 1e-8 ? 1 / m : 0;
     }
   }
-  const massA = pinBodyMass(draw.pinA);
-  const massB = pinBodyMass(draw.pinB);
+  function endMass(pin) {
+    if (!pin) return -1;
+    if (draw.fixedPins) return 0;
+    return pinBodyMass(pin);
+  }
+  const massA = endMass(draw.pinA);
+  const massB = endMass(draw.pinB);
   if (massA > 0) inv[0] = 1 / (massA + (1 / (inv[0] || 1e9)));
-  else inv[0] = 0;
+  else if (massA === 0) inv[0] = 0;
   if (massB > 0) inv[n - 1] = 1 / (massB + (1 / (inv[n - 1] || 1e9)));
-  else inv[n - 1] = 0;
+  else if (massB === 0) inv[n - 1] = 0;
   const reps = passes || Math.max(50, bodies.length * 2);
   for (let rep = 0; rep < reps; rep++) {
     for (let i = 0; i < draw.segJoints.length; i++) {
@@ -2018,12 +2027,12 @@ function tightenRopeDraw(draw, passes) {
       }
     }
   }
-  if (massA <= 0 && draw.pinA && bodies[0]) {
+  if (massA === 0 && draw.pinA && bodies[0]) {
     const p = pinWorld(draw.pinA);
     bodies[0].setTransform(V(p.x, p.y), bodies[0].getAngle());
     bodies[0].setLinearVelocity(V(0, 0));
   }
-  if (massB <= 0 && draw.pinB && bodies[n - 1]) {
+  if (massB === 0 && draw.pinB && bodies[n - 1]) {
     const p = pinWorld(draw.pinB);
     bodies[n - 1].setTransform(V(p.x, p.y), bodies[n - 1].getAngle());
     bodies[n - 1].setLinearVelocity(V(0, 0));
@@ -2032,6 +2041,7 @@ function tightenRopeDraw(draw, passes) {
 
 function limitRopeChord(draw) {
   if (!draw || !draw.pinA || !draw.pinB || draw.restLength == null) return;
+  if (draw.fixedPins || draw.pinA.body === draw.pinB.body) return;
   const a = pinWorld(draw.pinA);
   const b = pinWorld(draw.pinB);
   const chord = dist(a, b);
@@ -2069,7 +2079,7 @@ function limitRopeChord(draw) {
 
 function scaleRopeToRest(draw) {
   if (!draw || !draw.bodies || draw.restLength == null) return;
-  if (pinBodyMass(draw.pinA) > 0 || pinBodyMass(draw.pinB) > 0) return;
+  if (!draw.fixedPins && (pinBodyMass(draw.pinA) > 0 || pinBodyMass(draw.pinB) > 0)) return;
   const bodies = draw.bodies.filter((b) => b && (typeof b.isValid !== "function" || b.isValid()));
   if (bodies.length < 3) return;
   const pts = bodies.map((b) => {
@@ -4207,6 +4217,7 @@ function drawCradle() {
   ctx.lineWidth = 2;
   ctx.stroke();
   label("Zieh eine äußere Kugel zur Seite", band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
+  drawMapDemoToggle(band);
   const first = cradleBalls[0];
   const last = cradleBalls[cradleBalls.length - 1];
   const a0 = cradleToScreen(first.anchorX, first.anchorY, lay);
@@ -4245,6 +4256,418 @@ function drawCradle() {
   }
 }
 
+
+const TREB_PIVOT_Y = 5;
+const TREB_ARM_SHORT = 1.35;
+const TREB_ARM_LONG = 4.7;
+const TREB_ARM_THICK = 0.14;
+const TREB_COCKED = -1.05;
+const TREB_RELEASE_ANG = 0.42;
+const TREB_HOLD_DELAY = 0.7;
+const TREB_BALL_R = 0.28;
+
+function setMapDemo(kind) {
+  mapDemo = kind === "trebuchet" ? "trebuchet" : "cradle";
+  if (mapDemo === "trebuchet") ensureTrebuchet();
+  else endCradleDrag();
+}
+
+function mapDemoBandHit(sx, sy) {
+  const band = mapFrame().cradle;
+  return sx >= band.x && sx <= band.x + band.w && sy >= band.y && sy <= band.y + band.h;
+}
+
+function mapDemoToggleAt(sx, sy) {
+  const band = mapFrame().cradle;
+  if (sy < band.y || sy > band.y + 28 || sx < band.x + band.w - 160 || sx > band.x + band.w - 8) return null;
+  const mid = band.x + band.w - 84;
+  if (sx < mid) return "cradle";
+  return "trebuchet";
+}
+
+function trebPin(body, lx, ly) {
+  return { body, local: { x: lx, y: ly } };
+}
+
+function trebFinite(body) {
+  if (!body) return false;
+  const p = body.getPosition();
+  const v = body.getLinearVelocity();
+  return [p.x, p.y, v.x, v.y, body.getAngle(), body.getAngularVelocity()].every(Number.isFinite);
+}
+
+function resetTrebuchet() {
+  trebWorld = null;
+  trebGround = null;
+  treb = null;
+  ensureTrebuchet();
+}
+
+function ensureTrebuchet() {
+  if (trebWorld && treb) return;
+  trebWorld = new planck.World(V(0, -24));
+  trebGround = trebWorld.createBody();
+  trebGround.createFixture(new planck.Edge(V(-12, 0), V(48, 0)), { friction: 0.55, restitution: 0 });
+  const woodFix = { density: 0, friction: 0.7, restitution: 0, filterGroupIndex: -3 };
+  const frame = trebWorld.createBody({ position: V(0, 0) });
+  frame.createFixture(new planck.Box(2.4, 0.16, V(0, 0.16), 0), woodFix);
+  frame.createFixture(new planck.Box(0.16, TREB_PIVOT_Y / 2, V(0, TREB_PIVOT_Y / 2), 0), woodFix);
+  frame.createFixture(new planck.Box(0.14, 2.4, V(-1.15, 2.0), 0.45), woodFix);
+  frame.createFixture(new planck.Box(0.14, 2.4, V(1.15, 2.0), -0.45), woodFix);
+
+  const arm = trebWorld.createDynamicBody({
+    position: V(0, TREB_PIVOT_Y),
+    angle: TREB_COCKED,
+    bullet: true,
+    linearDamping: 0.02,
+    angularDamping: 0.04,
+  });
+  const halfLen = (TREB_ARM_SHORT + TREB_ARM_LONG) / 2;
+  const armOff = (TREB_ARM_LONG - TREB_ARM_SHORT) / 2;
+  arm.createFixture(new planck.Box(halfLen, TREB_ARM_THICK, V(armOff, 0), 0), {
+    density: 1.4,
+    friction: 0.62,
+    restitution: 0,
+  });
+  trebWorld.createJoint(new planck.RevoluteJoint({
+    bodyA: frame,
+    bodyB: arm,
+    localAnchorA: V(0, TREB_PIVOT_Y),
+    localAnchorB: V(0, 0),
+    collideConnected: false,
+  }));
+  const holdJoint = trebWorld.createJoint(new planck.WeldJoint({
+    bodyA: frame,
+    bodyB: arm,
+    localAnchorA: V(0, TREB_PIVOT_Y),
+    localAnchorB: V(0, 0),
+    referenceAngle: TREB_COCKED,
+    collideConnected: false,
+  }));
+
+  const tipS = arm.getWorldPoint(V(-TREB_ARM_SHORT, 0));
+  const wh = 0.52;
+  const ww = 0.48;
+  const weight = trebWorld.createDynamicBody({
+    position: V(tipS.x, tipS.y - wh - 0.1),
+    angularDamping: 0.15,
+    linearDamping: 0.02,
+  });
+  weight.createFixture(new planck.Box(ww, wh), {
+    density: 36,
+    friction: 0.7,
+    restitution: 0.05,
+    filterGroupIndex: -3,
+  });
+  trebWorld.createJoint(new planck.RevoluteJoint({
+    bodyA: arm,
+    bodyB: weight,
+    localAnchorA: V(-TREB_ARM_SHORT, 0),
+    localAnchorB: V(0, wh + 0.06),
+    collideConnected: false,
+  }));
+
+  const pinA = trebPin(arm, TREB_ARM_LONG, 0.03);
+  const pinB = trebPin(arm, TREB_ARM_LONG + 0.12, -0.04);
+  const a = pinWorld(pinA);
+  const b = pinWorld(pinB);
+  const pocket = {
+    x: a.x + Math.cos(TREB_COCKED) * 1.35,
+    y: Math.max(0.42, a.y + Math.sin(TREB_COCKED) * 1.35),
+  };
+  const slingStroke = [
+    a,
+    { x: (a.x + pocket.x) / 2, y: (a.y + pocket.y) / 2 },
+    { x: pocket.x - 0.12, y: pocket.y - 0.06 },
+    { x: pocket.x + 0.16, y: pocket.y - 0.04 },
+    { x: pocket.x + 0.1, y: pocket.y + TREB_BALL_R * 0.55 },
+    { x: (b.x + pocket.x) / 2, y: (b.y + pocket.y) / 2 },
+    b,
+  ];
+  const sling = buildRope(trebWorld, pinA, pinB, slingStroke, null);
+  if (sling) sling.fixedPins = true;
+  const ball = trebWorld.createDynamicBody({
+    position: V(pocket.x, pocket.y + TREB_BALL_R),
+    bullet: true,
+    linearDamping: 0.01,
+    angularDamping: 0.02,
+  });
+  ball.createFixture(new planck.Circle(TREB_BALL_R), {
+    density: 3.2,
+    friction: 0.22,
+    restitution: 0.35,
+  });
+  const pouchJoints = [];
+  if (sling) {
+    const near = sling.bodies.map((body) => {
+      const p = body.getPosition();
+      return { body, d: Math.hypot(p.x - pocket.x, p.y - pocket.y) };
+    }).filter((rec) => rec.d < 0.7).sort((a, b) => a.d - b.d).slice(0, 3);
+    for (const rec of near) {
+      const p = rec.body.getPosition();
+      const j = trebWorld.createJoint(new planck.DistanceJoint({
+        bodyA: ball,
+        bodyB: rec.body,
+        localAnchorA: V(0, -TREB_BALL_R * 0.3),
+        localAnchorB: V(0, 0),
+        length: Math.max(0.16, Math.hypot(p.x - pocket.x, p.y - (pocket.y + TREB_BALL_R * 0.3))),
+        frequencyHz: 0,
+        dampingRatio: 0,
+        collideConnected: true,
+      }));
+      if (j) pouchJoints.push(j);
+    }
+  }
+
+  treb = {
+    frame,
+    arm,
+    weight,
+    sling,
+    ball,
+    holdJoint,
+    hookJoint: sling && sling.endJoints ? sling.endJoints[1] : null,
+    pouchJoints,
+    pinA,
+    pinB,
+    released: false,
+    hooked: true,
+    holdTimer: 0,
+    frozen: false,
+    armOff,
+    halfLen,
+    ww,
+    wh,
+    exploded: false,
+    maxBallX: ball.getPosition().x,
+    maxLive: sling ? 1 : 0,
+    bestOut: 0,
+  };
+}
+
+function releaseTrebuchet() {
+  if (!treb || !trebWorld || treb.released) return;
+  if (trebWorld.isLocked && trebWorld.isLocked()) return;
+  if (treb.holdJoint) {
+    trebWorld.destroyJoint(treb.holdJoint);
+    treb.holdJoint = null;
+  }
+  treb.released = true;
+  treb.arm.setAwake(true);
+  treb.weight.setAwake(true);
+  if (treb.ball) treb.ball.setAwake(true);
+}
+
+function slipTrebuchetHook() {
+  if (!treb || !treb.hooked || !trebWorld) return;
+  if (trebWorld.isLocked && trebWorld.isLocked()) return;
+  if (treb.hookJoint) {
+    trebWorld.destroyJoint(treb.hookJoint);
+    treb.hookJoint = null;
+  }
+  if (treb.sling && treb.sling.endJoints) treb.sling.endJoints[1] = null;
+  if (treb.sling) {
+    treb.sling.pinB = null;
+    if (treb.sling.spanJoint) {
+      trebWorld.destroyJoint(treb.sling.spanJoint);
+      treb.sling.spanJoint = null;
+    }
+  }
+  if (treb.pouchJoints) {
+    for (const j of treb.pouchJoints) {
+      if (j) trebWorld.destroyJoint(j);
+    }
+    treb.pouchJoints = [];
+  }
+  if (treb.ball) {
+    for (let f = treb.ball.getFixtureList(); f; f = f.getNext()) {
+      const filter = f.getFilterData ? f.getFilterData() : { groupIndex: 0, categoryBits: 1, maskBits: 0xffff };
+      filter.groupIndex = -2;
+      if (f.setFilterData) f.setFilterData(filter);
+    }
+  }
+  const tip = treb.arm ? treb.arm.getWorldPoint(V(TREB_ARM_LONG, 0)) : { x: 0, y: 0 };
+  const bp = treb.ball ? treb.ball.getPosition() : { x: 0, y: 0 };
+  const bv = treb.ball ? treb.ball.getLinearVelocity() : { x: 0, y: 0 };
+  treb.slipAng = treb.arm ? treb.arm.getAngle() : 0;
+  treb.slip = { x: bp.x, y: bp.y, vx: bv.x, vy: bv.y, tipX: tip.x, tipY: tip.y };
+  treb.hooked = false;
+}
+
+function onTrebuchetClick() {
+  ensureTrebuchet();
+  if (!treb) return;
+  if (!treb.released) releaseTrebuchet();
+  else resetTrebuchet();
+}
+
+function stepTrebuchet(dt) {
+  if (!trebWorld || !treb || treb.frozen) return;
+  if (!treb.released) {
+    treb.holdTimer += dt;
+    if (treb.holdTimer >= TREB_HOLD_DELAY) releaseTrebuchet();
+  }
+  if (treb.released && treb.hooked) {
+    let ang = treb.arm.getAngle();
+    while (ang > Math.PI) ang -= Math.PI * 2;
+    while (ang < -Math.PI) ang += Math.PI * 2;
+    const bv = treb.ball.getLinearVelocity();
+    if (bv.x > treb.bestOut) treb.bestOut = bv.x;
+    const pastPeak = treb.bestOut > 4 && bv.x < treb.bestOut * 0.9 && bv.x > 2;
+    if (ang >= 0.05 && pastPeak) slipTrebuchetHook();
+    else if (ang >= TREB_RELEASE_ANG) slipTrebuchetHook();
+  }
+  trebWorld.step(dt, 20, 16);
+  if (treb.sling) {
+    tightenRopeDraw(treb.sling);
+    limitRopeChord(treb.sling);
+    scaleRopeToRest(treb.sling);
+    const live = ropeChainLength(treb.sling);
+    if (treb.sling.restLength) treb.maxLive = Math.max(treb.maxLive, live / treb.sling.restLength);
+  }
+  if (treb.ball) {
+    const p = treb.ball.getPosition();
+    treb.maxBallX = Math.max(treb.maxBallX, p.x);
+  }
+  if (![treb.arm, treb.weight, treb.ball].every(trebFinite)) treb.exploded = true;
+}
+
+function trebuchetLayout() {
+  ensureTrebuchet();
+  const frame = mapFrame();
+  const band = frame.cradle;
+  const worldW = 24;
+  const worldH = 9.4;
+  const scale = Math.max(5, Math.min((band.w - 16) / worldW, (band.h - 36) / worldH));
+  return {
+    frame,
+    band,
+    scale,
+    originX: band.x + 10 + 3.2 * scale,
+    originY: band.y + band.h - 10,
+  };
+}
+
+function trebToScreen(x, y, lay) {
+  const box = lay || trebuchetLayout();
+  return { x: box.originX + x * box.scale, y: box.originY - y * box.scale };
+}
+
+function fillTrebPoly(pts, lay, fill, stroke, width) {
+  if (!pts || pts.length < 2) return;
+  ctx.beginPath();
+  const s0 = trebToScreen(pts[0].x, pts[0].y, lay);
+  ctx.moveTo(s0.x, s0.y);
+  for (let i = 1; i < pts.length; i++) {
+    const s = trebToScreen(pts[i].x, pts[i].y, lay);
+    ctx.lineTo(s.x, s.y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke || "#5c4632";
+  ctx.lineWidth = width || 1.5;
+  ctx.stroke();
+}
+
+function trebBoxPts(body, hx, hy, ox, oy, ang) {
+  const ca = Math.cos(ang || 0);
+  const sa = Math.sin(ang || 0);
+  const corners = [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+  return corners.map(([x, y]) => {
+    const lx = ox + x * ca - y * sa;
+    const ly = oy + x * sa + y * ca;
+    const p = body.getWorldPoint(V(lx, ly));
+    return { x: p.x, y: p.y };
+  });
+}
+
+function drawMapDemoToggle(band) {
+  const x = band.x + band.w - 156;
+  const y = band.y + 5;
+  label("Pendel", x + 4, y, 14, mapDemo === "cradle" ? "#3a2a1c" : "#8a7b64");
+  label("Tribok", x + 78, y, 14, mapDemo === "trebuchet" ? "#3a2a1c" : "#8a7b64");
+}
+
+function drawTrebuchet() {
+  const lay = trebuchetLayout();
+  const band = lay.band;
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.fillStyle = "rgba(255,252,240,0.55)";
+  ctx.fill();
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  const hint = !treb || !treb.released ? "Klick: Haltepin lösen" : "Klick: neu spannen";
+  label(hint, band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
+  drawMapDemoToggle(band);
+  if (!treb) return;
+  ctx.save();
+  ctx.beginPath();
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.clip();
+  const g0 = trebToScreen(-8, 0, lay);
+  const g1 = trebToScreen(20, 0, lay);
+  ctx.strokeStyle = "#d7c39a";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(g0.x, g0.y);
+  ctx.lineTo(g1.x, g1.y);
+  ctx.stroke();
+  fillTrebPoly(trebBoxPts(treb.frame, 2.4, 0.16, 0, 0.16, 0), lay, MAT.wood, "#5c4632");
+  fillTrebPoly(trebBoxPts(treb.frame, 0.16, TREB_PIVOT_Y / 2, 0, TREB_PIVOT_Y / 2, 0), lay, MAT.wood, "#5c4632");
+  fillTrebPoly(trebBoxPts(treb.frame, 0.14, 2.4, -1.15, 2.0, 0.45), lay, MAT.wood, "#5c4632");
+  fillTrebPoly(trebBoxPts(treb.frame, 0.14, 2.4, 1.15, 2.0, -0.45), lay, MAT.wood, "#5c4632");
+  fillTrebPoly(trebBoxPts(treb.arm, treb.halfLen, TREB_ARM_THICK, treb.armOff, 0, 0), lay, MAT.wood, "#5c4632", 2);
+  fillTrebPoly(trebBoxPts(treb.weight, treb.ww, treb.wh, 0, 0, 0), lay, MAT.wood, "#5c4632", 2);
+  if (treb.sling && treb.sling.bodies) {
+    ctx.strokeStyle = MAT.hemp;
+    ctx.lineWidth = Math.max(2, 0.16 * lay.scale);
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    treb.sling.bodies.forEach((body, i) => {
+      if (!body || (typeof body.isValid === "function" && !body.isValid())) return;
+      const p = body.getPosition();
+      const s = trebToScreen(p.x, p.y, lay);
+      if (i === 0) ctx.moveTo(s.x, s.y);
+      else ctx.lineTo(s.x, s.y);
+    });
+    ctx.stroke();
+  }
+  if (treb.holdJoint) {
+    const tip = treb.arm.getWorldPoint(V(TREB_ARM_LONG * 0.35, 0));
+    const s = trebToScreen(tip.x, tip.y, lay);
+    ctx.fillStyle = MAT.steel;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, Math.max(3, 0.08 * lay.scale), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const bp = treb.ball.getPosition();
+  const bs = trebToScreen(bp.x, bp.y, lay);
+  const rad = Math.max(4, TREB_BALL_R * lay.scale);
+  ctx.beginPath();
+  ctx.arc(bs.x, bs.y, rad, 0, Math.PI * 2);
+  ctx.fillStyle = MAT.steel;
+  ctx.fill();
+  ctx.strokeStyle = "#5a616a";
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  drawSteelMark(bs.x, bs.y, rad, treb.ball.getAngle(), false);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(bs.x, bs.y, rad, 0, Math.PI * 2);
+  ctx.clip();
+  fillSteelHighlight(bs.x - rad * 0.32, bs.y - rad * 0.35, rad);
+  ctx.restore();
+  const pivot = trebToScreen(0, TREB_PIVOT_Y, lay);
+  ctx.fillStyle = "#5c4632";
+  ctx.beginPath();
+  ctx.arc(pivot.x, pivot.y, Math.max(3, 0.1 * lay.scale), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function renderMap() {
   const frame = mapFrame();
   label("Crayon", frame.margin, frame.titleY, frame.titleSize);
@@ -4255,7 +4678,8 @@ function renderMap() {
     label("Male die Welt. Die Spielkugel muss jeden Stern berühren.", frame.margin, frame.subY, frame.titleSize > 40 ? 20 : 16, "#5c4632");
   }
   label("Sterne " + starCount() + " / " + ORDER.length, frame.margin, frame.starY, 18, "#8a5a20");
-  drawCradle();
+  if (mapDemo === "trebuchet") drawTrebuchet();
+  else drawCradle();
   const owned = starCount();
   ISLANDS.forEach((island, i) => {
     const col = i % frame.cols;
@@ -4343,6 +4767,7 @@ function showMap() {
   world = null;
   confetti = [];
   ensureCradle();
+  if (mapDemo === "trebuchet") ensureTrebuchet();
 }
 
 function freshDoc() {
@@ -4558,6 +4983,17 @@ function onPointerDown(e) {
   }
   if (mode === "help") return;
   if (mode === "map") {
+    const tog = mapDemoToggleAt(e.clientX, e.clientY);
+    if (tog) {
+      setMapDemo(tog);
+      pointer = { id: e.pointerId, ui: true };
+      return;
+    }
+    if (mapDemo === "trebuchet" && mapDemoBandHit(e.clientX, e.clientY)) {
+      onTrebuchetClick();
+      pointer = { id: e.pointerId, ui: true };
+      return;
+    }
     const rec = cradleBallAt(e.clientX, e.clientY);
     if (rec && beginCradleDrag(rec)) {
       cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
@@ -4812,6 +5248,13 @@ function boot() {
       commitStroke(ring(6.2, 3.6, 1.05, 28));
       commitStroke([{ x: 8.8, y: 1.38 }, { x: 11.0, y: 3.3 }]);
       for (let i = 0; i < 100; i++) step(1 / 60);
+    } else if (id === "trebuchet") {
+      showMap();
+      setMapDemo("trebuchet");
+      releaseTrebuchet();
+      for (let i = 0; i < 200 && treb && treb.hooked; i++) stepTrebuchet(1 / 60);
+      for (let i = 0; i < 48; i++) stepTrebuchet(1 / 60);
+      if (treb) treb.frozen = true;
     } else if (LEVELS[id]) buildLevel(LEVELS[id]);
     else showMap();
   } else showMap();
@@ -4824,7 +5267,7 @@ function boot() {
       engageGrab(at);
     }
     if (mode === "play") advanceFixed(playClock, dt, step);
-    else if (mode === "map") advanceFixed(mapClock, dt, stepCradle);
+    else if (mode === "map") advanceFixed(mapClock, dt, mapDemo === "trebuchet" ? stepTrebuchet : stepCradle);
     render();
     requestAnimationFrame(frame);
   }
@@ -5605,6 +6048,30 @@ function runTests() {
     check("cradle middle balls stay calm for 10 half swings", swingWins.length >= 10 && swingWorst < 0.1);
     lines.push("INFO cradle mid/outer worst " + swingWorst.toFixed(3) + " over " + Math.min(10, swingWins.length) + " half swings");
     lines.push("INFO cradle swing far " + farSwing.toFixed(2) + " mid " + midSwing.toFixed(2) + " overlap " + cradleOverlap.toFixed(3));
+
+    resetTrebuchet();
+    const trebStart = treb.ball.getPosition();
+    const trebStartX = trebStart.x;
+    const trebRest = treb.sling ? treb.sling.restLength : 0;
+    for (let i = 0; i < 18; i++) stepTrebuchet(1 / 60);
+    check("trebuchet hold pin stays until release", !!treb && !treb.released && !!treb.holdJoint);
+    releaseTrebuchet();
+    let trebMaxY = trebStart.y;
+    let trebFinalAng = 0;
+    for (let i = 0; i < 360; i++) {
+      stepTrebuchet(1 / 60);
+      if (treb && treb.ball) trebMaxY = Math.max(trebMaxY, treb.ball.getPosition().y);
+      if (treb && treb.arm) trebFinalAng = treb.arm.getAngle();
+    }
+    const trebFly = treb ? treb.maxBallX - trebStartX : 0;
+    const trebLive = treb ? treb.maxLive : 99;
+    const trebOk = treb && !treb.exploded && trebFinite(treb.ball) && trebFinite(treb.arm);
+    const trebEnd = treb && treb.ball ? treb.ball.getPosition() : { x: 0, y: 0 };
+    const sl = treb && treb.slip ? treb.slip : { x: 0, y: 0, vx: 0, vy: 0 };
+    lines.push("INFO trebuchet fly " + trebFly.toFixed(2) + " live " + trebLive.toFixed(3) + " maxY " + trebMaxY.toFixed(2) + " end " + trebEnd.x.toFixed(2) + "," + trebEnd.y.toFixed(2) + " vSlip " + sl.vx.toFixed(2) + "," + sl.vy.toFixed(2));
+    check("trebuchet ball flies far after release", trebFly > 8);
+    check("trebuchet sling stays within 102 percent of its length", trebLive <= 1.02);
+    check("trebuchet does not explode", trebOk);
 
     {
       // Verankern: kurzer gerader Zug Boden -> Körper, Ketten nur vom Boden aus.
