@@ -739,12 +739,15 @@ function straightenOpen(pts) {
 // der Mittelpunkt ist der Flächenschwerpunkt. Hauptkriterium: relative
 // Radiusstreuung std(r)/mean(r) unter CIRCLE_MAX_CV. Dazu die Eckenregel,
 // damit gleichmäßige Vielecke und Felsbrocken eckig bleiben.
-// Mit Geodreieck: Ellipsen-Fit über die Hauptachsen (Kovarianz/PCA der
-// abgetasteten Umrandung). Residuum ist die relative Streuung der
-// elliptischen Radien (CV-artig) unter ELLIPSE_MAX_CV. Fast kreisförmige
-// Achsen (b/a >= ELLIPSE_CIRCLE_RATIO) bleiben ein Kreis. Rechte Winkel
-// (Rechtecke, rechtwinklige Dreiecke) bleiben Vielecke. Ohne Geodreieck
-// nur Kreise, Felsbrocken bleiben eckig.
+// Mit Geodreieck: Während des Zeichnens gibt es keinen Raster-Snap, die
+// Vorschau bleibt der Rohzug. Nach dem Loslassen wird zuerst der Ellipsen-
+// bzw. Kreis-Fit auf den Rohpunkten geprüft (Hauptachsen per Kovarianz/PCA).
+// Residuum ist die relative Streuung der elliptischen Radien (CV-artig)
+// unter ELLIPSE_MAX_CV. Fast kreisförmige Achsen (b/a >= ELLIPSE_CIRCLE_RATIO)
+// bleiben ein Kreis. Erst wenn keine Ellipse/kein Kreis entsteht, rastet
+// die fertige Form auf das Raster ein (Geraden, rechte Winkel). 3- und
+// 4-Ecke nach dieser Aufräumung bleiben Vielecke. Ohne Geodreieck nur
+// Kreise, Felsbrocken bleiben eckig.
 const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an krakeligen Kreisen und 1:2-Ovalen
 const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
 const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
@@ -1256,7 +1259,6 @@ function tryMakeCircle(pts) {
   if (strokeSnaps()) {
     const ring = closedRing(pts);
     if (!ring || ring.length < tuneCode("minPts", CIRCLE_MIN_PTS) || Math.abs(signedArea(ring)) < 0.05) return null;
-    if (hasRightAngle(ring)) return null;
     const ell = ellipseFromPoints(ring);
     if (!ell || ell.cv >= tuneCode("ellMaxCv", ELLIPSE_MAX_CV)) return null;
     if (ell.b / ell.a >= tuneCode("ellCircleRatio", ELLIPSE_CIRCLE_RATIO)) {
@@ -1355,6 +1357,26 @@ function snapDrawPoint(p) {
     x: Math.round(p.x / GEO_GRID) * GEO_GRID,
     y: Math.round(p.y / GEO_GRID) * GEO_GRID,
   };
+}
+
+function snapStrokePoints(raw) {
+  if (!raw || !raw.length) return [];
+  const out = [snapDrawPoint(raw[0])];
+  for (let i = 1; i < raw.length; i++) {
+    const ink = snapDrawPoint(raw[i]);
+    const last = out[out.length - 1];
+    if (Math.hypot(ink.x - last.x, ink.y - last.y) > 0.04) out.push({ x: ink.x, y: ink.y });
+  }
+  return out;
+}
+
+function geoKeepsPolygon(pts) {
+  if (!pts || pts.length < 3) return false;
+  const simple = dedupe(simplify(pts, tuneCode("simplify", 0.045)));
+  const ring = closedRing(simple);
+  if (!ring || ring.length < 3 || Math.abs(signedArea(ring)) < 0.05) return false;
+  const neat = regularizeClosed(ring);
+  return !!(neat && (neat.length === 3 || neat.length === 4));
 }
 
 function strokeSnaps() {
@@ -1900,24 +1922,22 @@ function noteShape(pts) {
   if (minY < by - 0.5) stats.drewUnder = true;
 }
 
-function commitStroke(rawPts, color) {
-  const result = commitStrokeApply(rawPts, color);
-  if (tuneOn) noteTuneResult(rawPts, result);
+function commitStroke(drawnPts, color, rawInk) {
+  const result = commitStrokeApply(drawnPts, rawInk);
+  if (tuneOn) noteTuneResult((rawInk && rawInk.length >= 2) ? rawInk : drawnPts, result);
   return result;
 }
 
-function commitStrokeApply(rawPts) {
-  if (won || !world) return null;
-  let pts = simplify(rawPts, tuneCode("simplify", 0.045));
-  pts = dedupe(pts);
-  if (pts.length < 2) return null;
+function prepareStroke(src) {
+  let pts = dedupe(simplify(src, tuneCode("simplify", 0.045)));
+  if (pts.length < 2) return { pts, closed: false };
   const closed = isClosedStroke(pts);
-  if (closed) {
-    pts = dedupe(pts.slice(0, -1));
-    if (dist(pts[0], pts[pts.length - 1]) > 0.02) {
-      /* ring already open */
-    }
-  }
+  if (closed) pts = dedupe(pts.slice(0, -1));
+  return { pts, closed };
+}
+
+function maybeSmallBody(pts, closed) {
+  if (pts.length < 4) return null;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of pts) {
     minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
@@ -1925,27 +1945,52 @@ function commitStrokeApply(rawPts) {
   }
   const bw = maxX - minX;
   const bh = maxY - minY;
-  const small = Math.max(bw, bh) < 0.62 && pts.length >= 4 && Math.min(bw, bh) > 0.05;
-  if (small && (closed || dist(pts[0], pts[pts.length - 1]) < 0.4)) {
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    const host = hostAt(cx, cy);
-    if (host && bodyMeta.get(host) && bodyMeta.get(host).kind === "ball") {
-      /* pins are not allowed on the quest ball */
-    } else if (host) {
-      stats.userPins += 1;
-      return rememberPin(cx, cy, host, true);
-    }
-    const r = clamp(Math.max(bw, bh) * 0.5, 0.12, 0.34);
-    return spawnBlob(cx, cy, r);
+  const small = Math.max(bw, bh) < 0.62 && Math.min(bw, bh) > 0.05;
+  if (!small || !(closed || dist(pts[0], pts[pts.length - 1]) < 0.4)) return null;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const host = hostAt(cx, cy);
+  if (host && bodyMeta.get(host) && bodyMeta.get(host).kind === "ball") {
+    /* pins are not allowed on the quest ball */
+  } else if (host) {
+    stats.userPins += 1;
+    return rememberPin(cx, cy, host, true);
   }
-  // Rundheit am Originalzug prüfen: simplify() macht aus einem Kreis
-  // sonst ein grobes Vieleck und würde echte Kreise verwerfen.
-  if (closed || dist(pts[0], pts[pts.length - 1]) < tuneCode("close", CIRCLE_CLOSE)) {
-    const fit = tryMakeCircle(dedupe(rawPts));
-    if (fit) {
-      if (fit.kind === "ellipse") return spawnEllipse(fit.x, fit.y, fit.a, fit.b, fit.angle);
-      return spawnRoller(fit.x, fit.y, fit.r);
+  const r = clamp(Math.max(bw, bh) * 0.5, 0.12, 0.34);
+  return spawnBlob(cx, cy, r);
+}
+
+function commitStrokeApply(drawnPts, rawInk) {
+  if (won || !world) return null;
+  const ink = (rawInk && rawInk.length >= 2) ? rawInk : drawnPts;
+  if (!ink || ink.length < 2) return null;
+  let { pts, closed } = prepareStroke(ink);
+  if (pts.length < 2) return null;
+  const small = maybeSmallBody(pts, closed);
+  if (small) return small;
+  const closeTol = tuneCode("close", CIRCLE_CLOSE);
+  const inkOpen = dist(ink[0], ink[ink.length - 1]);
+  const ptsOpen = dist(pts[0], pts[pts.length - 1]);
+  if (closed || inkOpen < closeTol || ptsOpen < closeTol) {
+    // Polygon-Sperre auf dem Rohzug, nicht auf dem gerasterten Strich:
+    // eine flache Ellipse würde nach dem Snap wie ein Rechteck wirken.
+    if (!(strokeSnaps() && geoKeepsPolygon(ink))) {
+      const fit = tryMakeCircle(dedupe(ink));
+      if (fit) {
+        if (fit.kind === "ellipse") return spawnEllipse(fit.x, fit.y, fit.a, fit.b, fit.angle);
+        return spawnRoller(fit.x, fit.y, fit.r);
+      }
+    }
+  }
+  if (strokeSnaps()) {
+    const snapped = snapStrokePoints(ink);
+    if (snapped.length >= 2) {
+      const prep = prepareStroke(snapped);
+      pts = prep.pts;
+      closed = prep.closed;
+      if (pts.length < 2) return null;
+      const snappedSmall = maybeSmallBody(pts, closed);
+      if (snappedSmall) return snappedSmall;
     }
   }
   if (!closed) {
@@ -3790,7 +3835,7 @@ function renderHelp() {
     "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
     "Elegant: genau ein Gegenstand, ohne die Kugel anzuklicken. Nägel zählen nicht.",
     "Old School: kein Schubs, kein eigener Nagel, kein Seil, nichts unter der Kugel.",
-    "Das Geodreieck oben rechts lässt den Stift auf ein Raster einrasten.",
+    "Das Geodreieck oben rechts lässt den Strich frei; erst nach dem Loslassen rastet die Form ein. Ellipsen und Kreise werden vorher erkannt.",
     "Shift+Rad zoomt, mittlere Taste verschiebt das Blatt.",
     "R setzt das Level zurück. M oder Esc öffnet die Karte.",
   ];
@@ -4038,7 +4083,7 @@ function onPointerDown(e) {
   let kind = mode === "play" ? pressKind(w.x, w.y) : "draw";
   const nailHit = mode === "play" && kind !== "nudge" ? nearestPin(w.x, w.y, NAIL_HIT) : null;
   if (nailHit && kind === "drag") kind = "draw";
-  const ink = kind !== "drag" && strokeSnaps() ? snapDrawPoint(w) : w;
+  const ink = w;
   pointer = {
     id: e.pointerId,
     x: e.clientX,
@@ -4111,7 +4156,7 @@ function onPointerMove(e) {
     return;
   }
   if (!pointer.pts) return;
-  const ink = strokeSnaps() ? snapDrawPoint(w) : w;
+  const ink = w;
   const last = pointer.pts[pointer.pts.length - 1];
   if (Math.hypot(ink.x - last.x, ink.y - last.y) > 0.04) {
     pointer.pts.push({ x: ink.x, y: ink.y });
@@ -4161,7 +4206,9 @@ function onPointerUp(e) {
   }
   if (mode === "play") finishPlayStroke(current.trail, current.pts);
   if (mode === "editor" && (editorTool === "terrain" || editorTool === "decor")) {
-    const shaped = editorTool === "terrain" ? tidyTerrain(current.pts) : current.pts;
+    let src = current.pts;
+    if (strokeSnaps()) src = snapStrokePoints(src);
+    const shaped = editorTool === "terrain" ? tidyTerrain(src) : src;
     editorDoc.strokes.push({
       kind: editorTool === "decor" ? "decor" : "terrain",
       color: editorTool === "decor" ? MAT.decor : MAT.terrain,
@@ -4173,7 +4220,7 @@ function onPointerUp(e) {
 function finishPlayStroke(trail, pts) {
   const gesture = tryAnchorGesture(trail);
   if (gesture) return gesture;
-  return commitStroke(pts || trail);
+  return commitStroke(pts || trail, null, trail || pts);
 }
 
 // Planck skaliert den gespeicherten Kontakt- und Gelenkimpuls beim Warmstart mit
@@ -5313,6 +5360,141 @@ function runTests() {
     const lieW = geoEllLie ? Math.abs(geoEllLie.body.getAngularVelocity()) : 99;
     const lieVy = geoEllLie ? Math.abs(geoEllLie.body.getLinearVelocity().y) : 99;
     check("lying ellipse settles on its long side", !!geoEllLie && liePos.y < 1.3 + (geoEllLie.a + geoEllLie.b) * 0.5 && liePos.y > 1.3 + geoEllLie.b * 0.55 && ellipseAxisDiff(lieAng, 0) < 25 * Math.PI / 180 && lieW < 0.45 && lieVy < 0.45);
+
+    function handEllipse(cx, cy, ra, rb, rot, n, wob, seed, gap) {
+      const pts = [];
+      const ca = Math.cos(rot);
+      const sa = Math.sin(rot);
+      let s = ((seed || 1) * 1103515245 + 12345) >>> 0;
+      const rnd = () => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return s / 0x100000000 - 0.5;
+      };
+      const count = n || 48;
+      const last = gap ? count - 1 : count;
+      for (let i = 0; i <= last; i++) {
+        const t = ((i + rnd() * 0.35) / count) * Math.PI * 2;
+        const u = ra * Math.cos(t) * (1 + rnd() * 2 * (wob || 0));
+        const v = rb * Math.sin(t) * (1 + rnd() * 2 * (wob || 0));
+        pts.push({
+          x: cx + u * ca - v * sa + rnd() * (wob || 0) * ra * 0.4,
+          y: cy + u * sa + v * ca + rnd() * (wob || 0) * ra * 0.4,
+        });
+      }
+      return pts;
+    }
+    function playDrawWorld(worldPts, pointerId) {
+      const s0 = worldToScreen(worldPts[0].x, worldPts[0].y);
+      onPointerDown({ button: 0, clientX: s0.x, clientY: s0.y, pointerId });
+      for (let i = 1; i < worldPts.length; i++) {
+        const sc = worldToScreen(worldPts[i].x, worldPts[i].y);
+        onPointerMove({ clientX: sc.x, clientY: sc.y, pointerId });
+      }
+      const last = worldPts[worldPts.length - 1];
+      const sN = worldToScreen(last.x, last.y);
+      onPointerUp({ button: 0, clientX: sN.x, clientY: sN.y, pointerId });
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    const previewStart = worldToScreen(8.21, 4.19);
+    onPointerDown({ button: 0, clientX: previewStart.x, clientY: previewStart.y, pointerId: 701 });
+    check("geodreieck first ink stays off the grid", !!pointer && pointer.pts && pointer.pts.length === 1 && Math.abs(pointer.pts[0].x - 8.21) < 0.03 && Math.abs(pointer.pts[0].y - 4.19) < 0.03);
+    const previewNext = worldToScreen(8.74, 4.74);
+    onPointerMove({ clientX: previewNext.x, clientY: previewNext.y, pointerId: 701 });
+    check("geodreieck preview stays unsnapped while drawing", !!pointer && pointer.pts.some((p) => Math.abs(p.x - 8.74) < 0.05 && Math.abs(p.y - 4.74) < 0.05));
+    onPointerUp({ button: 0, clientX: previewNext.x, clientY: previewNext.y, pointerId: 701 });
+    geoSnap = false;
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    const hand12 = handEllipse(16, 7, 2.0, 1.0, 30 * Math.PI / 180, 48, 0.05, 7, false);
+    const snapped12 = snapStrokePoints(hand12);
+    finishPlayStroke(hand12, hand12);
+    geoSnap = false;
+    const geoHand12 = drawings.find((d) => d.kind === "ellipse");
+    check("grid-snapped hand oval would have right angles", hasRightAngle(closedRing(snapped12) || snapped12));
+    check("hand-drawn 1:2 oval with geodreieck is an ellipse", !!geoHand12 && Math.abs(geoHand12.a - 2) < 0.35 && Math.abs(geoHand12.b - 1) < 0.3 && ellipseAxisDiff(geoHand12.angle, 30 * Math.PI / 180) < 18 * Math.PI / 180);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    playDrawWorld(handEllipse(16, 7, 2.1, 1.4, 0, 56, 0.06, 11, false), 702);
+    geoSnap = false;
+    const geoHand15 = drawings.find((d) => d.kind === "ellipse");
+    check("pointer-drawn 1:1.5 oval with geodreieck is an ellipse", !!geoHand15 && geoHand15.a / geoHand15.b > 1.2 && geoHand15.a / geoHand15.b < 1.9);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    finishPlayStroke(handEllipse(16, 7, 2.1, 0.7, 20 * Math.PI / 180, 36, 0.06, 19, true), handEllipse(16, 7, 2.1, 0.7, 20 * Math.PI / 180, 36, 0.06, 19, true));
+    geoSnap = false;
+    check("hand-drawn 1:3 oval with a gap is an ellipse", !!drawings.find((d) => d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    finishPlayStroke(handEllipse(16, 7, 1.6, 0.8, 55 * Math.PI / 180, 20, 0.07, 23, false), handEllipse(16, 7, 1.6, 0.8, 55 * Math.PI / 180, 20, 0.07, 23, false));
+    geoSnap = false;
+    check("sparse jittered oval with geodreieck is an ellipse", !!drawings.find((d) => d.kind === "ellipse"));
+
+    let geoHits = 0;
+    let geoTotal = 0;
+    const geoCases = [
+      [1.8, 1.2, 0, 64, 0.04, 1, false],
+      [2.0, 1.0, 15, 48, 0.05, 2, false],
+      [2.1, 0.7, 0, 40, 0.05, 3, false],
+      [1.6, 0.8, 40, 28, 0.07, 4, false],
+      [2.4, 1.2, 70, 80, 0.04, 5, false],
+      [1.5, 1.0, 10, 22, 0.06, 6, false],
+      [2.0, 1.0, 30, 16, 0.05, 7, false],
+      [2.2, 0.9, 55, 36, 0.08, 8, true],
+      [1.7, 1.1, 25, 52, 0.06, 9, false],
+      [2.0, 0.7, 5, 44, 0.05, 10, true],
+      [1.4, 0.9, 65, 30, 0.07, 11, false],
+      [2.5, 1.0, 45, 60, 0.05, 12, false],
+    ];
+    for (const [ra, rb, deg, n, wob, seed, gap] of geoCases) {
+      geoTotal += 1;
+      buildLevel(LEVELS["ein-klotz"]);
+      geoSnap = true;
+      const raw = handEllipse(16, 7, ra, rb, deg * Math.PI / 180, n, wob, seed, gap);
+      finishPlayStroke(raw, raw);
+      geoSnap = false;
+      if (drawings.some((d) => d.kind === "ellipse" || d.kind === "roller")) geoHits += 1;
+    }
+    lines.push("INFO geo hand-ellipse " + geoHits + "/" + geoTotal);
+    check("most hand-drawn ovals with geodreieck become ellipses", geoHits >= 10);
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    finishPlayStroke([
+      { x: 8.15, y: 4.12 }, { x: 9.3, y: 4.08 }, { x: 10.7, y: 3.95 }, { x: 11.9, y: 4.18 },
+      { x: 12.08, y: 5.1 }, { x: 11.95, y: 6.2 }, { x: 12.1, y: 6.92 },
+      { x: 10.8, y: 7.08 }, { x: 9.2, y: 6.9 }, { x: 8.08, y: 7.05 },
+      { x: 7.92, y: 5.8 }, { x: 8.1, y: 4.9 }, { x: 8.15, y: 4.12 },
+    ], [
+      { x: 8.15, y: 4.12 }, { x: 9.3, y: 4.08 }, { x: 10.7, y: 3.95 }, { x: 11.9, y: 4.18 },
+      { x: 12.08, y: 5.1 }, { x: 11.95, y: 6.2 }, { x: 12.1, y: 6.92 },
+      { x: 10.8, y: 7.08 }, { x: 9.2, y: 6.9 }, { x: 8.08, y: 7.05 },
+      { x: 7.92, y: 5.8 }, { x: 8.1, y: 4.9 }, { x: 8.15, y: 4.12 },
+    ]);
+    geoSnap = false;
+    const geoWobRect = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const geoWobAng = geoWobRect ? interiorAngles(geoWobRect.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    check("geodreieck wobbly rectangle stays a polygon", !!geoWobRect && geoWobRect.kind === "solid" && geoWobRect.meta.outline.local.length === 4 && geoWobAng.every((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    finishPlayStroke([
+      { x: 8.12, y: 4.08 }, { x: 10.9, y: 4.15 }, { x: 13.88, y: 4.18 },
+      { x: 12.1, y: 6.3 }, { x: 10.25, y: 8.62 },
+      { x: 9.1, y: 6.2 }, { x: 8.12, y: 4.08 },
+    ], [
+      { x: 8.12, y: 4.08 }, { x: 10.9, y: 4.15 }, { x: 13.88, y: 4.18 },
+      { x: 12.1, y: 6.3 }, { x: 10.25, y: 8.62 },
+      { x: 9.1, y: 6.2 }, { x: 8.12, y: 4.08 },
+    ]);
+    geoSnap = false;
+    const geoWobTri = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("geodreieck non-right triangle stays a polygon", !!geoWobTri && geoWobTri.kind === "solid" && geoWobTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
 
     check("tune panel is absent during tests", !document.getElementById("tune-panel"));
     const tunePrevOn = tuneOn;
