@@ -32,6 +32,7 @@ const testlog = document.getElementById("testlog");
 
 let dpr = 1;
 let viewW = 800;
+let shotCaptions = null;
 let viewH = 450;
 const cam = { cx: 16, cy: 9, zoom: 1 };
 let geoSnap = false;
@@ -730,6 +731,233 @@ function squareNearRightCorners(pts) {
   return out;
 }
 
+function dirParallelAng(ax, ay, bx, by) {
+  const la = Math.hypot(ax, ay) || 1;
+  const lb = Math.hypot(bx, by) || 1;
+  let c = Math.abs((ax * bx + ay * by) / (la * lb));
+  c = Math.max(-1, Math.min(1, c));
+  return Math.acos(c);
+}
+
+function oppositeSidesParallel(pts, pair, tol) {
+  const a = pts[pair];
+  const b = pts[(pair + 1) % 4];
+  const c = pts[(pair + 2) % 4];
+  const d = pts[(pair + 3) % 4];
+  return dirParallelAng(b.x - a.x, b.y - a.y, d.x - c.x, d.y - c.y) <= tol;
+}
+
+function bothPairsParallel(pts, tol) {
+  return oppositeSidesParallel(pts, 0, tol) && oppositeSidesParallel(pts, 1, tol);
+}
+
+function quadSize(pts) {
+  const area = Math.abs(signedArea(pts));
+  const diag = Math.max(dist(pts[0], pts[2]), dist(pts[1], pts[3]));
+  return Math.max(Math.sqrt(Math.max(area, 0)), diag * 0.5, 0.4);
+}
+
+function cornerShift(src, dst) {
+  let max = 0;
+  for (let i = 0; i < 4; i++) {
+    const d = dist(src[i], dst[i]);
+    if (d > max) max = d;
+  }
+  return max;
+}
+
+function alignQuad(src, dst) {
+  const dccw = ensureCCW(dst.map((p) => ({ x: p.x, y: p.y })));
+  let best = dccw;
+  let bestE = Infinity;
+  for (let s = 0; s < 4; s++) {
+    const cand = [0, 1, 2, 3].map((i) => dccw[(s + i) % 4]);
+    const e = cornerShift(src, cand);
+    if (e < bestE) {
+      bestE = e;
+      best = cand;
+    }
+  }
+  return best;
+}
+
+function makeParallelogram(pts) {
+  const c = {
+    x: (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4,
+    y: (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4,
+  };
+  const s0x = ((pts[1].x - pts[0].x) + (pts[2].x - pts[3].x)) / 2;
+  const s0y = ((pts[1].y - pts[0].y) + (pts[2].y - pts[3].y)) / 2;
+  const s1x = ((pts[2].x - pts[1].x) + (pts[3].x - pts[0].x)) / 2;
+  const s1y = ((pts[2].y - pts[1].y) + (pts[3].y - pts[0].y)) / 2;
+  return [
+    { x: c.x - s0x / 2 - s1x / 2, y: c.y - s0y / 2 - s1y / 2 },
+    { x: c.x + s0x / 2 - s1x / 2, y: c.y + s0y / 2 - s1y / 2 },
+    { x: c.x + s0x / 2 + s1x / 2, y: c.y + s0y / 2 + s1y / 2 },
+    { x: c.x - s0x / 2 + s1x / 2, y: c.y - s0y / 2 + s1y / 2 },
+  ];
+}
+
+function makeRightTrapezoid(pts, i) {
+  const P0 = pts[i];
+  const P1 = pts[(i + 1) % 4];
+  const P2 = pts[(i + 2) % 4];
+  const P3 = pts[(i + 3) % 4];
+  const hx = P1.x - P0.x;
+  const hy = P1.y - P0.y;
+  const hlen = Math.hypot(hx, hy);
+  if (hlen < 0.08) return null;
+  const tx = -hy / hlen;
+  const ty = hx / hlen;
+  const s3 = (P3.x - P0.x) * tx + (P3.y - P0.y) * ty;
+  const s2 = (P2.x - P1.x) * tx + (P2.y - P1.y) * ty;
+  if (s3 * s2 < 0) return null;
+  if (Math.abs(s3) < 0.08 && Math.abs(s2) < 0.08) return null;
+  const out = [null, null, null, null];
+  out[i] = { x: P0.x, y: P0.y };
+  out[(i + 1) % 4] = { x: P1.x, y: P1.y };
+  out[(i + 2) % 4] = { x: P1.x + tx * s2, y: P1.y + ty * s2 };
+  out[(i + 3) % 4] = { x: P0.x + tx * s3, y: P0.y + ty * s3 };
+  if (!isConvex(out) || Math.abs(signedArea(out)) < 0.04) return null;
+  return out;
+}
+
+function makeIsoTrapezoid(pts, pair) {
+  const P = [0, 1, 2, 3].map((k) => pts[(pair + k) % 4]);
+  const b0x = P[1].x - P[0].x;
+  const b0y = P[1].y - P[0].y;
+  const b1x = P[2].x - P[3].x;
+  const b1y = P[2].y - P[3].y;
+  const l0 = Math.hypot(b0x, b0y);
+  const l1 = Math.hypot(b1x, b1y);
+  if (l0 < 0.08 || l1 < 0.08) return null;
+  let bx = b0x / l0 + b1x / l1;
+  let by = b0y / l0 + b1y / l1;
+  let bl = Math.hypot(bx, by);
+  if (bl < 1e-6) {
+    bx = b0x / l0;
+    by = b0y / l0;
+    bl = 1;
+  }
+  bx /= bl;
+  by /= bl;
+  const hx = -by;
+  const hy = bx;
+  const projB = (p) => p.x * bx + p.y * by;
+  const projH = (p) => p.x * hx + p.y * hy;
+  const hBot = 0.5 * (projH(P[0]) + projH(P[1]));
+  const hTop = 0.5 * (projH(P[2]) + projH(P[3]));
+  if (Math.abs(hTop - hBot) < 0.08) return null;
+  const midB = 0.25 * (projB(P[0]) + projB(P[1]) + projB(P[2]) + projB(P[3]));
+  const half0 = l0 / 2;
+  const half1 = l1 / 2;
+  const fromBH = (pb, ph) => ({ x: bx * pb + hx * ph, y: by * pb + hy * ph });
+  const flip = projB(P[0]) > projB(P[1]);
+  const Q0 = fromBH(midB + (flip ? half0 : -half0), hBot);
+  const Q1 = fromBH(midB + (flip ? -half0 : half0), hBot);
+  const Q2 = fromBH(midB + (flip ? -half1 : half1), hTop);
+  const Q3 = fromBH(midB + (flip ? half1 : -half1), hTop);
+  const out = [null, null, null, null];
+  out[pair] = Q0;
+  out[(pair + 1) % 4] = Q1;
+  out[(pair + 2) % 4] = Q2;
+  out[(pair + 3) % 4] = Q3;
+  if (!isConvex(out) || Math.abs(signedArea(out)) < 0.04) return null;
+  return out;
+}
+
+function fitRectangle(pts, raw, force) {
+  if (!force && !anglesNearRight(pts)) return null;
+  const box = orientedRect(pts, (force && raw && raw.length) ? raw : pts);
+  if (!box) return null;
+  const aligned = alignQuad(pts, box);
+  if (!isConvex(aligned)) return null;
+  return { kind: "rect", corners: aligned, error: cornerShift(pts, aligned) };
+}
+
+function fitRamp(pts, force) {
+  const tol = rightCornerTol();
+  const angs = interiorAngles(pts);
+  const cands = [];
+  for (let i = 0; i < 4; i++) {
+    const a0 = Math.abs(angs[i] - Math.PI / 2);
+    const a1 = Math.abs(angs[(i + 1) % 4] - Math.PI / 2);
+    if (!force && (a0 > tol || a1 > tol)) continue;
+    const built = makeRightTrapezoid(pts, i);
+    if (!built) continue;
+    cands.push({ kind: "ramp", corners: built, error: cornerShift(pts, built) });
+  }
+  if (!cands.length) return null;
+  cands.sort((a, b) => a.error - b.error);
+  return cands[0];
+}
+
+function fitParallelogram(pts, force) {
+  const tol = tuneCode("quadParallel", QUAD_PARALLEL);
+  if (!force && !bothPairsParallel(pts, tol)) return null;
+  const built = makeParallelogram(pts);
+  if (!built || !isConvex(built)) return null;
+  return { kind: "para", corners: built, error: cornerShift(pts, built) };
+}
+
+function fitIsoTrapezoid(pts, force) {
+  const parTol = tuneCode("quadParallel", QUAD_PARALLEL);
+  const symTol = tuneCode("quadSymmetry", QUAD_SYMMETRY);
+  const angs = interiorAngles(pts);
+  const cands = [];
+  for (let pair = 0; pair < 2; pair++) {
+    if (!force && !oppositeSidesParallel(pts, pair, parTol)) continue;
+    const dBot = Math.abs(angs[pair] - angs[(pair + 1) % 4]);
+    const dTop = Math.abs(angs[(pair + 2) % 4] - angs[(pair + 3) % 4]);
+    if (!force && Math.max(dBot, dTop) > symTol) continue;
+    const built = makeIsoTrapezoid(pts, pair);
+    if (!built) continue;
+    cands.push({ kind: "trap", corners: built, error: cornerShift(pts, built) });
+  }
+  if (!cands.length) return null;
+  cands.sort((a, b) => a.error - b.error);
+  return cands[0];
+}
+
+const QUAD_PRIORITY = { rect: 0, ramp: 1, para: 2, trap: 3, free: 4 };
+
+function pickQuadCandidate(list) {
+  const copy = list.slice();
+  copy.sort((a, b) => (QUAD_PRIORITY[a.kind] - QUAD_PRIORITY[b.kind]) || (a.error - b.error));
+  return copy[0];
+}
+
+function regularizeQuad(corners, rawPts, force) {
+  const src = ensureCCW(corners.map((p) => ({ x: p.x, y: p.y })));
+  if (src.length !== 4) return { kind: "free", corners: squareNearRightCorners(src), error: 0 };
+  const size = quadSize(src);
+  const maxShift = size * tuneCode("quadMaxShift", QUAD_MAX_SHIFT);
+  const cands = [];
+  const rect = fitRectangle(src, rawPts, false);
+  if (rect) cands.push(rect);
+  const ramp = fitRamp(src, false);
+  if (ramp) cands.push(ramp);
+  const para = fitParallelogram(src, false);
+  if (para) cands.push(para);
+  const trap = fitIsoTrapezoid(src, false);
+  if (trap) cands.push(trap);
+  const ok = cands.filter((c) => c.error <= maxShift);
+  if (ok.length) return pickQuadCandidate(ok);
+  if (force) {
+    const forced = [];
+    const rectF = fitRectangle(src, rawPts, true);
+    if (rectF) forced.push(rectF);
+    const rampF = fitRamp(src, true);
+    if (rampF) forced.push(rampF);
+    const paraF = fitParallelogram(src, true);
+    if (paraF) forced.push(paraF);
+    const trapF = fitIsoTrapezoid(src, true);
+    if (trapF) forced.push(trapF);
+    if (forced.length) return pickQuadCandidate(forced);
+  }
+  return { kind: "free", corners: squareNearRightCorners(src), error: 0 };
+}
+
 function cornerPeaks(pts, minDeg) {
   const ring = closedRing(pts);
   if (!ring || ring.length < 3) return [];
@@ -858,11 +1086,8 @@ function recognizePolygon(pts) {
   if (!edgesAreStraight(corners, ring)) return null;
   corners = ensureCCW(corners);
   if (corners.length === 3) return { kind: "tri", corners: ensureCCW(snapTriangle(corners)) };
-  if (anglesNearRight(corners)) {
-    const box = orientedRect(corners, ring);
-    if (box) return { kind: "quad", corners: ensureCCW(box) };
-  }
-  return { kind: "quad", corners: ensureCCW(squareNearRightCorners(corners)) };
+  const quad = regularizeQuad(corners, ring, strokeSnaps());
+  return { kind: "quad", quadKind: quad.kind, corners: ensureCCW(quad.corners) };
 }
 function snapPolygonPose(pts) {
   if (!strokeSnaps() || !pts || pts.length < 3) return pts;
@@ -890,11 +1115,10 @@ function regularizeClosed(pts) {
     const softer = pruneByTurn(shape, tuneCode("pruneSoft", 42));
     if ((softer.length === 4 && anglesNearRight(softer)) || softer.length === 3) shape = softer;
   }
-  if (shape.length === 4 && anglesNearRight(shape)) {
-    const box = orientedRect(shape, src);
-    if (box) return ensureCCW(box);
+  if (shape.length === 4) {
+    const quad = regularizeQuad(shape, src, strokeSnaps());
+    return ensureCCW(quad.corners);
   }
-  if (shape.length === 4) return ensureCCW(squareNearRightCorners(shape));
   if (shape.length === 3) return ensureCCW(snapTriangle(shape));
   if (shape.length > 4) {
     const box = orientedRect(hull, src);
@@ -946,13 +1170,13 @@ function straightenOpen(pts) {
 // Kreis und Ellipse werden uebersprungen, wenn 3-4 klare Ecken vorliegen.
 // Erst wenn keine Ellipse/kein Kreis und kein 3-/4-Eck entsteht, rastet
 // eine eckige Form auf das Raster ein. Ohne Geodreieck nur Kreise;
-// Felsen und schiefe Dreiecke bleiben unregelmäßig, außer 80–100°-Ecken.
+// Felsen und schiefe Dreiecke bleiben unregelmäßig, außer 75–105°-Ecken.
 const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an krakeligen Kreisen und 1:2-Ovalen
 const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
 const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
 const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
 const CIRCLE_RIGHT_TOL = 10 * Math.PI / 180;  // Geodreieck: Toleranz für 90°
-const RIGHT_CORNER = 10 * Math.PI / 180;      // Ecke 80-100° wird exakt 90°, drehunabhängig
+const RIGHT_CORNER = 15 * Math.PI / 180;      // Ecke 75-105° wird exakt 90°, drehunabhängig
 const CIRCLE_MIN_R = 0.16;
 const CIRCLE_MAX_R = 4;
 const CIRCLE_MIN_PTS = 5;
@@ -961,6 +1185,9 @@ const ELLIPSE_MAX_CV = 0.12;                  // Residuum am Ellipsenrand, analo
 const ELLIPSE_CIRCLE_RATIO = 0.85;            // Anteil: Ellipse braucht a-b > (1-ratio)*a + ELLIPSE_EXTRA_GAP
 const ELLIPSE_EXTRA_GAP = GEO_GRID;           // Zusatzabstand der Radien, 1 Rasterweite (0,5 m)
 const ELLIPSE_PHYS_VERTS = 16;                // Physik-Polygon; über maxPolygonVertices wird zerlegt
+const QUAD_PARALLEL = 12 * Math.PI / 180;     // gegenüberliegende Seiten gelten als parallel
+const QUAD_SYMMETRY = 14 * Math.PI / 180;     // Basiswinkel eines gleichschenkligen Trapezes
+const QUAD_MAX_SHIFT = 0.18;                  // max. Eckenverschiebung relativ zur Größe
 
 
 // Parameter-Bildschirm (?tune=1). Ohne diesen Modus gelten immer die Konstanten oben.
@@ -995,7 +1222,10 @@ const TUNE_SPEC = [
   { group: "Vieleck / Dreieck", key: "rectMaxAng", label: "Rechteck max. Winkel", min: 100, max: 140, step: 1, def: 125, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Vieleck / Dreieck", key: "rectMeanDev", label: "Rechteck mittl. Abweichung", min: 8, max: 45, step: 1, def: 28, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Vieleck / Dreieck", key: "triSnap", label: "Dreieck 90° einrasten", min: 5, max: 40, step: 1, def: 22, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
-  { group: "Vieleck / Dreieck", key: "rightCorner", label: "Rechtwinkel-Toleranz", min: 4, max: 20, step: 1, def: 10, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
+  { group: "Vieleck / Dreieck", key: "rightCorner", label: "Rechtwinkel-Toleranz", min: 4, max: 25, step: 1, def: 15, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
+  { group: "Vieleck / Dreieck", key: "quadParallel", label: "Parallel-Toleranz", min: 4, max: 25, step: 1, def: 12, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
+  { group: "Vieleck / Dreieck", key: "quadSymmetry", label: "Symmetrie-Toleranz", min: 4, max: 30, step: 1, def: 14, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
+  { group: "Vieleck / Dreieck", key: "quadMaxShift", label: "Max. Eckenverschiebung", min: 0.06, max: 0.35, step: 0.01, def: QUAD_MAX_SHIFT, fmt: (v) => (Number(v) * 100).toFixed(0) + " % der Größe" },
   { group: "Vieleck / Dreieck", key: "hullFill", label: "Füllung zur Hülle", min: 0.50, max: 0.95, step: 0.01, def: 0.7, fmt: (v) => (v * 100).toFixed(0) + " %" },
   { group: "Vieleck / Dreieck", key: "boxFill", label: "Füllung zum Rechteck", min: 0.70, max: 0.99, step: 0.01, def: 0.9, fmt: (v) => (v * 100).toFixed(0) + " %" },
   { group: "Vieleck / Dreieck", key: "boxGap", label: "Eckenabstand / kurze Seite", min: 0.04, max: 0.30, step: 0.01, def: 0.16, fmt: (v) => (v * 100).toFixed(0) + " %" },
@@ -1873,6 +2103,7 @@ function spawnSolid(pts, opt) {
     thick: THICK,
     outline: { local, closed: true, color: MAT.wood, width: 0.13, fixed: false },
   });
+  if (opt && opt.quadKind) meta.quadKind = opt.quadKind;
   const draw = { kind: "solid", body, meta, color: MAT.wood };
   drawings.push(draw);
   attachExistingPins(body, meta);
@@ -2718,7 +2949,7 @@ function commitStrokeApply(drawnPts, rawInk) {
     const poly = recognizePolygon(ink);
     if (poly) {
       const neat = snapPolygonPose(poly.corners);
-      const solid = spawnSolid(neat, {});
+      const solid = spawnSolid(neat, { quadKind: poly.quadKind });
       if (solid) return solid;
     }
     if (!(strokeSnaps() && geoKeepsPolygon(ink))) {
@@ -4100,6 +4331,12 @@ function renderPlay() {
   drawBall();
   if (pointer && pointer.pts && pointer.pts.length) {
     crayonPath(pointer.pts, MAT.ink, pointer.pts.some((p) => p.thick) ? "live" : THICK);
+  }
+  if (shotCaptions) {
+    for (const cap of shotCaptions) {
+      const s = worldToScreen(cap.x, cap.y);
+      label(cap.text, s.x, s.y, 22, "#3a2a1c", "center");
+    }
   }
 }
 
@@ -5612,6 +5849,28 @@ function boot() {
       commitStroke(ring(6.2, 3.6, 1.05, 28));
       commitStroke([{ x: 8.8, y: 1.38 }, { x: 11.0, y: 3.3 }]);
       for (let i = 0; i < 100; i++) step(1 / 60);
+    } else if (id === "vierecke") {
+      buildLevel(LEVELS["ein-klotz"]);
+      const rotPts = (cx, cy, rot, local) => {
+        const a = rot * Math.PI / 180;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        const pts = local.map((p) => ({ x: cx + p.x * ca - p.y * sa, y: cy + p.x * sa + p.y * ca }));
+        pts.push({ x: pts[0].x, y: pts[0].y });
+        return pts;
+      };
+      const forms = [
+        { x: 5.4, y: 8.2, rot: 12, name: "Rechteck", local: [{ x: -1.5, y: -0.9 }, { x: 1.5, y: -0.9 }, { x: 1.5, y: 0.9 }, { x: -1.5, y: 0.9 }] },
+        { x: 11.6, y: 8.2, rot: 8, name: "Rampe", local: [{ x: -1.55, y: -0.75 }, { x: 1.55, y: -0.75 }, { x: 0.35, y: 0.75 }, { x: -1.55, y: 0.75 }] },
+        { x: 18.2, y: 8.2, rot: 18, name: "Parallelogramm", local: [{ x: -1.55, y: -0.7 }, { x: 1.15, y: -0.7 }, { x: 1.65, y: 0.7 }, { x: -1.05, y: 0.7 }] },
+        { x: 25.0, y: 8.2, rot: -10, name: "Trapez", local: [{ x: -1.8, y: -0.7 }, { x: 1.8, y: -0.7 }, { x: 1.05, y: 0.7 }, { x: -1.05, y: 0.7 }] },
+      ];
+      shotCaptions = [];
+      for (const f of forms) {
+        commitStroke(rotPts(f.x, f.y, f.rot, f.local));
+        shotCaptions.push({ x: f.x, y: f.y - 1.7, text: f.name });
+      }
+      for (let i = 0; i < 2; i++) step(1 / 60);
     } else if (id === "rauten") {
       buildLevel(LEVELS["ein-klotz"]);
       const rautenSet = [
@@ -7201,6 +7460,125 @@ function runTests() {
     const rhombIsRect = rhombAng.length === 4 && rhombAng.every((a) => Math.abs(a - 90) < 8);
     check("acute rhombus is not forced into a rectangle", !!rhomb && rhomb.kind === "solid" && rhomb.meta.outline.local.length === 4 && !rhombIsRect && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
     lines.push("INFO rhomb angles " + rhombAng.map((a) => a.toFixed(1)).join(","));
+
+    function rotCorners(local, cx, cy, rotDeg) {
+      const a = rotDeg * Math.PI / 180;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      return local.map((p) => ({ x: cx + p.x * ca - p.y * sa, y: cy + p.x * sa + p.y * ca }));
+    }
+    function wobbleCorners(corners, kind, seed) {
+      const rand = diaRng(seed);
+      let pts = [];
+      const nSamp = kind === "clean" ? 3 : 7;
+      for (let e = 0; e < 4; e++) {
+        const a0 = corners[e];
+        const a1 = corners[(e + 1) % 4];
+        const len = Math.hypot(a1.x - a0.x, a1.y - a0.y) || 1;
+        const nx = -(a1.y - a0.y) / len;
+        const ny = (a1.x - a0.x) / len;
+        for (let k = 0; k < nSamp; k++) {
+          const t = k / nSamp;
+          let wob = 0;
+          if (kind !== "clean") wob = (rand() - 0.5) * 0.14 + 0.04 * Math.sin((t + e) * 6 + seed * 0.1);
+          pts.push({ x: a0.x + (a1.x - a0.x) * t + nx * wob, y: a0.y + (a1.y - a0.y) * t + ny * wob });
+        }
+      }
+      pts.push({ x: pts[0].x, y: pts[0].y });
+      return pts;
+    }
+    function sideParallelDeg(loc, i, j) {
+      const a = loc[i];
+      const b = loc[(i + 1) % 4];
+      const c = loc[j];
+      const d = loc[(j + 1) % 4];
+      const ax = b.x - a.x, ay = b.y - a.y;
+      const bx = d.x - c.x, by = d.y - d.y + (d.y - c.y);
+      const la = Math.hypot(ax, ay) || 1;
+      const lb = Math.hypot(bx, by) || 1;
+      const cos = Math.abs((ax * bx + ay * by) / (la * lb));
+      return Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI;
+    }
+    function quadGeometryOk(draw, expect) {
+      if (!draw || draw.kind !== "solid" || !draw.meta || !draw.meta.outline) return false;
+      const loc = draw.meta.outline.local;
+      if (!loc || loc.length !== 4) return false;
+      const angs = interiorAngles(loc).map((a) => a * 180 / Math.PI);
+      const par02 = sideParallelDeg(loc, 0, 2) < 2.5;
+      const par13 = sideParallelDeg(loc, 1, 3) < 2.5;
+      const right = angs.map((a) => Math.abs(a - 90) < 2);
+      const nRight = right.filter(Boolean).length;
+      const kindOk = !draw.meta.quadKind || draw.meta.quadKind === expect;
+      if (expect === "rect") return kindOk && right.every(Boolean) && par02 && par13;
+      if (expect === "ramp") {
+        if (!kindOk || nRight !== 2 || !(par02 || par13)) return false;
+        const idx = [];
+        for (let i = 0; i < 4; i++) if (right[i]) idx.push(i);
+        const gap = Math.abs(idx[0] - idx[1]);
+        return gap === 1 || gap === 3;
+      }
+      if (expect === "para") return kindOk && par02 && par13 && nRight < 3;
+      if (expect === "trap") {
+        if (!kindOk || par02 === par13) return false;
+        const pair = par02 ? 0 : 1;
+        const l1 = Math.hypot(loc[(pair + 1) % 4].x - loc[(pair + 2) % 4].x, loc[(pair + 1) % 4].y - loc[(pair + 2) % 4].y);
+        const l2 = Math.hypot(loc[(pair + 3) % 4].x - loc[pair].x, loc[(pair + 3) % 4].y - loc[pair].y);
+        const legs = Math.abs(l1 - l2) / Math.max(l1, l2) < 0.04;
+        const baseA = Math.abs(angs[pair] - angs[(pair + 1) % 4]) < 2.5;
+        return legs && baseA;
+      }
+      if (expect === "free") return (!draw.meta.quadKind || draw.meta.quadKind === "free") && nRight < 3;
+      return false;
+    }
+    const formShapes = {
+      rect: [{ x: -1.6, y: -0.9 }, { x: 1.6, y: -0.9 }, { x: 1.6, y: 0.9 }, { x: -1.6, y: 0.9 }],
+      ramp: [{ x: -1.55, y: -0.75 }, { x: 1.55, y: -0.75 }, { x: 0.35, y: 0.75 }, { x: -1.55, y: 0.75 }],
+      para: [{ x: -1.55, y: -0.7 }, { x: 1.15, y: -0.7 }, { x: 1.65, y: 0.7 }, { x: -1.05, y: 0.7 }],
+      trap: [{ x: -1.7, y: -0.7 }, { x: 1.7, y: -0.7 }, { x: 1.05, y: 0.7 }, { x: -1.05, y: 0.7 }],
+    };
+    const formAngles = [0, 30, 45];
+    const formModes = ["free", "geo"];
+    const formKinds = ["clean", "hand", "hand"];
+    const formRates = {};
+    for (const formName of ["rect", "ramp", "para", "trap"]) {
+      for (const modeName of formModes) {
+        let ok = 0;
+        let total = 0;
+        formKinds.forEach((kind, ki) => {
+          for (const ang of formAngles) {
+            buildLevel(LEVELS["ein-klotz"]);
+            geoSnap = modeName === "geo";
+            const seed = 400 + formName.length * 17 + ang * 11 + ki * 29 + (geoSnap ? 5 : 0);
+            const corners = rotCorners(formShapes[formName], 16, 8, ang);
+            commitStroke(wobbleCorners(corners, kind, seed));
+            geoSnap = false;
+            const draw = drawings.find((d) => (d.kind === "solid" && !d.preset) || d.kind === "roller" || d.kind === "ellipse");
+            total += 1;
+            if (quadGeometryOk(draw, formName)) ok += 1;
+          }
+        });
+        formRates[formName + "-" + modeName] = ok + "/" + total;
+        lines.push("INFO quad-form " + formName + "-" + modeName + " " + ok + "/" + total);
+        check("hand-drawn " + formName + " with " + modeName + " regularizes", ok >= Math.ceil(total * 0.8));
+      }
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = false;
+    const rocky = rotCorners([{ x: -1.7, y: -0.85 }, { x: 1.85, y: -0.4 }, { x: 1.05, y: 1.2 }, { x: -1.15, y: 0.35 }], 16, 8, 12);
+    commitStroke(wobbleCorners(rocky, "hand", 909));
+    const rockFree = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("irregular free quad stays irregular without geodreieck", quadGeometryOk(rockFree, "free"));
+    lines.push("INFO rock-free kind " + (rockFree && rockFree.meta ? (rockFree.meta.quadKind || "none") : "missing") + " n " + (rockFree && rockFree.meta && rockFree.meta.outline ? rockFree.meta.outline.local.length : 0));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(wobbleCorners(rocky, "hand", 909));
+    geoSnap = false;
+    const rockGeo = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const rockGeoKind = rockGeo && rockGeo.meta ? rockGeo.meta.quadKind : null;
+    check("irregular quad is regularized with geodreieck", !!rockGeoKind && rockGeoKind !== "free" && quadGeometryOk(rockGeo, rockGeoKind));
+    lines.push("INFO rock-geo kind " + (rockGeoKind || "missing"));
 
     geoSnap = false;
 
