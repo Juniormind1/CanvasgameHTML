@@ -712,18 +712,23 @@ function dropRopeBead(body) {
   world.destroyBody(body);
 }
 
+// Reaktionskraft eines Joints; frisch angelegte Joints haben vor dem ersten
+// Löserschritt noch keine Richtung (Planck wirft dann), sie zählen als 0.
+function jointPull(joint, invDt) {
+  try {
+    const f = joint.getReactionForce(invDt);
+    return f ? Math.hypot(f.x, f.y) || 0 : 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
 // Seilzug am Nagel aus dem letzten Löserschritt (Sehne + Endgelenk), in N.
 function ropeEndTension(draw, end, invDt) {
   let t = 0;
-  if (draw.chordJoint && jointAlive(world, draw.chordJoint)) {
-    const f = draw.chordJoint.getReactionForce(invDt);
-    t += Math.hypot(f.x, f.y);
-  }
+  if (draw.chordJoint && jointAlive(world, draw.chordJoint)) t += jointPull(draw.chordJoint, invDt);
   const ej = draw.endJoints && draw.endJoints[end === "A" ? 0 : 1];
-  if (ej) {
-    const f = ej.getReactionForce(invDt);
-    t += Math.hypot(f.x, f.y);
-  }
+  if (ej) t += jointPull(ej, invDt);
   return t;
 }
 

@@ -2841,6 +2841,25 @@ function runTests() {
       swNail3.motor = 0;
       applyNailMotor(swNail3);
 
+      // Seil an einen schon laufenden Motornagel: kein Absturz im ersten Schritt.
+      const swNail4 = rememberPin(9, 9, ground, true);
+      swNail4.motor = -1;
+      applyNailMotor(swNail4);
+      const swD = swRig(9, 0.4, 1, 6);
+      let swFreshOk = true;
+      try {
+        const swRopeD = spawnRope(swNail4, swD.pb, [{ x: 9, y: 9 }, { x: 9, y: 6 }]);
+        const swLd = swRopeD.restLength;
+        for (let i = 0; i < 30; i++) step(1 / 60);
+        swFreshOk = swRopeD.restLength < swLd - 0.2;
+      } catch (err) {
+        swFreshOk = false;
+        lines.push("INFO fresh rope on running winch: " + err);
+      }
+      check("a rope drawn onto a running motor nail reels at once without error", swFreshOk);
+      swNail4.motor = 0;
+      applyNailMotor(swNail4);
+
       // Zettel: gespulte Länge und gezeichnete Länge überstehen Export und Import.
       const swText = encodeSceneTextSync(captureScene());
       const swLoad = loadSceneFromTextSync(swText);

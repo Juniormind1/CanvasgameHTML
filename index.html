@@ -3220,18 +3220,23 @@ function dropRopeBead(body) {
   world.destroyBody(body);
 }
 
+// Reaktionskraft eines Joints; frisch angelegte Joints haben vor dem ersten
+// Löserschritt noch keine Richtung (Planck wirft dann), sie zählen als 0.
+function jointPull(joint, invDt) {
+  try {
+    const f = joint.getReactionForce(invDt);
+    return f ? Math.hypot(f.x, f.y) || 0 : 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
 // Seilzug am Nagel aus dem letzten Löserschritt (Sehne + Endgelenk), in N.
 function ropeEndTension(draw, end, invDt) {
   let t = 0;
-  if (draw.chordJoint && jointAlive(world, draw.chordJoint)) {
-    const f = draw.chordJoint.getReactionForce(invDt);
-    t += Math.hypot(f.x, f.y);
-  }
+  if (draw.chordJoint && jointAlive(world, draw.chordJoint)) t += jointPull(draw.chordJoint, invDt);
   const ej = draw.endJoints && draw.endJoints[end === "A" ? 0 : 1];
-  if (ej) {
-    const f = ej.getReactionForce(invDt);
-    t += Math.hypot(f.x, f.y);
-  }
+  if (ej) t += jointPull(ej, invDt);
   return t;
 }
 
@@ -11141,6 +11146,25 @@ function runTests() {
       check("a too heavy load stalls the winch", swRopeH.winch && swRopeH.winch.state === "stall" && Math.abs(swRopeH.restLength - swLh) < 0.02 && Math.abs(swH.box.getPosition().y - swYh) < 0.05);
       swNail3.motor = 0;
       applyNailMotor(swNail3);
+
+      // Seil an einen schon laufenden Motornagel: kein Absturz im ersten Schritt.
+      const swNail4 = rememberPin(9, 9, ground, true);
+      swNail4.motor = -1;
+      applyNailMotor(swNail4);
+      const swD = swRig(9, 0.4, 1, 6);
+      let swFreshOk = true;
+      try {
+        const swRopeD = spawnRope(swNail4, swD.pb, [{ x: 9, y: 9 }, { x: 9, y: 6 }]);
+        const swLd = swRopeD.restLength;
+        for (let i = 0; i < 30; i++) step(1 / 60);
+        swFreshOk = swRopeD.restLength < swLd - 0.2;
+      } catch (err) {
+        swFreshOk = false;
+        lines.push("INFO fresh rope on running winch: " + err);
+      }
+      check("a rope drawn onto a running motor nail reels at once without error", swFreshOk);
+      swNail4.motor = 0;
+      applyNailMotor(swNail4);
 
       // Zettel: gespulte Länge und gezeichnete Länge überstehen Export und Import.
       const swText = encodeSceneTextSync(captureScene());
