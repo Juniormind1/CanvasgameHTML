@@ -2051,6 +2051,141 @@ function runTests() {
     for (let i = 0; i < 240; i++) step(1 / 60);
     const bounceRest = ball.getLinearVelocity();
     check("ball comes to rest after the bounce without jitter", Math.hypot(bounceRest.x, bounceRest.y) < 0.4 && ball.getPosition().y < 2.2 && ball.getPosition().x < 20);
+
+    lastTap = 0;
+    if (!tuneVals || !Object.keys(tuneVals).length) tuneVals = tuneDefaults();
+    tuneVals.maxCv = 0.2;
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    cam.cx = 15;
+    cam.cy = 8;
+    cam.zoom = 1.2;
+    makeBox({ x: 10, y: 4.2, hw: 1.1, hh: 0.45, color: "#8d5a34" });
+    spawnWire([
+      { x: 22, y: 3.2 }, { x: 24.5, y: 5.0 }, { x: 27, y: 3.4 },
+    ], { thick: THICK * 1.4 });
+    rememberPin(16, 6.5, ground, true);
+    rememberPin(20, 6.5, ground, true);
+    const scenePinA = pins[pins.length - 2];
+    const scenePinB = pins[pins.length - 1];
+    spawnRope(scenePinA, scenePinB, [
+      { x: 16, y: 6.5 }, { x: 18, y: 5.2 }, { x: 20, y: 6.5 },
+    ]);
+    spawnRoller(8, 7.5, 0.4);
+    spawnEllipse(6, 6.2, 1.1, 0.65, 0.3);
+    const sceneAnchorHost = makeBox({ x: 4, y: 1.7, hw: 0.8, hh: 0.4 });
+    const sceneAnchorDraw = drawings.find((d) => d.body === sceneAnchorHost);
+    if (sceneAnchorDraw) anchorBody(sceneAnchorDraw, ground, { x: 4, y: 1.3 }, { x: 4, y: 1.7 });
+    ball.setTransform(V(5, 8.5), 0.2);
+    ball.setLinearVelocity(V(3.2, 1.1));
+    ball.setAngularVelocity(0.4);
+    for (let i = 0; i < 20; i++) step(1 / 60);
+
+    const scenePosOf = (body) => {
+      if (!body) return null;
+      const p = body.getPosition();
+      const v = body.getLinearVelocity();
+      return { x: p.x, y: p.y, a: body.getAngle(), vx: v.x, vy: v.y, w: body.getAngularVelocity() };
+    };
+    const sceneKeyPoses = () => {
+      let jointN = 0;
+      for (let j = world.getJointList(); j; j = j.getNext()) {
+        if (!isMouseJoint(j)) jointN++;
+      }
+      const ropeDraw = drawings.find((d) => d.kind === "rope");
+      const boxDraw = drawings.find((d) => d.kind === "solid" && d.preset && !anchors.some((a) => a.body === d.body));
+      const wireDraw = drawings.find((d) => d.kind === "wire");
+      const rollDraw = drawings.find((d) => d.kind === "roller");
+      const ellDraw = drawings.find((d) => d.kind === "ellipse");
+      return {
+        drawings: drawings.length,
+        pins: pins.length,
+        ropes: drawings.filter((d) => d.kind === "rope").length,
+        joints: jointN,
+        anchors: anchors.length,
+        geo: !!geoSnap,
+        cam: { cx: cam.cx, cy: cam.cy, zoom: cam.zoom },
+        tuneCv: tuneVals && tuneVals.maxCv,
+        ball: scenePosOf(ball),
+        box: scenePosOf(boxDraw && boxDraw.body),
+        wire: scenePosOf(wireDraw && wireDraw.body),
+        roll: scenePosOf(rollDraw && rollDraw.body),
+        ell: scenePosOf(ellDraw && ellDraw.body),
+        rope0: scenePosOf(ropeDraw && ropeDraw.bodies && ropeDraw.bodies[0]),
+      };
+    };
+    const sceneDrift = (a, b) => {
+      if (!a || !b) return Infinity;
+      return Math.hypot(a.x - b.x, a.y - b.y) + Math.abs(a.a - b.a) + Math.hypot(a.vx - b.vx, a.vy - b.vy) + Math.abs(a.w - b.w);
+    };
+
+    const sceneCaptured = captureScene();
+    const sceneSnapA = sceneKeyPoses();
+    const sceneText = encodeSceneTextSync(sceneCaptured);
+    const sceneDecoded = decodeSceneTextSync(sceneText);
+    check("scene zettel encodes and decodes", !!(
+      sceneDecoded.ok && sceneDecoded.data
+      && sceneDecoded.data.bodies.length === sceneCaptured.bodies.length
+      && sceneDecoded.data.pins.length === sceneCaptured.pins.length
+      && sceneDecoded.data.ropes.length === sceneCaptured.ropes.length
+      && sceneDecoded.data.anchors.length === sceneCaptured.anchors.length
+    ));
+
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    const sceneSnapOrig = sceneKeyPoses();
+
+    const sceneLoaded = loadSceneFromTextSync(sceneText);
+    check("scene zettel loads without error", !!(sceneLoaded && sceneLoaded.ok && world && ball));
+    const sceneSnapBack = sceneKeyPoses();
+    check("scene roundtrip keeps body, pin and joint counts",
+      sceneSnapBack.drawings === sceneSnapA.drawings
+      && sceneSnapBack.pins === sceneSnapA.pins
+      && sceneSnapBack.ropes === sceneSnapA.ropes
+      && sceneSnapBack.joints === sceneSnapA.joints
+      && sceneSnapBack.anchors === sceneSnapA.anchors);
+    check("scene roundtrip restores positions and velocities",
+      sceneDrift(sceneSnapBack.ball, sceneSnapA.ball) < 1e-6
+      && sceneDrift(sceneSnapBack.box, sceneSnapA.box) < 1e-6
+      && sceneDrift(sceneSnapBack.wire, sceneSnapA.wire) < 1e-6
+      && sceneDrift(sceneSnapBack.roll, sceneSnapA.roll) < 1e-6
+      && sceneDrift(sceneSnapBack.ell, sceneSnapA.ell) < 1e-6
+      && sceneDrift(sceneSnapBack.rope0, sceneSnapA.rope0) < 1e-6);
+    check("scene roundtrip restores camera, geodreieck and tune values",
+      sceneSnapBack.geo === true
+      && Math.abs(sceneSnapBack.cam.cx - 15) < 1e-9
+      && Math.abs(sceneSnapBack.cam.zoom - 1.2) < 1e-9
+      && sceneSnapBack.tuneCv === 0.2
+      && sceneSnapBack.anchors === 1);
+
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    const sceneSnapImp = sceneKeyPoses();
+    const sceneDriftBall = sceneDrift(sceneSnapImp.ball, sceneSnapOrig.ball);
+    const sceneDriftBox = sceneDrift(sceneSnapImp.box, sceneSnapOrig.box);
+    const sceneDriftRope = sceneDrift(sceneSnapImp.rope0, sceneSnapOrig.rope0);
+    lines.push("INFO scene drift after 60 steps ball=" + sceneDriftBall.toFixed(6) + " box=" + sceneDriftBox.toFixed(6) + " rope=" + sceneDriftRope.toFixed(6));
+    // Ohne Warmstart-Impulse der Kontakte weichen Bahnen nach Stößen ab.
+    // 0,25 m plus Geschwindigkeit ist für 1 s Simulation nach dem Import noch nah.
+    check("scene stays close after 60 fixed steps", sceneDriftBall < 0.25 && sceneDriftBox < 0.25 && sceneDriftRope < 0.35);
+
+    let sceneBadSafe = true;
+    let sceneBadRes;
+    let sceneEmptyRes;
+    let sceneJunkRes;
+    try {
+      sceneBadRes = loadSceneFromTextSync("dies ist kein zettel");
+      sceneEmptyRes = loadSceneFromTextSync("");
+      sceneJunkRes = loadSceneFromTextSync("CGJ1:!!!!");
+      if ((sceneBadRes && sceneBadRes.ok) || (sceneEmptyRes && sceneEmptyRes.ok) || (sceneJunkRes && sceneJunkRes.ok)) sceneBadSafe = false;
+    } catch (sceneBadErr) {
+      sceneBadSafe = false;
+    }
+    check("invalid scene text does not crash", sceneBadSafe && sceneBadRes && sceneBadRes.error && sceneEmptyRes && sceneEmptyRes.error && sceneJunkRes && sceneJunkRes.error);
+    check("invalid scene text leaves the current world intact", !!world && !!ball && mode === "play" && pins.length >= 2);
+
+    mountTunePanel();
+    check("tune panel has scene copy and load controls", !!document.getElementById("tune-scene-copy") && !!document.getElementById("tune-scene-load") && !!document.getElementById("tune-scene-text"));
+    const scenePanel = document.getElementById("tune-panel");
+    if (scenePanel && scenePanel.parentNode) scenePanel.parentNode.removeChild(scenePanel);
   } catch (err) {
     lines.push("FAIL exception " + (err && err.stack ? err.stack : err));
   }

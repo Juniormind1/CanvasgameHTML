@@ -124,15 +124,11 @@ function isWireMeta(meta) {
   return !!(meta && meta.outline && meta.outline.closed === false);
 }
 
-function buildLevel(def) {
-  clearWorld();
-  levelDef = def;
-  resetCam();
-  world = new planck.World(V(0, -24));
-  world.on("begin-contact", (contact) => {
+function attachPlayContacts(targetWorld) {
+  targetWorld.on("begin-contact", (contact) => {
     contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
   });
-  world.on("pre-solve", (contact) => {
+  targetWorld.on("pre-solve", (contact) => {
     const ma = bodyMeta.get(contact.getFixtureA().getBody());
     const mb = bodyMeta.get(contact.getFixtureB().getBody());
     const roundA = ma && (ma.kind === "ball" || ma.round);
@@ -143,27 +139,38 @@ function buildLevel(def) {
     }
     noteRopeCutContact(contact);
   });
-  ground = world.createBody();
-  track(ground, { kind: "level" });
+}
+
+function addSideWalls() {
   addStaticSolid([[-0.5, -2], [0.4, -2], [0.4, 18], [-0.5, 18]], "#c9b48a");
   addStaticSolid([[31.6, -2], [32.5, -2], [32.5, 18], [31.6, 18]], "#c9b48a");
-  for (const solid of def.solids || []) addStaticSolid(solid.pts, solid.color);
-  for (const wire of def.wires || []) addStaticWire(wire.pts, wire.color);
-  for (const d of def.decor || []) scenery.push({ kind: "line", pts: d.pts, color: d.color, width: d.width || 0.12 });
-  for (const box of def.boxes || []) makeBox(box);
-  for (const xy of def.pins || []) {
-    const host = hostAt(xy[0], xy[1]);
-    if (host) rememberPin(xy[0], xy[1], host, false);
-  }
-  for (const r of def.rockets || []) makeRocket(r);
-  for (const xy of def.stars || []) {
-    const body = world.createBody({ position: V(xy[0], xy[1]) });
-    body.createFixture(new planck.Circle(0.58), { isSensor: true, density: 0 });
-    const meta = track(body, { kind: "star", got: false });
-    stars.push(meta);
-  }
+}
+
+function beginPlayWorld(def, opt) {
+  clearWorld();
+  levelDef = def;
+  if (!opt || opt.resetCam !== false) resetCam();
+  world = new planck.World(V(0, -24));
+  attachPlayContacts(world);
+  ground = world.createBody();
+  track(ground, { kind: "level" });
+  addSideWalls();
+  for (const solid of (def && def.solids) || []) addStaticSolid(solid.pts, solid.color);
+  for (const wire of (def && def.wires) || []) addStaticWire(wire.pts, wire.color);
+  for (const d of (def && def.decor) || []) scenery.push({ kind: "line", pts: d.pts, color: d.color, width: d.width || 0.12 });
+}
+
+function addStarAt(x, y, got) {
+  const body = world.createBody({ position: V(x, y) });
+  body.createFixture(new planck.Circle(0.58), { isSensor: true, density: 0 });
+  const meta = track(body, { kind: "star", got: !!got });
+  stars.push(meta);
+  return meta;
+}
+
+function spawnQuestBall(x, y) {
   ball = world.createDynamicBody({
-    position: V(def.ball[0], def.ball[1]),
+    position: V(x, y),
     bullet: true,
     linearDamping: 0.01,
     angularDamping: 0.02,
@@ -174,6 +181,19 @@ function buildLevel(def) {
     restitution: 0,
   });
   track(ball, { kind: "ball" });
+  return ball;
+}
+
+function buildLevel(def) {
+  beginPlayWorld(def);
+  for (const box of def.boxes || []) makeBox(box);
+  for (const xy of def.pins || []) {
+    const host = hostAt(xy[0], xy[1]);
+    if (host) rememberPin(xy[0], xy[1], host, false);
+  }
+  for (const r of def.rockets || []) makeRocket(r);
+  for (const xy of def.stars || []) addStarAt(xy[0], xy[1], false);
+  spawnQuestBall(def.ball[0], def.ball[1]);
   mode = "play";
 }
 

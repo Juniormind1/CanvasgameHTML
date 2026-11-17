@@ -206,6 +206,16 @@ function mountTunePanel() {
     ".tune-row label { font-size: 11px; }",
     ".tune-row .tune-val { font: 11px ui-monospace, monospace; color: #5c4632; }",
     ".tune-row input[type=range] { grid-column: 1 / -1; width: 100%; height: 22px; margin: 0; touch-action: manipulation; }",
+    "#tune-scene { margin: 0 0 8px; padding: 0 0 8px; border-bottom: 1px solid rgba(92,70,50,0.18); }",
+    "#tune-scene-hint { font-size: 11px; color: #5c4632; margin: 0 0 6px; line-height: 1.35; }",
+    "#tune-scene-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }",
+    "#tune-scene-actions button { font: 12px system-ui, sans-serif; padding: 4px 8px; border: 1.5px solid #5c4632;",
+    "  border-radius: 8px; background: #fff8ea; color: #3a2a1c; cursor: pointer; }",
+    "#tune-scene textarea { width: 100%; min-height: 56px; box-sizing: border-box; border: 1.5px solid #5c4632;",
+    "  border-radius: 8px; padding: 4px 6px; font: 10px ui-monospace, monospace; color: #3a2a1c; background: #fff;",
+    "  resize: vertical; -webkit-user-select: text; user-select: text; }",
+    "#tune-scene-status { font-size: 11px; min-height: 1.2em; margin: 4px 0 0; color: #5c4632; }",
+    "#tune-scene-status.err { color: #a33; }",
   ].join("\n");
   document.head.appendChild(style);
   const panel = document.createElement("div");
@@ -235,6 +245,7 @@ function mountTunePanel() {
   const readout = document.createElement("div");
   readout.id = "tune-readout";
   body.appendChild(readout);
+  mountSceneTuneControls(body);
   let currentGroup = null;
   let groupBox = null;
   for (const spec of TUNE_SPEC) {

@@ -58,8 +58,36 @@ function boot() {
     loadTuneVals();
     mountTunePanel();
   }
-  if (params.get("test") === "1") runTests();
-  else if (params.get("shot")) {
+  const sceneText = params.get("scene") || window.__CRAYON_SCENE || null;
+  const wantPause = params.get("pause") === "1" || !!window.__CRAYON_SCENE_PAUSE;
+  const startLoop = () => {
+    let last = performance.now();
+    function frame(now) {
+      const dt = Math.min(0.033, (now - last) / 1000);
+      last = now;
+      if (pointer && pointer.grab && !pointer.dragging) {
+        const at = pointer.wx == null ? pointer.grab : { x: pointer.wx, y: pointer.wy };
+        engageGrab(at);
+      }
+      if (mode === "play" && !scenePaused) advanceFixed(playClock, dt, step);
+      else if (mode === "map") advanceFixed(mapClock, dt, mapDemo === "trebuchet" ? stepTrebuchet : stepCradle);
+      render();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  };
+  if (params.get("test") === "1") {
+    runTests();
+    startLoop();
+  } else if (sceneText) {
+    Promise.resolve(loadSceneFromText(sceneText, { pause: wantPause })).then((res) => {
+      if (!res || !res.ok) {
+        showMap();
+        showSceneMessage((res && res.error) || "Zettel konnte nicht geladen werden.", true);
+      }
+      startLoop();
+    });
+  } else if (params.get("shot")) {
     const id = params.get("shot");
     if (id === "feier") {
       buildLevel(LEVELS["ein-klotz"]);
@@ -172,19 +200,6 @@ function boot() {
     } else if (LEVELS[id]) buildLevel(LEVELS[id]);
     else showMap();
   } else showMap();
-  let last = performance.now();
-  function frame(now) {
-    const dt = Math.min(0.033, (now - last) / 1000);
-    last = now;
-    if (pointer && pointer.grab && !pointer.dragging) {
-      const at = pointer.wx == null ? pointer.grab : { x: pointer.wx, y: pointer.wy };
-      engageGrab(at);
-    }
-    if (mode === "play") advanceFixed(playClock, dt, step);
-    else if (mode === "map") advanceFixed(mapClock, dt, mapDemo === "trebuchet" ? stepTrebuchet : stepCradle);
-    render();
-    requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
+  if (params.get("test") !== "1" && !sceneText) startLoop();
 }
 

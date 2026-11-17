@@ -74,6 +74,7 @@ let trebGround = null;
 let treb = null;
 let mapDemo = "cradle";
 let anchors = [];
+let scenePaused = false;
 
 const CONFETTI_PAIRS = [
   ["#e23b32", "#f6e27a"],
