@@ -1033,6 +1033,9 @@ const DRAG_DAMPING = 0.85;                    // nahezu kritische Dämpfung
 const DRAG_FORCE_G = 8;                       // maxForce = Masse * 24 * Faktor
 const DRAG_ANG_DAMP = 0.6;                    // mäßige Winkeldämpfung nur während des Ziehens
 const DRAG_MAX_V = 22;                        // m/s, Deckel für die Greifpunkt-Geschwindigkeit
+const GRAB_EDGE = 0.35;                       // m, Randzone: Abstand zur Kontur, sofort greifen
+const GRAB_ADOPT = 0.8;                       // m, Zug aus der Innenfläche wird zum Griff
+const GRAB_MIN_INTERIOR = 0.15;               // zusätzlicher Inkreis, damit ein Kringel Platz hat
 const TUNE_SPEC = [
   { group: "Kreis", key: "maxCv", label: "Radiusstreuung", min: 0.02, max: 0.30, step: 0.005, def: CIRCLE_MAX_CV, fmt: (v) => (v * 100).toFixed(1) + " %" },
   { group: "Kreis", key: "samples", label: "Abtastpunkte", min: 16, max: 128, step: 8, def: CIRCLE_SAMPLES, int: true },
@@ -1067,6 +1070,8 @@ const TUNE_SPEC = [
   { group: "Griff", key: "dragForceG", label: "Max. Kraft / Gewicht", min: 2, max: 20, step: 0.5, def: DRAG_FORCE_G, fmt: (v) => Number(v).toFixed(1) + " × mg" },
   { group: "Griff", key: "dragAngDamp", label: "Winkeldämpfung", min: 0, max: 2, step: 0.05, def: DRAG_ANG_DAMP, fmt: (v) => Number(v).toFixed(2) },
   { group: "Griff", key: "dragMaxV", label: "Zieltempo", min: 8, max: 40, step: 1, def: DRAG_MAX_V, fmt: (v) => Number(v).toFixed(0) + " m/s" },
+  { group: "Griff", key: "grabEdge", label: "Randzone", min: 0.15, max: 0.80, step: 0.05, def: GRAB_EDGE, fmt: (v) => Number(v).toFixed(2) + " m" },
+  { group: "Griff", key: "grabAdopt", label: "Nachgreifen ab", min: 0.4, max: 2.0, step: 0.05, def: GRAB_ADOPT, fmt: (v) => Number(v).toFixed(2) + " m" },
 ];
 const TUNE_BY_KEY = {};
 for (const spec of TUNE_SPEC) TUNE_BY_KEY[spec.key] = spec;
@@ -5046,10 +5051,10 @@ function renderHelp() {
     "Linke Maustaste, Finger oder Stift: zeichnen. Loslassen erweckt den Strich.",
     "Offene Linie: leichter, etwas federnder Draht. Geschlossene Fläche: schwerer Körper.",
     "Ein runder Strich wird eine Kugel. Sie rollt und gibt ihren Schwung weiter.",
-    "Winziger Kreis auf einem Körper oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
+    "Winziger Kreis in der Fläche eines Körpers oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
     "Linie von Nagel zu Nagel: Seil, so lang wie der Strich, mit allen Schlenkern. Eine Spitze unter 15°, die senkrecht trifft, zerschneidet es.",
-    "Klick in einen Gegenstand zieht ihn. Er bleibt schwer und dreht sich unter den Finger, wenn du eine Ecke fasst.",
+    "Am Rand eines Gegenstands fasst du ihn und ziehst ihn. In der Fläche wird gezeichnet; ein kleiner Kreis setzt einen Nagel. Ein längerer Zug aus der Mitte greift nachträglich.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
     "Klick auf die Spielkugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
@@ -5342,13 +5347,81 @@ function onPointerDown(e) {
   try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
 }
 
+function distToPolyEdges(x, y, polyPts) {
+  let best = Infinity;
+  for (let i = 0; i < polyPts.length; i++) {
+    const a = polyPts[i];
+    const b = polyPts[(i + 1) % polyPts.length];
+    best = Math.min(best, distPointSeg(x, y, a.x, a.y, b.x, b.y));
+  }
+  return best;
+}
+
+function bodyInradius(meta) {
+  if (!meta) return 0;
+  if (meta.circles && meta.circles.length) return 0;
+  if (!meta.outline || !meta.outline.closed) return 0;
+  const local = meta.outline.local;
+  if (!pointInPoly(0, 0, local) && distToPoly(0, 0, local) > 0) return 0;
+  return distToPolyEdges(0, 0, local);
+}
+
+function contourClearance(meta, x, y) {
+  if (!meta || !meta.body) return 0;
+  if (meta.circles && meta.circles.length) return 0;
+  if (!meta.outline || !meta.outline.closed) return 0;
+  const lp = meta.body.getLocalPoint(V(x, y));
+  if (!pointInPoly(lp.x, lp.y, meta.outline.local)) return 0;
+  return distToPolyEdges(lp.x, lp.y, meta.outline.local);
+}
+
+function bodyAlwaysGrab(draw) {
+  if (!draw) return false;
+  if (draw.kind === "roller" || draw.kind === "blob" || draw.kind === "wire" || draw.kind === "rope") return true;
+  if (draw.meta && draw.meta.kind === "ball") return true;
+  const need = tuneCode("grabEdge", GRAB_EDGE) + GRAB_MIN_INTERIOR;
+  return bodyInradius(draw.meta) <= need;
+}
+
+function pressZone(x, y) {
+  const draw = drawingAt(x, y);
+  if (!draw) return "empty";
+  if (bodyAlwaysGrab(draw)) return "edge";
+  if (contourClearance(draw.meta, x, y) <= tuneCode("grabEdge", GRAB_EDGE)) return "edge";
+  return "interior";
+}
+
 function pressKind(x, y) {
   if (ball) {
     const bp = ball.getPosition();
     if (Math.hypot(bp.x - x, bp.y - y) < BALL_R * 1.3) return "nudge";
   }
-  if (drawingAt(x, y)) return "drag";
+  if (pressZone(x, y) === "edge") return "drag";
   return "draw";
+}
+
+// Langer Zug aus der Innenfläche, der sich nicht zum Kringel schließt: nachträglich greifen.
+function tryAdoptCenterGrab(trail) {
+  if (!pointer || pointer.dragging || playDrag || !world) return false;
+  if (!trail || trail.length < 2) return false;
+  const from = trail[0];
+  if (pressZone(from.x, from.y) !== "interior") return false;
+  let maxD = 0;
+  for (const p of trail) {
+    const d = Math.hypot(p.x - from.x, p.y - from.y);
+    if (d > maxD) maxD = d;
+  }
+  if (maxD <= tuneCode("grabAdopt", GRAB_ADOPT)) return false;
+  const to = trail[trail.length - 1];
+  if (Math.hypot(to.x - from.x, to.y - from.y) < 0.4) return false;
+  pointer.grab = { x: from.x, y: from.y };
+  engageGrab(to);
+  if (!playDrag) {
+    pointer.grab = null;
+    return false;
+  }
+  pointer.moved = true;
+  return true;
 }
 
 function engageGrab(worldPt) {
@@ -5395,7 +5468,10 @@ function onPointerMove(e) {
     pointer.pts.push({ x: ink.x, y: ink.y });
     pointer.moved = true;
   }
-  if (mode === "play") tryAdoptAnchorGrab(pointer.trail);
+  if (mode === "play") {
+    tryAdoptAnchorGrab(pointer.trail);
+    if (pointer && pointer.pts) tryAdoptCenterGrab(pointer.trail);
+  }
 }
 
 function onPointerUp(e) {
@@ -6195,15 +6271,46 @@ function runTests() {
     const wide = makeBox({ x: 8, y: 5, hw: 1.6, hh: 0.9, color: "#3c7fd6" });
     for (let i = 0; i < 8; i++) step(1 / 60);
     const boxMid = wide.getPosition();
-    check("the middle of a box is a drag", pressKind(boxMid.x, boxMid.y) === "drag");
+    const boxEdge = { x: boxMid.x + 1.5, y: boxMid.y };
+    check("the middle of a roomy box is a stroke", pressKind(boxMid.x, boxMid.y) === "draw");
+    check("the edge of a roomy box is a drag", pressKind(boxEdge.x, boxEdge.y) === "drag");
     check("empty paper is a stroke", pressKind(boxMid.x + 4, boxMid.y + 3) === "draw");
     check("press on the ball is a nudge", pressKind(ball.getPosition().x, ball.getPosition().y) === "nudge");
     const inkBefore = stats.shapes;
-    check("press in the middle grabs at once", beginDrag(boxMid.x, boxMid.y));
-    moveDrag(boxMid.x + 1.4, boxMid.y);
+    check("press on the edge grabs at once", beginDrag(boxEdge.x, boxEdge.y));
+    moveDrag(boxEdge.x + 1.4, boxEdge.y);
     for (let i = 0; i < 20; i++) step(1 / 60);
     endDrag();
     check("a grab does not leave a stroke", stats.shapes === inkBefore && !playDrag);
+    const slimBoard = makeBox({ x: 18, y: 8, hw: 1.4, hh: 0.22, color: "#ef8b2c" });
+    check("a thin board grabs everywhere", pressKind(slimBoard.getPosition().x, slimBoard.getPosition().y) === "drag");
+    const adoptTrail = [
+      { x: boxMid.x, y: boxMid.y },
+      { x: boxMid.x + 0.45, y: boxMid.y },
+      { x: boxMid.x + 0.95, y: boxMid.y },
+    ];
+    pointer = { id: 80, pts: adoptTrail.slice(), trail: adoptTrail.slice(), moved: true, grab: null, dragging: false };
+    const midAdopt = tryAdoptCenterGrab(pointer.trail);
+    check("a long stroke from the middle becomes a grab", midAdopt && playDrag && playDrag.body === wide);
+    endDrag();
+    pointer = null;
+    const loopTrail = ring(boxMid.x, boxMid.y, 0.16);
+    pointer = { id: 81, pts: loopTrail.slice(), trail: loopTrail.slice(), moved: true, grab: null, dragging: false };
+    const loopAdopt = tryAdoptCenterGrab(pointer.trail);
+    check("a small loop in the middle does not become a grab", !loopAdopt && !playDrag);
+    pointer = null;
+    const pinsBeforeHost = pins.filter((pin) => pin.userMade).length;
+    commitStroke(ring(boxMid.x, boxMid.y, 0.16), "#2b2b2b");
+    const hostNail = pins.find((pin) => pin.userMade && pin.body === wide);
+    check("a small loop in the middle of a box is a nail in that box", !!hostNail && hostNail.body === wide && pins.filter((pin) => pin.userMade).length === pinsBeforeHost + 1);
+    const lid = commitStroke([
+      { x: boxMid.x - 0.9, y: boxMid.y - 0.45 },
+      { x: boxMid.x + 0.9, y: boxMid.y - 0.45 },
+      { x: boxMid.x + 0.9, y: boxMid.y + 0.45 },
+      { x: boxMid.x - 0.9, y: boxMid.y + 0.45 },
+      { x: boxMid.x - 0.9, y: boxMid.y - 0.45 },
+    ], "#8d5a34");
+    check("a body drawn over a nail hangs on it", !!lid && lid.body && hostNail.joints.some(Boolean));
     const quick = makeBox({ x: 22, y: 8, hw: 0.4, hh: 0.4, color: "#ef8b2c" });
     check("fast grab starts", beginDrag(22, 8));
     moveDrag(28, 11);
