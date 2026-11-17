@@ -726,22 +726,20 @@ function straightenOpen(pts) {
   return clean;
 }
 
-// Kreiserkennung. Mit Geodreieck: geschlossene Form mit mindestens fünf
-// Ecken und ohne rechten Winkel wird zum Kreis (Dreieck/Viereck bleiben
-// Vielecke). Ohne Geodreieck nur bei erkennbarer Rundheit, sonst Vieleck.
-const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke (vorher 35°)
-const CIRCLE_MAX_RAD_DEV = 0.26;              // Radius-Schwankung / Mittel (vorher 0,15)
-const CIRCLE_MIN_ASPECT = 0.62;               // kürzere / längere Bounding-Box-Seite (vorher 0,75)
+// Kreiserkennung. Umrandung wird nach Bogenlänge gleichmäßig abgetastet,
+// der Mittelpunkt ist der Flächenschwerpunkt. Hauptkriterium: relative
+// Radiusstreuung std(r)/mean(r) unter CIRCLE_MAX_CV. Dazu die Eckenregel,
+// damit gleichmäßige Vielecke und Felsbrocken eckig bleiben.
+// Mit Geodreieck zusätzlich: mindestens fünf Ecken, kein rechter Winkel.
+const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an krakeligen Kreisen und 1:2-Ovalen
+const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
+const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
 const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
 const CIRCLE_RIGHT_TOL = 10 * Math.PI / 180;  // Geodreieck: Toleranz für 90°
 const CIRCLE_MIN_R = 0.16;
 const CIRCLE_MAX_R = 4;
-const CIRCLE_MIN_PTS = 5;                     // vorher fest 6
-const CIRCLE_LEN_MIN = 0.60;                  // Pfadlänge / Umfang, vorher 0,72
-const CIRCLE_LEN_MAX = 1.42;                  // vorher 1,28
-const CIRCLE_MAX_GAP = Math.PI * 0.95;        // größter Winkelabstand, vorher 0,7π
-const CIRCLE_RAD_FLOOR = 0.08;                // Mindest-Radiusabweichung in m, vorher 0,06
-const CIRCLE_CLOSE = 0.7;                     // Enden dürfen so weit offen sein (vorher 0,4)
+const CIRCLE_MIN_PTS = 5;
+const CIRCLE_CLOSE = 0.7;                     // Enden dürfen so weit offen sein
 
 function closedRing(pts) {
   if (!pts || pts.length < 2) return pts;
@@ -807,25 +805,57 @@ function maxNetTurn(pts, windowLen) {
   return best;
 }
 
-function ringCenter(pts) {
+function resampleRing(pts, n) {
+  const ring = closedRing(pts);
+  if (!ring || ring.length < 2) return null;
+  const total = ringLen(ring);
+  if (total < 1e-9) return null;
+  const out = [];
+  const count = Math.max(3, n | 0);
+  for (let i = 0; i < count; i++) out.push(pointAlongRing(ring, total * i / count));
+  return out;
+}
+
+function polygonCentroid(pts) {
+  const ring = closedRing(pts);
+  if (!ring || ring.length < 3) return null;
+  let area = 0;
   let cx = 0;
   let cy = 0;
-  for (const p of pts) {
-    cx += p.x;
-    cy += p.y;
+  for (let i = 0; i < ring.length; i++) {
+    const p = ring[i];
+    const q = ring[(i + 1) % ring.length];
+    const cr = p.x * q.y - q.x * p.y;
+    area += cr;
+    cx += (p.x + q.x) * cr;
+    cy += (p.y + q.y) * cr;
   }
-  return { x: cx / pts.length, y: cy / pts.length };
+  area *= 0.5;
+  if (Math.abs(area) < 1e-9) {
+    let sx = 0;
+    let sy = 0;
+    for (const p of ring) { sx += p.x; sy += p.y; }
+    return { x: sx / ring.length, y: sy / ring.length };
+  }
+  return { x: cx / (6 * area), y: cy / (6 * area) };
 }
 
 function circleFromPoints(pts) {
   const ring = closedRing(pts);
   if (!ring || ring.length < 3) return null;
-  const c = ringCenter(ring);
+  const samples = resampleRing(ring, CIRCLE_SAMPLES);
+  if (!samples) return null;
+  const c = polygonCentroid(ring);
+  if (!c) return null;
+  const rs = samples.map((p) => Math.hypot(p.x - c.x, p.y - c.y));
   let mean = 0;
-  for (const p of ring) mean += Math.hypot(p.x - c.x, p.y - c.y);
-  mean /= ring.length;
+  for (const r of rs) mean += r;
+  mean /= rs.length;
   if (mean < CIRCLE_MIN_R || mean > CIRCLE_MAX_R) return null;
-  return { x: c.x, y: c.y, r: mean };
+  let acc = 0;
+  for (const r of rs) acc += (r - mean) * (r - mean);
+  const cv = Math.sqrt(acc / rs.length) / mean;
+  return { x: c.x, y: c.y, r: mean, cv };
 }
 
 function hasRightAngle(pts, tol) {
@@ -844,28 +874,8 @@ function circleFit(pts) {
   if (!ring || ring.length < CIRCLE_MIN_PTS) return null;
   const fit = circleFromPoints(ring);
   if (!fit) return null;
-  const mean = fit.r;
-  let dev = 0;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of ring) {
-    dev = Math.max(dev, Math.abs(Math.hypot(p.x - fit.x, p.y - fit.y) - mean));
-    minX = Math.min(minX, p.x);
-    maxX = Math.max(maxX, p.x);
-    minY = Math.min(minY, p.y);
-    maxY = Math.max(maxY, p.y);
-  }
-  if (dev > Math.max(CIRCLE_RAD_FLOOR, mean * CIRCLE_MAX_RAD_DEV)) return null;
-  const bw = maxX - minX;
-  const bh = maxY - minY;
-  if (Math.min(bw, bh) < CIRCLE_MIN_ASPECT * Math.max(bw, bh)) return null;
-  const len = ringLen(ring);
-  const circ = Math.PI * 2 * mean;
-  if (len < circ * CIRCLE_LEN_MIN || len > circ * CIRCLE_LEN_MAX) return null;
-  const angs = ring.map((p) => Math.atan2(p.y - fit.y, p.x - fit.x)).sort((a, b) => a - b);
-  let gap = angs[0] + Math.PI * 2 - angs[angs.length - 1];
-  for (let i = 1; i < angs.length; i++) gap = Math.max(gap, angs[i] - angs[i - 1]);
-  if (gap > CIRCLE_MAX_GAP) return null;
-  if (maxNetTurn(ring, mean * CIRCLE_TURN_WIN) > CIRCLE_MAX_CORNER) return null;
+  if (fit.cv >= CIRCLE_MAX_CV) return null;
+  if (maxNetTurn(ring, fit.r * CIRCLE_TURN_WIN) > CIRCLE_MAX_CORNER) return null;
   return fit;
 }
 
@@ -874,7 +884,9 @@ function tryMakeCircle(pts) {
     const ring = closedRing(pts);
     if (!ring || ring.length < CIRCLE_MIN_PTS || Math.abs(signedArea(ring)) < 0.05) return null;
     if (hasRightAngle(ring)) return null;
-    return circleFromPoints(ring);
+    const fit = circleFromPoints(ring);
+    if (!fit || fit.cv >= CIRCLE_MAX_CV) return null;
+    return fit;
   }
   return circleFit(pts);
 }
@@ -4621,6 +4633,58 @@ function runTests() {
     ], "#d94b3a");
     const circFreeTri = drawings.find((d) => d.kind === "solid" && !d.preset);
     check("freehand triangle stays a polygon", !!circFreeTri && circFreeTri.kind === "solid" && circFreeTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circDense = [];
+    for (let i = 0; i < 40; i++) {
+      const a = -Math.PI / 2 + Math.PI * i / 40;
+      circDense.push({ x: 16 + Math.cos(a) * 1.15, y: 7 + Math.sin(a) * 1.15 });
+    }
+    for (let i = 1; i < 8; i++) {
+      const a = Math.PI / 2 + Math.PI * i / 8;
+      circDense.push({ x: 16 + Math.cos(a) * 1.15, y: 7 + Math.sin(a) * 1.15 });
+    }
+    circDense.push({ x: 16 + Math.cos(-Math.PI / 2) * 1.15, y: 7 + Math.sin(-Math.PI / 2) * 1.15 });
+    commitStroke(circDense, "#3c7fd6");
+    const circUneven = drawings.find((d) => d.kind === "roller");
+    check("unevenly sampled circle is a circle", !!circUneven && circUneven.kind === "roller");
+
+    buildLevel(LEVELS["ein-klotz"]);
+    commitStroke([
+      { x: 8, y: 4 }, { x: 12, y: 4 }, { x: 12, y: 8 }, { x: 8, y: 8 }, { x: 8, y: 4 },
+    ], "#3c7fd6");
+    const circSquare = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("square stays a polygon", !!circSquare && circSquare.kind === "solid" && circSquare.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circHexPts = [];
+    for (let i = 0; i <= 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      circHexPts.push({ x: 14 + Math.cos(a) * 1.5, y: 7 + Math.sin(a) * 1.5 });
+    }
+    commitStroke(circHexPts, "#8d5a34");
+    const circHex = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("regular hexagon stays a polygon", !!circHex && circHex.kind === "solid" && circHex.meta.outline.local.length === 6 && !drawings.some((d) => d.kind === "roller"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circPentPts = [];
+    for (let i = 0; i <= 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      circPentPts.push({ x: 14 + Math.cos(a) * 1.5, y: 7 + Math.sin(a) * 1.5 });
+    }
+    commitStroke(circPentPts, "#ef8b2c");
+    const circPent = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("regular pentagon stays a polygon", !!circPent && circPent.kind === "solid" && circPent.meta.outline.local.length === 5 && !drawings.some((d) => d.kind === "roller"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const circLongPts = [];
+    for (let i = 0; i <= 32; i++) {
+      const a = (i / 32) * Math.PI * 2;
+      circLongPts.push({ x: 16 + Math.cos(a) * 2.0, y: 7 + Math.sin(a) * 1.0 });
+    }
+    commitStroke(circLongPts, "#7a4fbf");
+    const circLong = drawings.find((d) => d.kind === "solid" && !d.preset);
+    check("two-to-one ellipse stays a polygon", !!circLong && circLong.kind === "solid" && !drawings.some((d) => d.kind === "roller"));
 
     function ancBox(x, y, w, h, color) {
       return commitStroke([
