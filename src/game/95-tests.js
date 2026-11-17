@@ -779,19 +779,34 @@ function runTests() {
     for (let i = 0; i < 40; i++) step(1 / 60);
     const shoveX0 = ball.getPosition().x;
     beginDrag(pusher.getPosition().x, pusher.getPosition().y);
+    let shoveGhost = false;
     for (let i = 0; i < 120; i++) {
       const bp = ball.getPosition();
       moveDrag(bp.x, bp.y);
       step(1 / 60);
+      if (playDrag && playDrag.ghost) shoveGhost = true;
     }
     lines.push("INFO shove ball " + ball.getPosition().x.toFixed(2) + " box " + pusher.getPosition().x.toFixed(2) + " trick " + stats.dragTrick);
-    check("a dragged body can shove the ball", ball.getPosition().x > shoveX0 + 0.35);
-    check("dragging a body into the ball is a trick", stats.dragTrick);
+    // Geist-Regel: Am Griff stößt ein Körper mit nichts zusammen, auch nicht mit der Kugel.
+    check("a dragged body passes through the ball", Math.abs(ball.getPosition().x - shoveX0) < 0.1 && shoveGhost);
+    check("passing through the ball while held is no trick", !stats.dragTrick);
+    endDrag();
+    check("a ghost released on the ball jumps back off it", !overlapAtPose(pusher, poseOfBody(pusher), null));
+    // Fallen lassen direkt nach dem Loslassen bleibt Tricksen.
+    buildLevel(LEVELS["ein-klotz"]);
+    const dropper = makeBox({ x: 5, y: 4.6, hw: 0.4, hh: 0.4, color: "#d94b3a" });
+    beginDrag(5, 4.6);
+    for (let i = 0; i < 5; i++) {
+      moveDrag(5, 4.6);
+      step(1 / 60);
+    }
+    endDrag();
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    check("dropping a just-released body on the ball is a trick", stats.dragTrick && dropper.getPosition().y > ball.getPosition().y);
     for (const star of stars) star.got = true;
     step(1 / 60);
     check("a trick still solves the level", won);
     check("a trick skips confetti", confetti.length === 0);
-    endDrag();
 
     buildLevel(LEVELS["ein-klotz"]);
     const rested = makeBox({ x: 18, y: 3.2, hw: 0.4, hh: 0.4, color: "#3e9a48" });
@@ -2441,6 +2456,154 @@ function runTests() {
         lines.push("INFO wuerfel after import sink " + wfRes.maxSink.toFixed(3) + " meanV " + wfRes.meanV.toFixed(3) + " chord " + wfRes.endChord.toFixed(4));
         check("imported box on a rope comes to rest above the floor", wfRes.maxSink < 0.1 && wfRes.meanV < 0.1 && wfRes.endChord < 1.012);
       }
+    }
+
+    // Ebenen per Nagel und Geist beim Ziehen (52-ebenen.js).
+    {
+      lastTap = 0;
+      buildLevel(LEVELS["ein-klotz"]);
+      ball.setTransform(V(3, 1.66), 0);
+      cam.cx = 16;
+      cam.cy = 6;
+      cam.zoom = 1;
+      const lvCol = makeBox({ x: 12, y: 4.35, hw: 0.5, hh: 3.0 });
+      for (let i = 0; i < 20; i++) step(1 / 60);
+      const lvColDraw = drawings.find((d) => d.body === lvCol);
+      const lvAnch = anchorBody(lvColDraw, ground, { x: 12, y: 1.3 }, { x: 12, y: 1.8 });
+      const lvPin = rememberPin(12, 6.6, lvCol, true);
+      const lvBoard = makeBox({ x: 22, y: 6.6, hw: 2.4, hh: 0.2, color: "#3c7fd6" });
+      world.setGravity(V(0, 0));
+      // Brett am Rand greifen und mit echten Zeiger-Ereignissen über den Nagel ziehen.
+      const lvGrab = worldToScreen(23.9, 6.6);
+      onPointerDown({ button: 0, clientX: lvGrab.x, clientY: lvGrab.y, pointerId: 91 });
+      let lvGhostOverNail = false;
+      let lvTargetSeen = false;
+      for (let i = 1; i <= 40; i++) {
+        const gx = 23.9 + (13.9 - 23.9) * i / 40;
+        const sp = worldToScreen(gx, 6.6);
+        onPointerMove({ clientX: sp.x, clientY: sp.y, pointerId: 91 });
+        step(1 / 60);
+        if (playDrag && Math.abs(lvBoard.getPosition().x - 12) < 0.3) {
+          if (playDrag.ghost) lvGhostOverNail = true;
+          if (playDrag.targets && playDrag.targets.indexOf(lvPin) >= 0) lvTargetSeen = true;
+        }
+      }
+      const lvHeld = !!playDrag && playDrag.body === lvBoard;
+      const lvColPos = lvCol.getPosition();
+      check("a held body passes through the column", lvHeld && Math.abs(lvBoard.getPosition().x - 12) < 0.3 && lvAnch && Math.abs(lvColPos.x - 12) < 1e-6);
+      check("a held body over a nail in its host is no ghost and marks the nail", lvTargetSeen && !lvGhostOverNail);
+      const lvUp = worldToScreen(13.9, 6.6);
+      onPointerUp({ clientX: lvUp.x, clientY: lvUp.y, pointerId: 91 });
+      const lvPinned = lvPin.joints.some((j) => j && (j.getBodyA() === lvBoard || j.getBodyB() === lvBoard));
+      check("releasing over the nail pins the body to the column", !playDrag && lvPinned && nailLinked(lvBoard, lvCol));
+      const lvLayers = bodyLayers();
+      const lvOrder = drawingsByLayer();
+      check("a body on a nail is one layer in front of its host", (lvLayers.get(lvCol) || 0) === 0 && lvLayers.get(lvBoard) === 1
+        && lvOrder.findIndex((d) => d.body === lvBoard) > lvOrder.findIndex((d) => d.body === lvCol));
+      world.setGravity(V(0, -24));
+      const lvTouch = (a, b) => {
+        for (let c = world.getContactList(); c; c = c.getNext()) {
+          const ba = c.getFixtureA().getBody();
+          const bb = c.getFixtureB().getBody();
+          if (((ba === a && bb === b) || (ba === b && bb === a)) && c.isTouching() && c.isEnabled()) return true;
+        }
+        return false;
+      };
+      // Windrad: Motor an, das Brett dreht sich vor der Säule frei herum.
+      cycleNailMotor(lvPin);
+      const lvA0 = lvBoard.getAngle();
+      let lvHostTouch = false;
+      for (let i = 0; i < 240; i++) {
+        step(1 / 60);
+        if (lvTouch(lvBoard, lvCol)) lvHostTouch = true;
+      }
+      const lvTurn = lvBoard.getAngle() - lvA0;
+      const lvAt = pinWorld(lvPin);
+      const lvLocal = lvBoard.getLocalPoint(V(lvAt.x, lvAt.y));
+      lines.push("INFO windrad turn " + (lvTurn * 180 / Math.PI).toFixed(0) + " deg, host touch " + lvHostTouch);
+      check("a windmill board turns freely in front of its column", lvTurn > Math.PI * 1.6 && !lvHostTouch && Math.hypot(lvLocal.x, lvLocal.y) < 0.05);
+      cycleNailMotor(lvPin);
+      cycleNailMotor(lvPin);
+      // Ein dritter Körper stößt weiter mit dem Brett zusammen.
+      lvBoard.setTransform(lvBoard.getPosition(), 0);
+      lvBoard.setAngularVelocity(0);
+      const lvThird = makeBox({ x: 13.6, y: 8.2, hw: 0.35, hh: 0.35, density: 0.3, color: "#d94b3a" });
+      let lvThirdTouch = false;
+      for (let i = 0; i < 40; i++) {
+        step(1 / 60);
+        if (lvTouch(lvThird, lvBoard)) lvThirdTouch = true;
+      }
+      check("a body on a nail still collides with a third body", lvThirdTouch);
+      world.destroyBody(lvThird);
+      bodyMeta.delete(lvThird);
+      drawings = drawings.filter((d) => d.body !== lvThird);
+
+      // Zettel: Nach Export und Import gilt der Filter wieder.
+      const lvText = encodeSceneTextSync(captureScene());
+      const lvLoad = loadSceneFromTextSync(lvText);
+      const lvPin2 = pins.find((pn) => Math.hypot(pinWorld(pn).x - 12, pinWorld(pn).y - 6.6) < 0.1);
+      const lvCol2 = lvPin2 && lvPin2.body;
+      const lvBoard2 = lvPin2 && lvPin2.joints.map((j) => nailJointOther(lvPin2, j)).find((b) => b && bodyMeta.get(b) && bodyMeta.get(b).kind !== "rope");
+      let lvHostTouch2 = false;
+      if (lvBoard2) {
+        lvBoard2.setAngularVelocity(3);
+        for (let i = 0; i < 90; i++) {
+          step(1 / 60);
+          if (lvTouch(lvBoard2, lvCol2)) lvHostTouch2 = true;
+        }
+      }
+      check("after scene import the nailed board still ignores its column", !!(lvLoad && lvLoad.ok) && !!lvBoard2 && nailLinked(lvBoard2, lvCol2) && bodyLayers().get(lvBoard2) === 1 && !lvHostTouch2);
+
+      // Geist: durch einen Klotz ziehen, überlappend loslassen, zurück zur letzten freien Pose.
+      buildLevel(LEVELS["ein-klotz"]);
+      ball.setTransform(V(3, 1.66), 0);
+      world.setGravity(V(0, 0));
+      const gsA = makeBox({ x: 16, y: 5, hw: 0.8, hh: 0.8 });
+      const gsB = makeBox({ x: 21, y: 5, hw: 0.5, hh: 0.5, color: "#3c7fd6" });
+      beginDrag(21, 5);
+      let gsGhost = false;
+      let gsShadowFree = true;
+      for (let i = 1; i <= 50; i++) {
+        moveDrag(21 + (13 - 21) * i / 50, 5);
+        step(1 / 60);
+        if (playDrag.ghost) {
+          gsGhost = true;
+          if (overlapAtPose(gsB, playDrag.free, null)) gsShadowFree = false;
+        }
+      }
+      const gsAPos = gsA.getPosition();
+      check("a dragged body goes through another body", Math.abs(gsB.getPosition().x - 13) < 0.05 && Math.hypot(gsAPos.x - 16, gsAPos.y - 5) < 0.02);
+      check("overlapping while held sets the ghost flag, the shadow pose is free", gsGhost && gsShadowFree && !playDrag.ghost);
+      for (let i = 1; i <= 20; i++) {
+        moveDrag(13 + (16.3 - 13) * i / 20, 5.2);
+        step(1 / 60);
+      }
+      const gsFree = playDrag.free ? { x: playDrag.free.x, y: playDrag.free.y, a: playDrag.free.a } : null;
+      const gsWasGhost = !!playDrag.ghost;
+      endDrag();
+      const gsP = gsB.getPosition();
+      const gsV = gsB.getLinearVelocity();
+      lines.push("INFO ghost snap back to " + gsP.x.toFixed(3) + "," + gsP.y.toFixed(3));
+      check("releasing a ghost without a nail jumps back to the last free pose", gsWasGhost && !!gsFree && Math.hypot(gsP.x - gsFree.x, gsP.y - gsFree.y) < 1e-6
+        && Math.hypot(gsV.x, gsV.y) < 1e-9 && Math.abs(gsB.getAngularVelocity()) < 1e-9);
+      check("the snap-back pose sits right at the edge of the other body", gsP.x < 16 - 1.3 + 1e-3 && gsP.x > 16 - 1.3 - 0.08 && !overlapAtPose(gsB, poseOfBody(gsB), null));
+
+      // Über einem Nagel, aber zusätzlich in einem dritten Körper: Geist, kein Heften.
+      const gsPin = rememberPin(20, 8, ground, true);
+      const gsC = makeBox({ x: 20.9, y: 8, hw: 0.3, hh: 0.3, color: "#d94b3a" });
+      const gsD = makeBox({ x: 25, y: 8, hw: 1.0, hh: 0.4, color: "#3c7fd6" });
+      beginDrag(25, 8);
+      for (let i = 1; i <= 30; i++) {
+        moveDrag(25 + (20.2 - 25) * i / 30, 8);
+        step(1 / 60);
+      }
+      const gsThirdGhost = !!playDrag.ghost;
+      const gsUp = worldToScreen(20.2, 8);
+      pointer = { id: 92, dragging: true, trail: [{ x: 20.2, y: 8 }] };
+      onPointerUp({ clientX: gsUp.x, clientY: gsUp.y, pointerId: 92 });
+      const gsDPinned = gsPin.joints.some((j) => j && (j.getBodyA() === gsD || j.getBodyB() === gsD));
+      check("over a nail but inside a third body stays a ghost and does not pin", gsThirdGhost && !gsDPinned && !overlapAtPose(gsD, poseOfBody(gsD), null));
+      world.setGravity(V(0, -24));
     }
 
     mountTunePanel();

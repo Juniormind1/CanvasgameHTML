@@ -126,10 +126,11 @@ function isWireMeta(meta) {
 
 function attachPlayContacts(targetWorld) {
   targetWorld.on("begin-contact", (contact) => {
+    if (layerContactOff(contact)) return;
     contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
   });
   targetWorld.on("pre-solve", (contact) => {
-    if (ropeOwnEndContact(contact)) {
+    if (layerContactOff(contact) || ropeOwnEndContact(contact)) {
       contact.setEnabled(false);
       return;
     }
@@ -231,6 +232,7 @@ function step(dt) {
   world.step(dt, ropeLive ? 20 : 10, ropeLive ? 16 : 8);
   if (ropeLive) tightenRopes();
   snapDrag(dt);
+  updateDragGhost();
   handleContacts();
   applyRopeCuts();
   stepDragFresh(dt);

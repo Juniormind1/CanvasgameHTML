@@ -1,92 +1,3 @@
-function supportAlong(body, dx, dy) {
-  const len = Math.hypot(dx, dy) || 1;
-  const wx = dx / len;
-  const wy = dy / len;
-  const ang = body.getAngle();
-  const c = Math.cos(ang);
-  const s = Math.sin(ang);
-  const lx = c * wx + s * wy;
-  const ly = -s * wx + c * wy;
-  let best = 0.02;
-  for (let f = body.getFixtureList(); f; f = f.getNext()) {
-    const shape = f.getShape();
-    if (shape.m_type === "circle") {
-      const p = shape.m_p || { x: 0, y: 0 };
-      best = Math.max(best, p.x * lx + p.y * ly + shape.m_radius);
-    } else if (shape.m_vertices && shape.m_count) {
-      for (let i = 0; i < shape.m_count; i++) {
-        const v = shape.m_vertices[i];
-        best = Math.max(best, v.x * lx + v.y * ly);
-      }
-    }
-  }
-  return best;
-}
-
-function rayBlock(body, x1, y1, x2, y2) {
-  let best = null;
-  const dirx = x2 - x1;
-  const diry = y2 - y1;
-  world.rayCast(V(x1, y1), V(x2, y2), (fixture, point, normal, fraction) => {
-    const other = fixture.getBody();
-    if (other === body || fixture.isSensor()) return -1;
-    const meta = bodyMeta.get(other);
-    if (meta && (meta.kind === "star" || meta.kind === "rope")) return -1;
-    const nx = normal.x;
-    const ny = normal.y;
-    if (nx * dirx + ny * diry > 0) return -1;
-    if (!best || fraction < best.fraction) best = { fraction, nx, ny, quest: other === ball };
-    return Math.max(fraction, 1e-5);
-  });
-  return best;
-}
-
-function clampDragGoal(body, goal) {
-  const origin = body.getPosition();
-  let cx = origin.x;
-  let cy = origin.y;
-  let dx = goal.x - cx;
-  let dy = goal.y - cy;
-  // Other bodies stop 1.2 cm short. The quest ball is pressed 5 cm so the
-  // contact solver actually shoves it; that shove is the drag trick.
-  const skinOut = 0.012;
-  const skinBall = -0.05;
-  for (let slide = 0; slide < 4; slide++) {
-    const seg = Math.hypot(dx, dy);
-    if (seg < 1e-4) break;
-    const dirx = dx / seg;
-    const diry = dy / seg;
-    const support = supportAlong(body, dirx, diry);
-    const cast = support + seg + skinBall;
-    const hit = rayBlock(body, cx, cy, cx + dirx * cast, cy + diry * cast);
-    if (!hit) {
-      cx += dx;
-      cy += dy;
-      break;
-    }
-    const skin = hit.quest ? skinBall : skinOut;
-    const allow = hit.fraction * cast - support - skin;
-    const stepLen = Math.min(seg, Math.max(allow, 0));
-    if (allow < 0) {
-      cx += dirx * allow;
-      cy += diry * allow;
-    } else {
-      cx += dirx * stepLen;
-      cy += diry * stepLen;
-    }
-    if (allow >= seg - 1e-4) break;
-    const nx = hit.nx;
-    const ny = hit.ny;
-    const leftx = dx - dirx * Math.max(allow, 0);
-    const lefty = dy - diry * Math.max(allow, 0);
-    const into = leftx * nx + lefty * ny;
-    if (into >= 0) break;
-    dx = leftx - nx * into;
-    dy = lefty - ny * into;
-  }
-  return { x: cx, y: cy };
-}
-
 const NAIL_MOTOR_SPEED = Math.PI / 2;
 const NAIL_MOTOR_TORQUE = 8000;
 const NAIL_HIT = 0.32;
@@ -187,10 +98,9 @@ function clampDragFollow(body) {
   const com = body.getPosition();
   const offx = com.x - anchor.x;
   const offy = com.y - anchor.y;
-  const clamped = clampDragGoal(body, {
-    x: playDrag.goal.x + offx,
-    y: playDrag.goal.y + offy,
-  });
+  // Am Griff stößt der Körper mit nichts zusammen (Geist-Regel, 52-ebenen.js),
+  // deshalb folgt er dem Ziel ohne Anschlag.
+  const clamped = { x: playDrag.goal.x + offx, y: playDrag.goal.y + offy };
   return { offx, offy, clamped };
 }
 
@@ -290,6 +200,11 @@ function beginDrag(x, y) {
     goal: { x, y },
     prevGoal: { x, y },
     lastGoalV: { x: 0, y: 0 },
+    noCollide: true,
+    ghost: false,
+    targets: [],
+    free: poseOfBody(body),
+    wasFree: true,
   };
   return true;
 }
@@ -307,6 +222,7 @@ function endDrag() {
   if (!world || !drag.joint) return;
   world.destroyJoint(drag.joint);
   if (!drag.body) return;
+  if (drag.ghost) restoreDragFree(drag);
   drag.body.setLinearVelocity(V(0, 0));
   drag.body.setAngularVelocity(0);
   drag.body.setBullet(drag.wasBullet);

@@ -3394,102 +3394,15 @@ function eraseAt(x, y) {
 }
 
 function drawingAt(x, y) {
-  for (let i = drawings.length - 1; i >= 0; i--) {
-    const d = drawings[i];
+  // Vorderste Ebene zuerst (Ebenen per Nagel, 52-ebenen.js).
+  const order = drawingsByLayer();
+  for (let i = order.length - 1; i >= 0; i--) {
+    const d = order[i];
     if (d.kind === "rope" || !d.body || !d.meta) continue;
     if (!d.body.isDynamic()) continue;
     if (containsMeta(d.meta, x, y)) return d;
   }
   return null;
-}
-
-function supportAlong(body, dx, dy) {
-  const len = Math.hypot(dx, dy) || 1;
-  const wx = dx / len;
-  const wy = dy / len;
-  const ang = body.getAngle();
-  const c = Math.cos(ang);
-  const s = Math.sin(ang);
-  const lx = c * wx + s * wy;
-  const ly = -s * wx + c * wy;
-  let best = 0.02;
-  for (let f = body.getFixtureList(); f; f = f.getNext()) {
-    const shape = f.getShape();
-    if (shape.m_type === "circle") {
-      const p = shape.m_p || { x: 0, y: 0 };
-      best = Math.max(best, p.x * lx + p.y * ly + shape.m_radius);
-    } else if (shape.m_vertices && shape.m_count) {
-      for (let i = 0; i < shape.m_count; i++) {
-        const v = shape.m_vertices[i];
-        best = Math.max(best, v.x * lx + v.y * ly);
-      }
-    }
-  }
-  return best;
-}
-
-function rayBlock(body, x1, y1, x2, y2) {
-  let best = null;
-  const dirx = x2 - x1;
-  const diry = y2 - y1;
-  world.rayCast(V(x1, y1), V(x2, y2), (fixture, point, normal, fraction) => {
-    const other = fixture.getBody();
-    if (other === body || fixture.isSensor()) return -1;
-    const meta = bodyMeta.get(other);
-    if (meta && (meta.kind === "star" || meta.kind === "rope")) return -1;
-    const nx = normal.x;
-    const ny = normal.y;
-    if (nx * dirx + ny * diry > 0) return -1;
-    if (!best || fraction < best.fraction) best = { fraction, nx, ny, quest: other === ball };
-    return Math.max(fraction, 1e-5);
-  });
-  return best;
-}
-
-function clampDragGoal(body, goal) {
-  const origin = body.getPosition();
-  let cx = origin.x;
-  let cy = origin.y;
-  let dx = goal.x - cx;
-  let dy = goal.y - cy;
-  // Other bodies stop 1.2 cm short. The quest ball is pressed 5 cm so the
-  // contact solver actually shoves it; that shove is the drag trick.
-  const skinOut = 0.012;
-  const skinBall = -0.05;
-  for (let slide = 0; slide < 4; slide++) {
-    const seg = Math.hypot(dx, dy);
-    if (seg < 1e-4) break;
-    const dirx = dx / seg;
-    const diry = dy / seg;
-    const support = supportAlong(body, dirx, diry);
-    const cast = support + seg + skinBall;
-    const hit = rayBlock(body, cx, cy, cx + dirx * cast, cy + diry * cast);
-    if (!hit) {
-      cx += dx;
-      cy += dy;
-      break;
-    }
-    const skin = hit.quest ? skinBall : skinOut;
-    const allow = hit.fraction * cast - support - skin;
-    const stepLen = Math.min(seg, Math.max(allow, 0));
-    if (allow < 0) {
-      cx += dirx * allow;
-      cy += diry * allow;
-    } else {
-      cx += dirx * stepLen;
-      cy += diry * stepLen;
-    }
-    if (allow >= seg - 1e-4) break;
-    const nx = hit.nx;
-    const ny = hit.ny;
-    const leftx = dx - dirx * Math.max(allow, 0);
-    const lefty = dy - diry * Math.max(allow, 0);
-    const into = leftx * nx + lefty * ny;
-    if (into >= 0) break;
-    dx = leftx - nx * into;
-    dy = lefty - ny * into;
-  }
-  return { x: cx, y: cy };
 }
 
 const NAIL_MOTOR_SPEED = Math.PI / 2;
@@ -3592,10 +3505,9 @@ function clampDragFollow(body) {
   const com = body.getPosition();
   const offx = com.x - anchor.x;
   const offy = com.y - anchor.y;
-  const clamped = clampDragGoal(body, {
-    x: playDrag.goal.x + offx,
-    y: playDrag.goal.y + offy,
-  });
+  // Am Griff stößt der Körper mit nichts zusammen (Geist-Regel, 52-ebenen.js),
+  // deshalb folgt er dem Ziel ohne Anschlag.
+  const clamped = { x: playDrag.goal.x + offx, y: playDrag.goal.y + offy };
   return { offx, offy, clamped };
 }
 
@@ -3695,6 +3607,11 @@ function beginDrag(x, y) {
     goal: { x, y },
     prevGoal: { x, y },
     lastGoalV: { x: 0, y: 0 },
+    noCollide: true,
+    ghost: false,
+    targets: [],
+    free: poseOfBody(body),
+    wasFree: true,
   };
   return true;
 }
@@ -3712,6 +3629,7 @@ function endDrag() {
   if (!world || !drag.joint) return;
   world.destroyJoint(drag.joint);
   if (!drag.body) return;
+  if (drag.ghost) restoreDragFree(drag);
   drag.body.setLinearVelocity(V(0, 0));
   drag.body.setAngularVelocity(0);
   drag.body.setBullet(drag.wasBullet);
@@ -3739,6 +3657,231 @@ function stepDragFresh(dt) {
   }
 }
 
+// Ebenen per Nagel und Geist beim Ziehen.
+// Ebene 0: Boden, verankerte (statische) und freie Körper. Hängt ein Körper an
+// einem Nagel, dessen Wirt in Ebene n liegt, ist er Ebene n+1 und wird davor
+// gezeichnet. Direkt über einen Nagel verbundene Körper stoßen nie zusammen
+// (Nagel-Joints haben collideConnected: false, der pre-solve-Filter
+// `layerContactOff` sichert das zusätzlich ab). Seile zählen nicht als
+// Nagelverbindung: Sehne und Perlen kollidieren weiter wie bisher.
+// Ein Körper an der Maus stößt mit nichts zusammen. Überlappt er etwas, mit dem
+// er nach dem Loslassen zusammenstoßen würde, ist er ein Geist: halb
+// durchsichtig, und an der letzten freien Pose steht ein blasser Schatten.
+// Loslassen als Geist springt dorthin zurück (Tempo 0).
+const GHOST_ALPHA = 0.42;
+const GHOST_SHADOW_ALPHA = 0.2;
+const GHOST_BISECT = 10;
+const GHOST_CIRCLE_TOL = 0.01; // m, Kreise dürfen so weit eintauchen (Ruhekontakt)
+const LAYER_MAX = 24;
+
+function nailJointOther(pin, j) {
+  if (!pin || !j) return null;
+  const a = j.getBodyA();
+  const b = j.getBodyB();
+  if (a === pin.body) return b;
+  if (b === pin.body) return a;
+  return null;
+}
+
+// Zwei Körper direkt über einen Nagel verbunden (Wirt und angehefteter Körper).
+function nailLinked(a, b) {
+  if (!a || !b || a === b) return false;
+  for (const pin of pins) {
+    if (pin.body !== a && pin.body !== b) continue;
+    const other = pin.body === a ? b : a;
+    for (const j of pin.joints) {
+      if (nailJointOther(pin, j) === other) return true;
+    }
+  }
+  return false;
+}
+
+function dragGhostBody(body) {
+  return !!(playDrag && playDrag.body === body && playDrag.noCollide);
+}
+
+// Kontaktfilter für pre-solve (und begin-contact).
+function layerContactOff(contact) {
+  const a = contact.getFixtureA().getBody();
+  const b = contact.getFixtureB().getBody();
+  if (dragGhostBody(a) || dragGhostBody(b)) return true;
+  return nailLinked(a, b);
+}
+
+// Ebene je Körper aus den Nagel-Joints (Seilperlen erben die Ebene ihres Nagelwirts + 1).
+function bodyLayers() {
+  const layer = new Map();
+  const edges = [];
+  for (const pin of pins) {
+    for (const j of pin.joints) {
+      const other = nailJointOther(pin, j);
+      if (other && other !== pin.body) edges.push([pin.body, other]);
+    }
+  }
+  for (let pass = 0; pass < LAYER_MAX; pass++) {
+    let changed = false;
+    for (const [host, child] of edges) {
+      if (!child.isDynamic()) continue;
+      const l = Math.min(LAYER_MAX, (layer.get(host) || 0) + 1);
+      if (l > (layer.get(child) || 0)) {
+        layer.set(child, l);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return layer;
+}
+
+function drawLayer(draw, layers) {
+  if (!draw) return 0;
+  if (draw.kind === "rope" && draw.bodies && draw.bodies.length) {
+    let l = 0;
+    for (const b of draw.bodies) l = Math.max(l, layers.get(b) || 0);
+    return l;
+  }
+  return draw.body ? layers.get(draw.body) || 0 : 0;
+}
+
+// Zeichenreihenfolge: nach Ebene, innerhalb einer Ebene wie bisher.
+function drawingsByLayer() {
+  const layers = bodyLayers();
+  return drawings
+    .map((d, i) => ({ d, i, l: drawLayer(d, layers) }))
+    .sort((p, q) => p.l - q.l || p.i - q.i)
+    .map((p) => p.d);
+}
+
+function poseOfBody(body) {
+  const p = body.getPosition();
+  return { x: p.x, y: p.y, a: body.getAngle() };
+}
+
+function proxyFor(shape, index) {
+  const proxy = new planck.DistanceProxy();
+  proxy.set(shape, index);
+  // Kerngeometrie: Polygone und Kanten ohne Hautradius, Kreise leicht kleiner.
+  if (shape.m_type === "circle") proxy.m_radius = Math.max(0, shape.m_radius - GHOST_CIRCLE_TOL);
+  else proxy.m_radius = 0;
+  return proxy;
+}
+
+function childCount(shape) {
+  return shape.getChildCount ? shape.getChildCount() : 1;
+}
+
+// Würde `body` an der Pose `pose` etwas überlappen, mit dem er nach dem
+// Loslassen zusammenstößt? `skip` enthält Körper, an die er sich heften würde.
+function overlapAtPose(body, pose, skip) {
+  if (!world || !body) return null;
+  const xf = planck.Transform(V(pose.x, pose.y), pose.a);
+  let lx = Infinity, ly = Infinity, ux = -Infinity, uy = -Infinity;
+  const mine = [];
+  for (let f = body.getFixtureList(); f; f = f.getNext()) {
+    if (f.isSensor()) continue;
+    const shape = f.getShape();
+    for (let c = 0; c < childCount(shape); c++) {
+      const aabb = new planck.AABB();
+      shape.computeAABB(aabb, xf, c);
+      lx = Math.min(lx, aabb.lowerBound.x); ly = Math.min(ly, aabb.lowerBound.y);
+      ux = Math.max(ux, aabb.upperBound.x); uy = Math.max(uy, aabb.upperBound.y);
+      mine.push({ f, proxy: proxyFor(shape, c) });
+    }
+  }
+  if (!mine.length) return null;
+  const found = [];
+  world.queryAABB(planck.AABB(V(lx, ly), V(ux, uy)), (fixture) => {
+    found.push(fixture);
+    return true;
+  });
+  for (const fb of found) {
+    const other = fb.getBody();
+    if (other === body || fb.isSensor()) continue;
+    if (skip && skip.has(other)) continue;
+    const meta = bodyMeta.get(other);
+    if (meta && (meta.kind === "star" || meta.kind === "rope")) continue;
+    if (!body.shouldCollide(other) || nailLinked(body, other)) continue;
+    const shape = fb.getShape();
+    const xfb = other.getTransform();
+    for (let c = 0; c < childCount(shape); c++) {
+      const pb = proxyFor(shape, c);
+      for (const m of mine) {
+        if (!m.f.shouldCollide(fb)) continue;
+        const input = new planck.DistanceInput();
+        input.proxyA = m.proxy;
+        input.proxyB = pb;
+        input.transformA = xf;
+        input.transformB = xfb;
+        input.useRadii = true;
+        const out = new planck.DistanceOutput();
+        planck.Distance(out, new planck.SimplexCache(), input);
+        if (out.distance <= 1e-6) return other;
+      }
+    }
+  }
+  return null;
+}
+
+// Nägel, an die sich der Körper beim Loslassen heften würde (wie attachExistingPins).
+function dragPinTargets(body) {
+  const meta = bodyMeta.get(body);
+  if (!meta || body === ball) return [];
+  const out = [];
+  for (const pin of pins) {
+    if (pin.body === body || pinHoldsBody(pin, body)) continue;
+    const wp = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
+    if (containsMeta(meta, wp.x, wp.y)) out.push(pin);
+  }
+  return out;
+}
+
+function lerpPose(p, q, t) {
+  let da = q.a - p.a;
+  while (da > Math.PI) da -= Math.PI * 2;
+  while (da < -Math.PI) da += Math.PI * 2;
+  return { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, a: p.a + da * t };
+}
+
+// Nach jedem Physikschritt: Geist-Zustand und letzte freie Pose nachführen.
+function updateDragGhost() {
+  if (!playDrag || !playDrag.body || !playDrag.noCollide) return;
+  const body = playDrag.body;
+  const now = poseOfBody(body);
+  const targets = dragPinTargets(body);
+  const hosts = new Set(targets.map((p) => p.body));
+  const hit = overlapAtPose(body, now, hosts);
+  playDrag.targets = hit ? [] : targets;
+  playDrag.ghost = !!hit;
+  if (!overlapAtPose(body, now, null)) {
+    playDrag.free = now;
+    playDrag.wasFree = true;
+    return;
+  }
+  // Gerade erst hineingeraten: letzte freie Pose bis an die Berührung heranschieben.
+  if (playDrag.wasFree && playDrag.free) {
+    let lo = 0;
+    let hi = 1;
+    const from = playDrag.free;
+    for (let i = 0; i < GHOST_BISECT; i++) {
+      const t = (lo + hi) / 2;
+      if (overlapAtPose(body, lerpPose(from, now, t), null)) hi = t;
+      else lo = t;
+    }
+    playDrag.free = lerpPose(from, now, lo);
+  }
+  playDrag.wasFree = false;
+}
+
+// Geist losgelassen: zurück an die letzte freie Pose, ohne Tempo.
+function restoreDragFree(drag) {
+  if (!drag || !drag.body || !drag.free || !world) return false;
+  const body = drag.body;
+  body.setTransform(V(drag.free.x, drag.free.y), drag.free.a);
+  body.setLinearVelocity(V(0, 0));
+  body.setAngularVelocity(0);
+  body.setAwake(true);
+  return true;
+}
 // Verankern: ein kurzer, fast gerader Zug vom Boden (oder einem verankerten
 // Körper) in einen festen Körper macht ihn statisch, als wäre er Teil des
 // Bodens. Umgekehrt geht es auch: Körper greifen und auf dem Boden loslassen.
@@ -4122,10 +4265,11 @@ function isWireMeta(meta) {
 
 function attachPlayContacts(targetWorld) {
   targetWorld.on("begin-contact", (contact) => {
+    if (layerContactOff(contact)) return;
     contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
   });
   targetWorld.on("pre-solve", (contact) => {
-    if (ropeOwnEndContact(contact)) {
+    if (layerContactOff(contact) || ropeOwnEndContact(contact)) {
       contact.setEnabled(false);
       return;
     }
@@ -4227,6 +4371,7 @@ function step(dt) {
   world.step(dt, ropeLive ? 20 : 10, ropeLive ? 16 : 8);
   if (ropeLive) tightenRopes();
   snapDrag(dt);
+  updateDragGhost();
   handleContacts();
   applyRopeCuts();
   stepDragFresh(dt);
@@ -4356,12 +4501,22 @@ function drawConfetti() {
   }
 }
 
+// Zeichnen mit abweichender Pose (Geisterschatten) und Deckkraft-Faktor (Geist).
+let drawPose = null;
+let inkAlpha = 1;
+
+function bodyDrawPose(body) {
+  if (drawPose && drawPose.body === body) return drawPose;
+  const p = body.getPosition();
+  return { x: p.x, y: p.y, a: body.getAngle() };
+}
+
 function outlineWorld(meta) {
   if (!meta || !meta.outline) return null;
-  return meta.outline.local.map((p) => {
-    const w = meta.body.getWorldPoint(V(p.x, p.y));
-    return { x: w.x, y: w.y };
-  });
+  const pose = bodyDrawPose(meta.body);
+  const c = Math.cos(pose.a);
+  const s = Math.sin(pose.a);
+  return meta.outline.local.map((p) => ({ x: pose.x + p.x * c - p.y * s, y: pose.y + p.x * s + p.y * c }));
 }
 
 function crayonPath(pts, color, width) {
@@ -4380,7 +4535,7 @@ function crayonPath(pts, color, width) {
   ctx.strokeStyle = color;
   const passes = 3;
   for (let pass = 0; pass < passes; pass++) {
-    ctx.globalAlpha = pass === 0 ? 0.8 : 0.32;
+    ctx.globalAlpha = (pass === 0 ? 0.8 : 0.32) * inkAlpha;
     ctx.lineWidth = Math.max(1.4, width * camScale() * (pass === 0 ? 1 : 0.62));
     ctx.beginPath();
     for (let i = 0; i < scr.length; i++) {
@@ -4404,10 +4559,10 @@ function crayonFill(pts, color) {
   scr.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
   ctx.closePath();
   ctx.fillStyle = color;
-  ctx.globalAlpha = 0.28;
+  ctx.globalAlpha = (0.28) * inkAlpha;
   ctx.fill();
   ctx.clip();
-  ctx.globalAlpha = 0.18;
+  ctx.globalAlpha = (0.18) * inkAlpha;
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   const bounds = scr.reduce((b, p) => ({
@@ -4436,7 +4591,7 @@ function fillSteelHighlight(sx, sy, rad) {
   grd.addColorStop(0.28, "rgba(236,242,248,0.42)");
   grd.addColorStop(1, "rgba(255,255,255,0)");
   ctx.fillStyle = grd;
-  ctx.globalAlpha = 1;
+  ctx.globalAlpha = (1) * inkAlpha;
   ctx.beginPath();
   ctx.arc(sx, sy, rad * 0.55, 0, Math.PI * 2);
   ctx.fill();
@@ -4474,10 +4629,10 @@ function drawSteelCircle(wx, wy, r, angle, quest) {
   ctx.beginPath();
   ctx.arc(s.x, s.y, rad, 0, Math.PI * 2);
   ctx.fillStyle = MAT.steel;
-  ctx.globalAlpha = 0.96;
+  ctx.globalAlpha = (0.96) * inkAlpha;
   ctx.fill();
   ctx.strokeStyle = MAT.steelDark;
-  ctx.globalAlpha = 0.9;
+  ctx.globalAlpha = (0.9) * inkAlpha;
   ctx.lineWidth = Math.max(1.5, rad * 0.08);
   ctx.stroke();
   drawSteelMark(s.x, s.y, rad, angle || 0, quest);
@@ -4492,8 +4647,8 @@ function drawSteelCircle(wx, wy, r, angle, quest) {
 
 function drawSteelEllipse(draw) {
   if (!draw || !draw.body) return;
-  const pos = draw.body.getPosition();
-  const phi = draw.body.getAngle() + (draw.angle || 0);
+  const pos = bodyDrawPose(draw.body);
+  const phi = pos.a + (draw.angle || 0);
   const pts = ellipseWorldPts(draw, 48);
   const scr = pts.map((p) => worldToScreen(p.x, p.y));
   const scale = camScale();
@@ -4502,10 +4657,10 @@ function drawSteelEllipse(draw) {
   scr.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
   ctx.closePath();
   ctx.fillStyle = MAT.steel;
-  ctx.globalAlpha = 0.96;
+  ctx.globalAlpha = (0.96) * inkAlpha;
   ctx.fill();
   ctx.strokeStyle = MAT.steelDark;
-  ctx.globalAlpha = 0.9;
+  ctx.globalAlpha = (0.9) * inkAlpha;
   ctx.lineWidth = Math.max(1.5, Math.min(draw.a, draw.b) * scale * 0.08);
   ctx.stroke();
   const ca = Math.cos(phi);
@@ -4702,26 +4857,21 @@ function renderPlay() {
     } else crayonPath(item.pts, item.color, item.width || 0.14);
   }
   for (const rocket of rockets) drawRocket(rocket);
-  for (const draw of drawings) {
-    if (draw.kind === "rope") drawRope(draw);
-    else if (draw.kind === "blob" || draw.kind === "roller") {
-      const p = draw.body.getPosition();
-      drawSteelCircle(p.x, p.y, draw.r, draw.body.getAngle(), false);
-    } else if (draw.kind === "ellipse") {
-      drawSteelEllipse(draw);
-    } else if (draw.meta) {
-      const pts = outlineWorld(draw.meta);
-      if (!pts) continue;
-      if (draw.meta.outline && draw.meta.outline.closed) {
-        crayonFill(pts, draw.color);
-        crayonPath(pts.concat([pts[0]]), draw.color, 0.13);
-      } else crayonPath(pts, draw.color, (draw.meta && draw.meta.thick) || THICK);
+  // Ebenen: hinten nach vorn; der Körper an der Maus kommt ganz zuletzt.
+  const held = playDrag && playDrag.body ? playDrag.body : null;
+  let heldDraw = null;
+  for (const draw of drawingsByLayer()) {
+    if (held && draw.body === held) {
+      heldDraw = draw;
+      continue;
     }
+    drawDrawing(draw);
   }
   drawAnchorLinks();
   for (const pin of pins) drawPin(pin);
   for (const star of stars) drawStar(star);
   drawBall();
+  if (heldDraw) drawHeldDrawing(heldDraw);
   if (pointer && pointer.pts && pointer.pts.length) {
     crayonPath(pointer.pts, MAT.ink, pointer.pts.some((p) => p.thick) ? "live" : THICK);
   }
@@ -4733,10 +4883,57 @@ function renderPlay() {
   }
 }
 
+function drawDrawing(draw) {
+  if (draw.kind === "rope") drawRope(draw);
+  else if (draw.kind === "blob" || draw.kind === "roller") {
+    const p = bodyDrawPose(draw.body);
+    drawSteelCircle(p.x, p.y, draw.r, p.a, false);
+  } else if (draw.kind === "ellipse") {
+    drawSteelEllipse(draw);
+  } else if (draw.meta) {
+    const pts = outlineWorld(draw.meta);
+    if (!pts) return;
+    if (draw.meta.outline && draw.meta.outline.closed) {
+      crayonFill(pts, draw.color);
+      crayonPath(pts.concat([pts[0]]), draw.color, 0.13);
+    } else crayonPath(pts, draw.color, (draw.meta && draw.meta.thick) || THICK);
+  }
+}
+
+// Gezogener Körper: ganz vorn. Als Geist halb durchsichtig, dazu ein blasser
+// Schatten an der letzten freien Pose. Über einem Nagel wird der Nagel markiert.
+function drawHeldDrawing(draw) {
+  const drag = playDrag;
+  if (drag && drag.ghost && drag.free) {
+    drawPose = { body: draw.body, x: drag.free.x, y: drag.free.y, a: drag.free.a };
+    inkAlpha = GHOST_SHADOW_ALPHA;
+    drawDrawing(draw);
+    drawPose = null;
+  }
+  inkAlpha = drag && drag.ghost ? GHOST_ALPHA : 1;
+  drawDrawing(draw);
+  inkAlpha = 1;
+  if (drag && !drag.ghost && drag.targets && drag.targets.length) {
+    for (const pin of drag.targets) {
+      drawPin(pin);
+      const p = pinWorld(pin);
+      const s = worldToScreen(p.x, p.y);
+      ctx.save();
+      ctx.strokeStyle = "#3c7fd6";
+      ctx.globalAlpha = 0.85;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 0.3 * camScale(), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
 function ellipseWorldPts(draw, n) {
   if (!draw || !draw.body) return [];
-  const pos = draw.body.getPosition();
-  const rot = draw.body.getAngle();
+  const pos = bodyDrawPose(draw.body);
+  const rot = pos.a;
   const phi = draw.angle || 0;
   const ca = Math.cos(phi);
   const sa = Math.sin(phi);
@@ -6495,11 +6692,12 @@ function onPointerUp(e) {
   }
   if (current.dragging || playDrag || current.grab) {
     const held = playDrag && playDrag.body
-      ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)) }
+      ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)), ghost: !!playDrag.ghost }
       : null;
+    // Ein Geist springt in endDrag an seinen Schatten zurück und heftet sich nicht an.
     endDrag();
     if (held && mode === "play") {
-      const pinned = tryPinDragEnd(held.body);
+      const pinned = held.ghost ? 0 : tryPinDragEnd(held.body);
       if (!pinned) tryAnchorDragEnd(held.body, { x: held.at.x, y: held.at.y }, current.trail);
     }
     return;
@@ -8455,19 +8653,34 @@ function runTests() {
     for (let i = 0; i < 40; i++) step(1 / 60);
     const shoveX0 = ball.getPosition().x;
     beginDrag(pusher.getPosition().x, pusher.getPosition().y);
+    let shoveGhost = false;
     for (let i = 0; i < 120; i++) {
       const bp = ball.getPosition();
       moveDrag(bp.x, bp.y);
       step(1 / 60);
+      if (playDrag && playDrag.ghost) shoveGhost = true;
     }
     lines.push("INFO shove ball " + ball.getPosition().x.toFixed(2) + " box " + pusher.getPosition().x.toFixed(2) + " trick " + stats.dragTrick);
-    check("a dragged body can shove the ball", ball.getPosition().x > shoveX0 + 0.35);
-    check("dragging a body into the ball is a trick", stats.dragTrick);
+    // Geist-Regel: Am Griff stößt ein Körper mit nichts zusammen, auch nicht mit der Kugel.
+    check("a dragged body passes through the ball", Math.abs(ball.getPosition().x - shoveX0) < 0.1 && shoveGhost);
+    check("passing through the ball while held is no trick", !stats.dragTrick);
+    endDrag();
+    check("a ghost released on the ball jumps back off it", !overlapAtPose(pusher, poseOfBody(pusher), null));
+    // Fallen lassen direkt nach dem Loslassen bleibt Tricksen.
+    buildLevel(LEVELS["ein-klotz"]);
+    const dropper = makeBox({ x: 5, y: 4.6, hw: 0.4, hh: 0.4, color: "#d94b3a" });
+    beginDrag(5, 4.6);
+    for (let i = 0; i < 5; i++) {
+      moveDrag(5, 4.6);
+      step(1 / 60);
+    }
+    endDrag();
+    for (let i = 0; i < 60; i++) step(1 / 60);
+    check("dropping a just-released body on the ball is a trick", stats.dragTrick && dropper.getPosition().y > ball.getPosition().y);
     for (const star of stars) star.got = true;
     step(1 / 60);
     check("a trick still solves the level", won);
     check("a trick skips confetti", confetti.length === 0);
-    endDrag();
 
     buildLevel(LEVELS["ein-klotz"]);
     const rested = makeBox({ x: 18, y: 3.2, hw: 0.4, hh: 0.4, color: "#3e9a48" });
@@ -10117,6 +10330,154 @@ function runTests() {
         lines.push("INFO wuerfel after import sink " + wfRes.maxSink.toFixed(3) + " meanV " + wfRes.meanV.toFixed(3) + " chord " + wfRes.endChord.toFixed(4));
         check("imported box on a rope comes to rest above the floor", wfRes.maxSink < 0.1 && wfRes.meanV < 0.1 && wfRes.endChord < 1.012);
       }
+    }
+
+    // Ebenen per Nagel und Geist beim Ziehen (52-ebenen.js).
+    {
+      lastTap = 0;
+      buildLevel(LEVELS["ein-klotz"]);
+      ball.setTransform(V(3, 1.66), 0);
+      cam.cx = 16;
+      cam.cy = 6;
+      cam.zoom = 1;
+      const lvCol = makeBox({ x: 12, y: 4.35, hw: 0.5, hh: 3.0 });
+      for (let i = 0; i < 20; i++) step(1 / 60);
+      const lvColDraw = drawings.find((d) => d.body === lvCol);
+      const lvAnch = anchorBody(lvColDraw, ground, { x: 12, y: 1.3 }, { x: 12, y: 1.8 });
+      const lvPin = rememberPin(12, 6.6, lvCol, true);
+      const lvBoard = makeBox({ x: 22, y: 6.6, hw: 2.4, hh: 0.2, color: "#3c7fd6" });
+      world.setGravity(V(0, 0));
+      // Brett am Rand greifen und mit echten Zeiger-Ereignissen über den Nagel ziehen.
+      const lvGrab = worldToScreen(23.9, 6.6);
+      onPointerDown({ button: 0, clientX: lvGrab.x, clientY: lvGrab.y, pointerId: 91 });
+      let lvGhostOverNail = false;
+      let lvTargetSeen = false;
+      for (let i = 1; i <= 40; i++) {
+        const gx = 23.9 + (13.9 - 23.9) * i / 40;
+        const sp = worldToScreen(gx, 6.6);
+        onPointerMove({ clientX: sp.x, clientY: sp.y, pointerId: 91 });
+        step(1 / 60);
+        if (playDrag && Math.abs(lvBoard.getPosition().x - 12) < 0.3) {
+          if (playDrag.ghost) lvGhostOverNail = true;
+          if (playDrag.targets && playDrag.targets.indexOf(lvPin) >= 0) lvTargetSeen = true;
+        }
+      }
+      const lvHeld = !!playDrag && playDrag.body === lvBoard;
+      const lvColPos = lvCol.getPosition();
+      check("a held body passes through the column", lvHeld && Math.abs(lvBoard.getPosition().x - 12) < 0.3 && lvAnch && Math.abs(lvColPos.x - 12) < 1e-6);
+      check("a held body over a nail in its host is no ghost and marks the nail", lvTargetSeen && !lvGhostOverNail);
+      const lvUp = worldToScreen(13.9, 6.6);
+      onPointerUp({ clientX: lvUp.x, clientY: lvUp.y, pointerId: 91 });
+      const lvPinned = lvPin.joints.some((j) => j && (j.getBodyA() === lvBoard || j.getBodyB() === lvBoard));
+      check("releasing over the nail pins the body to the column", !playDrag && lvPinned && nailLinked(lvBoard, lvCol));
+      const lvLayers = bodyLayers();
+      const lvOrder = drawingsByLayer();
+      check("a body on a nail is one layer in front of its host", (lvLayers.get(lvCol) || 0) === 0 && lvLayers.get(lvBoard) === 1
+        && lvOrder.findIndex((d) => d.body === lvBoard) > lvOrder.findIndex((d) => d.body === lvCol));
+      world.setGravity(V(0, -24));
+      const lvTouch = (a, b) => {
+        for (let c = world.getContactList(); c; c = c.getNext()) {
+          const ba = c.getFixtureA().getBody();
+          const bb = c.getFixtureB().getBody();
+          if (((ba === a && bb === b) || (ba === b && bb === a)) && c.isTouching() && c.isEnabled()) return true;
+        }
+        return false;
+      };
+      // Windrad: Motor an, das Brett dreht sich vor der Säule frei herum.
+      cycleNailMotor(lvPin);
+      const lvA0 = lvBoard.getAngle();
+      let lvHostTouch = false;
+      for (let i = 0; i < 240; i++) {
+        step(1 / 60);
+        if (lvTouch(lvBoard, lvCol)) lvHostTouch = true;
+      }
+      const lvTurn = lvBoard.getAngle() - lvA0;
+      const lvAt = pinWorld(lvPin);
+      const lvLocal = lvBoard.getLocalPoint(V(lvAt.x, lvAt.y));
+      lines.push("INFO windrad turn " + (lvTurn * 180 / Math.PI).toFixed(0) + " deg, host touch " + lvHostTouch);
+      check("a windmill board turns freely in front of its column", lvTurn > Math.PI * 1.6 && !lvHostTouch && Math.hypot(lvLocal.x, lvLocal.y) < 0.05);
+      cycleNailMotor(lvPin);
+      cycleNailMotor(lvPin);
+      // Ein dritter Körper stößt weiter mit dem Brett zusammen.
+      lvBoard.setTransform(lvBoard.getPosition(), 0);
+      lvBoard.setAngularVelocity(0);
+      const lvThird = makeBox({ x: 13.6, y: 8.2, hw: 0.35, hh: 0.35, density: 0.3, color: "#d94b3a" });
+      let lvThirdTouch = false;
+      for (let i = 0; i < 40; i++) {
+        step(1 / 60);
+        if (lvTouch(lvThird, lvBoard)) lvThirdTouch = true;
+      }
+      check("a body on a nail still collides with a third body", lvThirdTouch);
+      world.destroyBody(lvThird);
+      bodyMeta.delete(lvThird);
+      drawings = drawings.filter((d) => d.body !== lvThird);
+
+      // Zettel: Nach Export und Import gilt der Filter wieder.
+      const lvText = encodeSceneTextSync(captureScene());
+      const lvLoad = loadSceneFromTextSync(lvText);
+      const lvPin2 = pins.find((pn) => Math.hypot(pinWorld(pn).x - 12, pinWorld(pn).y - 6.6) < 0.1);
+      const lvCol2 = lvPin2 && lvPin2.body;
+      const lvBoard2 = lvPin2 && lvPin2.joints.map((j) => nailJointOther(lvPin2, j)).find((b) => b && bodyMeta.get(b) && bodyMeta.get(b).kind !== "rope");
+      let lvHostTouch2 = false;
+      if (lvBoard2) {
+        lvBoard2.setAngularVelocity(3);
+        for (let i = 0; i < 90; i++) {
+          step(1 / 60);
+          if (lvTouch(lvBoard2, lvCol2)) lvHostTouch2 = true;
+        }
+      }
+      check("after scene import the nailed board still ignores its column", !!(lvLoad && lvLoad.ok) && !!lvBoard2 && nailLinked(lvBoard2, lvCol2) && bodyLayers().get(lvBoard2) === 1 && !lvHostTouch2);
+
+      // Geist: durch einen Klotz ziehen, überlappend loslassen, zurück zur letzten freien Pose.
+      buildLevel(LEVELS["ein-klotz"]);
+      ball.setTransform(V(3, 1.66), 0);
+      world.setGravity(V(0, 0));
+      const gsA = makeBox({ x: 16, y: 5, hw: 0.8, hh: 0.8 });
+      const gsB = makeBox({ x: 21, y: 5, hw: 0.5, hh: 0.5, color: "#3c7fd6" });
+      beginDrag(21, 5);
+      let gsGhost = false;
+      let gsShadowFree = true;
+      for (let i = 1; i <= 50; i++) {
+        moveDrag(21 + (13 - 21) * i / 50, 5);
+        step(1 / 60);
+        if (playDrag.ghost) {
+          gsGhost = true;
+          if (overlapAtPose(gsB, playDrag.free, null)) gsShadowFree = false;
+        }
+      }
+      const gsAPos = gsA.getPosition();
+      check("a dragged body goes through another body", Math.abs(gsB.getPosition().x - 13) < 0.05 && Math.hypot(gsAPos.x - 16, gsAPos.y - 5) < 0.02);
+      check("overlapping while held sets the ghost flag, the shadow pose is free", gsGhost && gsShadowFree && !playDrag.ghost);
+      for (let i = 1; i <= 20; i++) {
+        moveDrag(13 + (16.3 - 13) * i / 20, 5.2);
+        step(1 / 60);
+      }
+      const gsFree = playDrag.free ? { x: playDrag.free.x, y: playDrag.free.y, a: playDrag.free.a } : null;
+      const gsWasGhost = !!playDrag.ghost;
+      endDrag();
+      const gsP = gsB.getPosition();
+      const gsV = gsB.getLinearVelocity();
+      lines.push("INFO ghost snap back to " + gsP.x.toFixed(3) + "," + gsP.y.toFixed(3));
+      check("releasing a ghost without a nail jumps back to the last free pose", gsWasGhost && !!gsFree && Math.hypot(gsP.x - gsFree.x, gsP.y - gsFree.y) < 1e-6
+        && Math.hypot(gsV.x, gsV.y) < 1e-9 && Math.abs(gsB.getAngularVelocity()) < 1e-9);
+      check("the snap-back pose sits right at the edge of the other body", gsP.x < 16 - 1.3 + 1e-3 && gsP.x > 16 - 1.3 - 0.08 && !overlapAtPose(gsB, poseOfBody(gsB), null));
+
+      // Über einem Nagel, aber zusätzlich in einem dritten Körper: Geist, kein Heften.
+      const gsPin = rememberPin(20, 8, ground, true);
+      const gsC = makeBox({ x: 20.9, y: 8, hw: 0.3, hh: 0.3, color: "#d94b3a" });
+      const gsD = makeBox({ x: 25, y: 8, hw: 1.0, hh: 0.4, color: "#3c7fd6" });
+      beginDrag(25, 8);
+      for (let i = 1; i <= 30; i++) {
+        moveDrag(25 + (20.2 - 25) * i / 30, 8);
+        step(1 / 60);
+      }
+      const gsThirdGhost = !!playDrag.ghost;
+      const gsUp = worldToScreen(20.2, 8);
+      pointer = { id: 92, dragging: true, trail: [{ x: 20.2, y: 8 }] };
+      onPointerUp({ clientX: gsUp.x, clientY: gsUp.y, pointerId: 92 });
+      const gsDPinned = gsPin.joints.some((j) => j && (j.getBodyA() === gsD || j.getBodyB() === gsD));
+      check("over a nail but inside a third body stays a ghost and does not pin", gsThirdGhost && !gsDPinned && !overlapAtPose(gsD, poseOfBody(gsD), null));
+      world.setGravity(V(0, -24));
     }
 
     mountTunePanel();

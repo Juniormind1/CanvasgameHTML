@@ -225,8 +225,10 @@ function eraseAt(x, y) {
 }
 
 function drawingAt(x, y) {
-  for (let i = drawings.length - 1; i >= 0; i--) {
-    const d = drawings[i];
+  // Vorderste Ebene zuerst (Ebenen per Nagel, 52-ebenen.js).
+  const order = drawingsByLayer();
+  for (let i = order.length - 1; i >= 0; i--) {
+    const d = order[i];
     if (d.kind === "rope" || !d.body || !d.meta) continue;
     if (!d.body.isDynamic()) continue;
     if (containsMeta(d.meta, x, y)) return d;

@@ -79,12 +79,22 @@ function drawConfetti() {
   }
 }
 
+// Zeichnen mit abweichender Pose (Geisterschatten) und Deckkraft-Faktor (Geist).
+let drawPose = null;
+let inkAlpha = 1;
+
+function bodyDrawPose(body) {
+  if (drawPose && drawPose.body === body) return drawPose;
+  const p = body.getPosition();
+  return { x: p.x, y: p.y, a: body.getAngle() };
+}
+
 function outlineWorld(meta) {
   if (!meta || !meta.outline) return null;
-  return meta.outline.local.map((p) => {
-    const w = meta.body.getWorldPoint(V(p.x, p.y));
-    return { x: w.x, y: w.y };
-  });
+  const pose = bodyDrawPose(meta.body);
+  const c = Math.cos(pose.a);
+  const s = Math.sin(pose.a);
+  return meta.outline.local.map((p) => ({ x: pose.x + p.x * c - p.y * s, y: pose.y + p.x * s + p.y * c }));
 }
 
 function crayonPath(pts, color, width) {
@@ -103,7 +113,7 @@ function crayonPath(pts, color, width) {
   ctx.strokeStyle = color;
   const passes = 3;
   for (let pass = 0; pass < passes; pass++) {
-    ctx.globalAlpha = pass === 0 ? 0.8 : 0.32;
+    ctx.globalAlpha = (pass === 0 ? 0.8 : 0.32) * inkAlpha;
     ctx.lineWidth = Math.max(1.4, width * camScale() * (pass === 0 ? 1 : 0.62));
     ctx.beginPath();
     for (let i = 0; i < scr.length; i++) {
@@ -127,10 +137,10 @@ function crayonFill(pts, color) {
   scr.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
   ctx.closePath();
   ctx.fillStyle = color;
-  ctx.globalAlpha = 0.28;
+  ctx.globalAlpha = (0.28) * inkAlpha;
   ctx.fill();
   ctx.clip();
-  ctx.globalAlpha = 0.18;
+  ctx.globalAlpha = (0.18) * inkAlpha;
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   const bounds = scr.reduce((b, p) => ({
@@ -159,7 +169,7 @@ function fillSteelHighlight(sx, sy, rad) {
   grd.addColorStop(0.28, "rgba(236,242,248,0.42)");
   grd.addColorStop(1, "rgba(255,255,255,0)");
   ctx.fillStyle = grd;
-  ctx.globalAlpha = 1;
+  ctx.globalAlpha = (1) * inkAlpha;
   ctx.beginPath();
   ctx.arc(sx, sy, rad * 0.55, 0, Math.PI * 2);
   ctx.fill();
@@ -197,10 +207,10 @@ function drawSteelCircle(wx, wy, r, angle, quest) {
   ctx.beginPath();
   ctx.arc(s.x, s.y, rad, 0, Math.PI * 2);
   ctx.fillStyle = MAT.steel;
-  ctx.globalAlpha = 0.96;
+  ctx.globalAlpha = (0.96) * inkAlpha;
   ctx.fill();
   ctx.strokeStyle = MAT.steelDark;
-  ctx.globalAlpha = 0.9;
+  ctx.globalAlpha = (0.9) * inkAlpha;
   ctx.lineWidth = Math.max(1.5, rad * 0.08);
   ctx.stroke();
   drawSteelMark(s.x, s.y, rad, angle || 0, quest);
@@ -215,8 +225,8 @@ function drawSteelCircle(wx, wy, r, angle, quest) {
 
 function drawSteelEllipse(draw) {
   if (!draw || !draw.body) return;
-  const pos = draw.body.getPosition();
-  const phi = draw.body.getAngle() + (draw.angle || 0);
+  const pos = bodyDrawPose(draw.body);
+  const phi = pos.a + (draw.angle || 0);
   const pts = ellipseWorldPts(draw, 48);
   const scr = pts.map((p) => worldToScreen(p.x, p.y));
   const scale = camScale();
@@ -225,10 +235,10 @@ function drawSteelEllipse(draw) {
   scr.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
   ctx.closePath();
   ctx.fillStyle = MAT.steel;
-  ctx.globalAlpha = 0.96;
+  ctx.globalAlpha = (0.96) * inkAlpha;
   ctx.fill();
   ctx.strokeStyle = MAT.steelDark;
-  ctx.globalAlpha = 0.9;
+  ctx.globalAlpha = (0.9) * inkAlpha;
   ctx.lineWidth = Math.max(1.5, Math.min(draw.a, draw.b) * scale * 0.08);
   ctx.stroke();
   const ca = Math.cos(phi);
@@ -425,26 +435,21 @@ function renderPlay() {
     } else crayonPath(item.pts, item.color, item.width || 0.14);
   }
   for (const rocket of rockets) drawRocket(rocket);
-  for (const draw of drawings) {
-    if (draw.kind === "rope") drawRope(draw);
-    else if (draw.kind === "blob" || draw.kind === "roller") {
-      const p = draw.body.getPosition();
-      drawSteelCircle(p.x, p.y, draw.r, draw.body.getAngle(), false);
-    } else if (draw.kind === "ellipse") {
-      drawSteelEllipse(draw);
-    } else if (draw.meta) {
-      const pts = outlineWorld(draw.meta);
-      if (!pts) continue;
-      if (draw.meta.outline && draw.meta.outline.closed) {
-        crayonFill(pts, draw.color);
-        crayonPath(pts.concat([pts[0]]), draw.color, 0.13);
-      } else crayonPath(pts, draw.color, (draw.meta && draw.meta.thick) || THICK);
+  // Ebenen: hinten nach vorn; der Körper an der Maus kommt ganz zuletzt.
+  const held = playDrag && playDrag.body ? playDrag.body : null;
+  let heldDraw = null;
+  for (const draw of drawingsByLayer()) {
+    if (held && draw.body === held) {
+      heldDraw = draw;
+      continue;
     }
+    drawDrawing(draw);
   }
   drawAnchorLinks();
   for (const pin of pins) drawPin(pin);
   for (const star of stars) drawStar(star);
   drawBall();
+  if (heldDraw) drawHeldDrawing(heldDraw);
   if (pointer && pointer.pts && pointer.pts.length) {
     crayonPath(pointer.pts, MAT.ink, pointer.pts.some((p) => p.thick) ? "live" : THICK);
   }
@@ -456,10 +461,57 @@ function renderPlay() {
   }
 }
 
+function drawDrawing(draw) {
+  if (draw.kind === "rope") drawRope(draw);
+  else if (draw.kind === "blob" || draw.kind === "roller") {
+    const p = bodyDrawPose(draw.body);
+    drawSteelCircle(p.x, p.y, draw.r, p.a, false);
+  } else if (draw.kind === "ellipse") {
+    drawSteelEllipse(draw);
+  } else if (draw.meta) {
+    const pts = outlineWorld(draw.meta);
+    if (!pts) return;
+    if (draw.meta.outline && draw.meta.outline.closed) {
+      crayonFill(pts, draw.color);
+      crayonPath(pts.concat([pts[0]]), draw.color, 0.13);
+    } else crayonPath(pts, draw.color, (draw.meta && draw.meta.thick) || THICK);
+  }
+}
+
+// Gezogener Körper: ganz vorn. Als Geist halb durchsichtig, dazu ein blasser
+// Schatten an der letzten freien Pose. Über einem Nagel wird der Nagel markiert.
+function drawHeldDrawing(draw) {
+  const drag = playDrag;
+  if (drag && drag.ghost && drag.free) {
+    drawPose = { body: draw.body, x: drag.free.x, y: drag.free.y, a: drag.free.a };
+    inkAlpha = GHOST_SHADOW_ALPHA;
+    drawDrawing(draw);
+    drawPose = null;
+  }
+  inkAlpha = drag && drag.ghost ? GHOST_ALPHA : 1;
+  drawDrawing(draw);
+  inkAlpha = 1;
+  if (drag && !drag.ghost && drag.targets && drag.targets.length) {
+    for (const pin of drag.targets) {
+      drawPin(pin);
+      const p = pinWorld(pin);
+      const s = worldToScreen(p.x, p.y);
+      ctx.save();
+      ctx.strokeStyle = "#3c7fd6";
+      ctx.globalAlpha = 0.85;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 0.3 * camScale(), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
 function ellipseWorldPts(draw, n) {
   if (!draw || !draw.body) return [];
-  const pos = draw.body.getPosition();
-  const rot = draw.body.getAngle();
+  const pos = bodyDrawPose(draw.body);
+  const rot = pos.a;
   const phi = draw.angle || 0;
   const ca = Math.cos(phi);
   const sa = Math.sin(phi);
