@@ -178,6 +178,7 @@ function releaseAnchorAt(x, y) {
 function tryAnchorGesture(trail) {
   if (!world || !anchorStrokeOk(trail)) return false;
   const from = trail[0];
+  if (nearestPin(from.x, from.y, NAIL_HIT)) return false;
   const to = trail[trail.length - 1];
   // Vom verankerten Körper zurück auf seine Basis: lösen.
   const startIn = anchorableAt(from.x, from.y);
@@ -204,7 +205,9 @@ function tryAnchorGesture(trail) {
 function tryAdoptAnchorGrab(trail) {
   if (!pointer || pointer.dragging || playDrag || !world) return false;
   if (!anchorStrokeOk(trail)) return false;
+  if (pointer.nailClick) return false;
   const from = trail[0];
+  if (nearestPin(from.x, from.y, NAIL_HIT)) return false;
   const to = trail[trail.length - 1];
   const base = anchorBaseAt(from.x, from.y);
   if (!base) return false;

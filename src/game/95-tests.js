@@ -1881,6 +1881,7 @@ function runTests() {
     check("a lone nail still cycles its motor state", nailLone0 === 1 && nailLone1 === -1 && nailLone2 === 0 && nailLone.motor === 0);
 
     buildLevel(LEVELS["ein-klotz"]);
+    lastTap = 0;
     const nailMot = rememberPin(16, 8, ground, true);
     const nailMotBox = ancBox(14, 7.2, 4, 0.8, "#8d5a34");
     for (let i = 0; i < 60; i++) step(1 / 60);
@@ -1891,18 +1892,139 @@ function runTests() {
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWccw = nailMotBox.body.getAngularVelocity();
     check("left motor reaches about +90 deg/s", Math.abs(nailWccw - Math.PI / 2) < 0.35 && !stats.dragTrick);
+    lastTap = 0;
     onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
     onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
     check("second click switches to right turn", nailMot.motor === -1);
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWcw = nailMotBox.body.getAngularVelocity();
     check("right motor reaches about -90 deg/s", Math.abs(nailWcw + Math.PI / 2) < 0.35);
+    lastTap = 0;
     onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
     onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
     check("third click turns the motor off", nailMot.motor === 0 && nailMot.joints.every((j) => !j || !j.isMotorEnabled()));
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWoff = nailMotBox.body.getAngularVelocity();
     check("an off nail joint is not driven", Math.abs(nailWoff) < 1.0);
+
+    function strokeFromTo(x0, y0, x1, y1, pointerId) {
+      const a = worldToScreen(x0, y0);
+      const b = worldToScreen(x1, y1);
+      const mx = (a.x + b.x) / 2;
+      const my = (a.y + b.y) / 2;
+      const ev = { button: 0, pointerId };
+      onPointerDown(Object.assign({ clientX: a.x, clientY: a.y }, ev));
+      onPointerMove(Object.assign({ clientX: mx, clientY: my }, ev));
+      onPointerMove(Object.assign({ clientX: b.x, clientY: b.y }, ev));
+      onPointerUp(Object.assign({ clientX: b.x, clientY: b.y }, ev));
+      pointer = null;
+      endDrag();
+    }
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    const hangStart = rememberPin(10, 8, ground, true);
+    const hangStart0 = pinWorld(hangStart);
+    const ropesBeforeHang = drawings.filter((d) => d.kind === "rope").length;
+    strokeFromTo(hangStart0.x, hangStart0.y, 16, 5, 71);
+    const hangDrawn = drawings.filter((d) => d.kind === "rope").slice(-1)[0];
+    const hangStart1 = pinWorld(hangStart);
+    check("a stroke from a nail makes a rope hung on that nail", !!hangDrawn && hangDrawn.kind === "rope" && hangDrawn.pinA === hangStart && !hangDrawn.pinB && drawings.filter((d) => d.kind === "rope").length === ropesBeforeHang + 1);
+    check("drawing a rope from a nail does not move the nail", Math.hypot(hangStart1.x - hangStart0.x, hangStart1.y - hangStart0.y) < 0.02 && !playDrag);
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    const tapNail = rememberPin(12, 8, ground, true);
+    const ropesBeforeTap = drawings.filter((d) => d.kind === "rope").length;
+    const drawingsBeforeTap = drawings.length;
+    const tapScr = worldToScreen(pinWorld(tapNail).x, pinWorld(tapNail).y);
+    onPointerDown({ button: 0, clientX: tapScr.x, clientY: tapScr.y, pointerId: 72 });
+    onPointerUp({ button: 0, clientX: tapScr.x, clientY: tapScr.y, pointerId: 72 });
+    pointer = null;
+    check("a click on a nail does not spawn a rope fragment", drawings.filter((d) => d.kind === "rope").length === ropesBeforeTap && drawings.length === drawingsBeforeTap && tapNail.motor === 1 && pins.indexOf(tapNail) >= 0);
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    world.setGravity(V(0, 0));
+    const edgeHost = makeBox({ x: 10, y: 8, hw: 1.6, hh: 0.9, color: "#8d5a34" });
+    const edgeNail = rememberPin(11.55, 8, edgeHost, true);
+    const edgeHost0 = { x: edgeHost.getPosition().x, y: edgeHost.getPosition().y };
+    const ropesBeforeEdge = drawings.filter((d) => d.kind === "rope").length;
+    strokeFromTo(11.55, 8, 18, 5.5, 73);
+    const edgeRope = drawings.filter((d) => d.kind === "rope").slice(-1)[0];
+    const edgeHost1 = edgeHost.getPosition();
+    const edgeNail1 = pinWorld(edgeNail);
+    check("a stroke from a nail on a body does not grab the body", !!edgeRope && edgeRope.pinA === edgeNail && !playDrag && Math.hypot(edgeHost1.x - edgeHost0.x, edgeHost1.y - edgeHost0.y) < 0.04);
+    check("the nail on a body stays put while the rope is drawn", Math.hypot(edgeNail1.x - 11.55, edgeNail1.y - 8) < 0.04 && drawings.filter((d) => d.kind === "rope").length === ropesBeforeEdge + 1);
+    world.setGravity(V(0, -24));
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    world.setGravity(V(0, 0));
+    const dropOne = rememberPin(16, 8, ground, true);
+    const dropBox = makeBox({ x: 9, y: 8, hw: 1.4, hh: 0.8, color: "#8d5a34" });
+    const dropGrabX = 10.3;
+    const dropGrabY = 8;
+    const dropOk = beginDrag(dropGrabX, dropGrabY);
+    moveDrag(16 + (dropGrabX - 9), 8);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    endDrag();
+    const dropPinned = tryPinDragEnd(dropBox);
+    const dropHolds = dropOne.joints.some((j) => j && (j.getBodyA() === dropBox || j.getBodyB() === dropBox));
+    const dropAt = pinWorld(dropOne);
+    const dropLocal = dropBox.getLocalPoint(V(dropAt.x, dropAt.y));
+    check("releasing a body over a nail pins it there", dropOk && dropPinned >= 1 && dropHolds && Math.hypot(dropLocal.x, dropLocal.y) < 1.6);
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    world.setGravity(V(0, 0));
+    const lockA = rememberPin(14, 8, ground, true);
+    const lockB = rememberPin(18, 8, ground, true);
+    const lockBox = makeBox({ x: 8, y: 8, hw: 2.6, hh: 0.7, color: "#3c7fd6" });
+    const lockGrabX = 10.4;
+    const lockGrabY = 8;
+    const lockOk = beginDrag(lockGrabX, lockGrabY);
+    moveDrag(16 + (lockGrabX - 8), 8);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    endDrag();
+    const lockPinned = tryPinDragEnd(lockBox);
+    const lockHoldsA = lockA.joints.some((j) => j && (j.getBodyA() === lockBox || j.getBodyB() === lockBox));
+    const lockHoldsB = lockB.joints.some((j) => j && (j.getBodyA() === lockBox || j.getBodyB() === lockBox));
+    const lockPos0 = { x: lockBox.getPosition().x, y: lockBox.getPosition().y };
+    const lockAng0 = lockBox.getAngle();
+    world.setGravity(V(0, -24));
+    for (let i = 0; i < 120; i++) step(1 / 60);
+    const lockPos1 = lockBox.getPosition();
+    const lockAng1 = lockBox.getAngle();
+    check("releasing a body over two nails pins it to both", lockOk && lockPinned >= 2 && lockHoldsA && lockHoldsB);
+    check("a body pinned to two nails stays put under gravity", Math.hypot(lockPos1.x - lockPos0.x, lockPos1.y - lockPos0.y) < 0.08 && Math.abs(lockAng1 - lockAng0) < 0.08);
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    world.setGravity(V(0, 0));
+    const hostBox = makeBox({ x: 14.5, y: 8, hw: 0.7, hh: 0.7, color: "#8d5a34" });
+    const hostPin = rememberPin(15.18, 8, hostBox, true);
+    const guestBox = makeBox({ x: 20, y: 8, hw: 1.1, hh: 0.7, color: "#3c7fd6" });
+    const guestGrabX = 18.95;
+    const guestOk = beginDrag(guestGrabX, 8);
+    // Nagel sitzt am rechten Rand des Wirts; der Gast kommt von rechts
+    // und deckt ihn gerade noch ab, ohne sich durch den Wirt zu schieben.
+    const guestGoalX = 15.18 + 1.0 + (guestGrabX - 20);
+    moveDrag(guestGoalX, 8);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    endDrag();
+    const guestPinned = tryPinDragEnd(guestBox);
+    const guestHeld = hostPin.joints.some((j) => j && (j.getBodyA() === guestBox || j.getBodyB() === guestBox));
+    check("releasing a body onto a nail in another body joins them", guestOk && guestPinned >= 1 && guestHeld && hostPin.body === hostBox);
+    world.setGravity(V(0, -24));
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    const pullNail = rememberPin(12, 6, ground, true);
+    const pullAt = pinWorld(pullNail);
+    const pullScr = worldToScreen(pullAt.x, pullAt.y);
+    onPointerDown({ button: 2, clientX: pullScr.x, clientY: pullScr.y, pointerId: 74 });
+    check("right-click pulls out a user nail", pins.indexOf(pullNail) < 0 && !pins.some((pn) => Math.hypot(pinWorld(pn).x - pullAt.x, pinWorld(pn).y - pullAt.y) < 0.2));
 
     buildLevel(LEVELS["ein-klotz"]);
     addStaticSolid([

@@ -135,9 +135,15 @@ function commitStrokeApply(drawnPts, rawInk) {
     }
   }
   if (!closed) {
-    const a = nearestPin(pts[0].x, pts[0].y, 0.55);
-    const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55);
+    const a = nearestPin(pts[0].x, pts[0].y, 0.55) || nearestPin(ink[0].x, ink[0].y, 0.55);
+    const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55) || nearestPin(ink[ink.length - 1].x, ink[ink.length - 1].y, 0.55);
     if (a && b && a !== b) return spawnRope(a, b, ink);
+    // Zug, der auf einem Nagel beginnt: Seil, auch wenn das andere Ende frei bleibt.
+    const fromNail = nearestPin(ink[0].x, ink[0].y, NAIL_HIT) || nearestPin(pts[0].x, pts[0].y, NAIL_HIT);
+    if (fromNail) {
+      if (pathLength(ink) < ROPE_FROM_NAIL_MIN && pathLength(pts) < ROPE_FROM_NAIL_MIN) return null;
+      return spawnRope(fromNail, (b && b !== fromNail) ? b : null, ink);
+    }
   }
   if (closed && !selfIntersects(pts, true) && Math.abs(signedArea(pts)) >= 0.05) {
     const solid = spawnSolid(regularizeClosed(pts), {});

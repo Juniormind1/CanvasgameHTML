@@ -189,10 +189,17 @@ function rememberPin(x, y, body, userMade) {
   return pin;
 }
 
+function pinHoldsBody(pin, body) {
+  if (!pin || !body) return false;
+  if (pin.body === body) return true;
+  return pin.joints.some((j) => j && (j.getBodyA() === body || j.getBodyB() === body));
+}
+
 function attachExistingPins(body, meta) {
   let n = 0;
   for (const pin of pins) {
     if (pin.body === body) continue;
+    if (pinHoldsBody(pin, body)) continue;
     const wp = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
     if (!containsMeta(meta, wp.x, wp.y)) continue;
     const joint = world.createJoint(new planck.RevoluteJoint({

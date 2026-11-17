@@ -140,6 +140,24 @@ function boot() {
         commitStroke(pts);
       }
       for (let i = 0; i < 2; i++) step(1 / 60);
+    } else if (id === "nagel-seil") {
+      buildLevel(LEVELS["ein-klotz"]);
+      if (ball) {
+        ball.setTransform(V(3.2, 2.2), 0);
+        ball.setLinearVelocity(V(0, 0));
+        ball.setAngularVelocity(0);
+      }
+      rememberPin(9.0, 4.4, ground, true);
+      rememberPin(15.2, 4.4, ground, true);
+      commitStroke([
+        { x: 7.4, y: 3.7 }, { x: 16.8, y: 3.7 }, { x: 16.8, y: 5.1 }, { x: 7.4, y: 5.1 }, { x: 7.4, y: 3.7 },
+      ]);
+      rememberPin(21.2, 8.2, ground, true);
+      const hangPin = pins[pins.length - 1];
+      spawnRope(hangPin, null, [
+        { x: 21.2, y: 8.2 }, { x: 24.0, y: 7.4 }, { x: 26.4, y: 5.2 }, { x: 27.2, y: 3.0 },
+      ]);
+      for (let i = 0; i < 90; i++) step(1 / 60);
     } else if (id === "trebuchet" || id === "trebuchet-wurf") {
       showMap();
       setMapDemo("trebuchet");

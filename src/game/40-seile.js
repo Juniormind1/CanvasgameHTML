@@ -5,6 +5,7 @@ const ROPE_MAX_STRETCH = 1.01;
 const ROPE_CUT_ANGLE = 15 * Math.PI / 180;   // Innenwinkel der Spitze
 const ROPE_CUT_ALIGN = 30 * Math.PI / 180;   // Abweichung von der Senkrechten
 const ROPE_CUT_SPEED = 2.5;                  // m/s, Mindestgeschwindigkeit
+const ROPE_FROM_NAIL_MIN = 0.25;             // m, kürzer: kein Seilfragment vom Nagel
 
 function pathLength(pts) {
   let len = 0;
@@ -26,20 +27,20 @@ function ropeChainLength(draw) {
 }
 
 function attachRopePins(targetWorld, pinA, pinB, bodies) {
-  const endA = targetWorld.createJoint(new planck.RevoluteJoint({
+  const endA = pinA ? targetWorld.createJoint(new planck.RevoluteJoint({
     bodyA: pinA.body,
     bodyB: bodies[0],
     localAnchorA: V(pinA.local.x, pinA.local.y),
     localAnchorB: V(0, 0),
     collideConnected: false,
-  }));
-  const endB = targetWorld.createJoint(new planck.RevoluteJoint({
+  })) : null;
+  const endB = pinB ? targetWorld.createJoint(new planck.RevoluteJoint({
     bodyA: pinB.body,
     bodyB: bodies[bodies.length - 1],
     localAnchorA: V(pinB.local.x, pinB.local.y),
     localAnchorB: V(0, 0),
     collideConnected: false,
-  }));
+  })) : null;
   return [endA, endB];
 }
 
@@ -66,9 +67,11 @@ function linkRopeSegment(targetWorld, a, b, length) {
 }
 
 function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
-  const start = pinWorld(pinA);
-  const end = pinWorld(pinB);
-  let pts = (stroke && stroke.length >= 2) ? stroke.map((p) => ({ x: p.x, y: p.y })) : [start, end];
+  const strokePts = (stroke && stroke.length >= 2) ? stroke.map((p) => ({ x: p.x, y: p.y })) : null;
+  const start = pinA ? pinWorld(pinA) : (strokePts && strokePts[0]);
+  const end = pinB ? pinWorld(pinB) : (strokePts && strokePts[strokePts.length - 1]);
+  if (!start || !end) return null;
+  let pts = strokePts ? strokePts : [start, end];
   pts[0] = { x: start.x, y: start.y };
   pts[pts.length - 1] = { x: end.x, y: end.y };
   const restLength = pathLength(pts);
@@ -101,14 +104,15 @@ function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
   const endJoints = attachRopePins(targetWorld, pinA, pinB, bodies);
   // Spanne zwischen den Endgliedern, nicht zwischen den Nägeln: die Nägel
   // sitzen oft auf statischen Körpern, ein Joint dort würde nichts halten.
-  const spanJoint = targetWorld.createJoint(new planck.RopeJoint({
+  // Ein Seil mit nur einem Nagel bleibt am freien Ende lose, ohne Spannjoint.
+  const spanJoint = (pinA && pinB) ? targetWorld.createJoint(new planck.RopeJoint({
     bodyA: bodies[0],
     bodyB: bodies[bodies.length - 1],
     localAnchorA: V(0, 0),
     localAnchorB: V(0, 0),
     maxLength: restLength * ROPE_MAX_STRETCH,
     collideConnected: false,
-  }));
+  })) : null;
   return {
     kind: "rope",
     ropeId,
@@ -118,8 +122,8 @@ function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
     segJoints,
     endJoints,
     spanJoint,
-    pinA,
-    pinB,
+    pinA: pinA || null,
+    pinB: pinB || null,
   };
 }
 
@@ -267,6 +271,9 @@ function limitRopeChord(draw) {
 
 function scaleRopeToRest(draw) {
   if (!draw || !draw.bodies || draw.restLength == null) return;
+  // Freies oder geschnittenes Ende nicht auf eine Sehne zwischen den
+  // Endperlen zusammenziehen, sonst hängt ein einseitiges Seil falsch.
+  if (!draw.pinA || !draw.pinB) return;
   if (!draw.fixedPins && (pinBodyMass(draw.pinA) > 0 || pinBodyMass(draw.pinB) > 0)) return;
   const bodies = draw.bodies.filter((b) => b && (typeof b.isValid !== "function" || b.isValid()));
   if (bodies.length < 3) return;

@@ -160,7 +160,9 @@ function pressKind(x, y) {
 function tryAdoptCenterGrab(trail) {
   if (!pointer || pointer.dragging || playDrag || !world) return false;
   if (!trail || trail.length < 2) return false;
+  if (pointer.nailClick) return false;
   const from = trail[0];
+  if (nearestPin(from.x, from.y, NAIL_HIT)) return false;
   if (pressZone(from.x, from.y) !== "interior") return false;
   let maxD = 0;
   for (const p of trail) {
@@ -244,7 +246,10 @@ function onPointerUp(e) {
       ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)) }
       : null;
     endDrag();
-    if (held && mode === "play") tryAnchorDragEnd(held.body, { x: held.at.x, y: held.at.y }, current.trail);
+    if (held && mode === "play") {
+      const pinned = tryPinDragEnd(held.body);
+      if (!pinned) tryAnchorDragEnd(held.body, { x: held.at.x, y: held.at.y }, current.trail);
+    }
     return;
   }
   if (current.cradle) {
@@ -260,6 +265,15 @@ function onPointerUp(e) {
   }
   if (!current.moved) {
     if (mode === "play" && current.nailClick) {
+      const now = performance.now();
+      // Doppeltipp zieht einen selbst gesetzten Nagel heraus; ein einzelner
+      // kurzer Klick schaltet nur den Motor.
+      if (now - lastTap < 320) {
+        eraseAt(w.x, w.y);
+        lastTap = 0;
+        return;
+      }
+      lastTap = now;
       cycleNailMotor(current.nailClick);
       return;
     }

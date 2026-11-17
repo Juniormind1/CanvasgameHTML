@@ -2103,10 +2103,17 @@ function rememberPin(x, y, body, userMade) {
   return pin;
 }
 
+function pinHoldsBody(pin, body) {
+  if (!pin || !body) return false;
+  if (pin.body === body) return true;
+  return pin.joints.some((j) => j && (j.getBodyA() === body || j.getBodyB() === body));
+}
+
 function attachExistingPins(body, meta) {
   let n = 0;
   for (const pin of pins) {
     if (pin.body === body) continue;
+    if (pinHoldsBody(pin, body)) continue;
     const wp = pin.body.getWorldPoint(V(pin.local.x, pin.local.y));
     if (!containsMeta(meta, wp.x, wp.y)) continue;
     const joint = world.createJoint(new planck.RevoluteJoint({
@@ -2356,6 +2363,7 @@ const ROPE_MAX_STRETCH = 1.01;
 const ROPE_CUT_ANGLE = 15 * Math.PI / 180;   // Innenwinkel der Spitze
 const ROPE_CUT_ALIGN = 30 * Math.PI / 180;   // Abweichung von der Senkrechten
 const ROPE_CUT_SPEED = 2.5;                  // m/s, Mindestgeschwindigkeit
+const ROPE_FROM_NAIL_MIN = 0.25;             // m, kürzer: kein Seilfragment vom Nagel
 
 function pathLength(pts) {
   let len = 0;
@@ -2377,20 +2385,20 @@ function ropeChainLength(draw) {
 }
 
 function attachRopePins(targetWorld, pinA, pinB, bodies) {
-  const endA = targetWorld.createJoint(new planck.RevoluteJoint({
+  const endA = pinA ? targetWorld.createJoint(new planck.RevoluteJoint({
     bodyA: pinA.body,
     bodyB: bodies[0],
     localAnchorA: V(pinA.local.x, pinA.local.y),
     localAnchorB: V(0, 0),
     collideConnected: false,
-  }));
-  const endB = targetWorld.createJoint(new planck.RevoluteJoint({
+  })) : null;
+  const endB = pinB ? targetWorld.createJoint(new planck.RevoluteJoint({
     bodyA: pinB.body,
     bodyB: bodies[bodies.length - 1],
     localAnchorA: V(pinB.local.x, pinB.local.y),
     localAnchorB: V(0, 0),
     collideConnected: false,
-  }));
+  })) : null;
   return [endA, endB];
 }
 
@@ -2417,9 +2425,11 @@ function linkRopeSegment(targetWorld, a, b, length) {
 }
 
 function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
-  const start = pinWorld(pinA);
-  const end = pinWorld(pinB);
-  let pts = (stroke && stroke.length >= 2) ? stroke.map((p) => ({ x: p.x, y: p.y })) : [start, end];
+  const strokePts = (stroke && stroke.length >= 2) ? stroke.map((p) => ({ x: p.x, y: p.y })) : null;
+  const start = pinA ? pinWorld(pinA) : (strokePts && strokePts[0]);
+  const end = pinB ? pinWorld(pinB) : (strokePts && strokePts[strokePts.length - 1]);
+  if (!start || !end) return null;
+  let pts = strokePts ? strokePts : [start, end];
   pts[0] = { x: start.x, y: start.y };
   pts[pts.length - 1] = { x: end.x, y: end.y };
   const restLength = pathLength(pts);
@@ -2452,14 +2462,15 @@ function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
   const endJoints = attachRopePins(targetWorld, pinA, pinB, bodies);
   // Spanne zwischen den Endgliedern, nicht zwischen den Nägeln: die Nägel
   // sitzen oft auf statischen Körpern, ein Joint dort würde nichts halten.
-  const spanJoint = targetWorld.createJoint(new planck.RopeJoint({
+  // Ein Seil mit nur einem Nagel bleibt am freien Ende lose, ohne Spannjoint.
+  const spanJoint = (pinA && pinB) ? targetWorld.createJoint(new planck.RopeJoint({
     bodyA: bodies[0],
     bodyB: bodies[bodies.length - 1],
     localAnchorA: V(0, 0),
     localAnchorB: V(0, 0),
     maxLength: restLength * ROPE_MAX_STRETCH,
     collideConnected: false,
-  }));
+  })) : null;
   return {
     kind: "rope",
     ropeId,
@@ -2469,8 +2480,8 @@ function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
     segJoints,
     endJoints,
     spanJoint,
-    pinA,
-    pinB,
+    pinA: pinA || null,
+    pinB: pinB || null,
   };
 }
 
@@ -2618,6 +2629,9 @@ function limitRopeChord(draw) {
 
 function scaleRopeToRest(draw) {
   if (!draw || !draw.bodies || draw.restLength == null) return;
+  // Freies oder geschnittenes Ende nicht auf eine Sehne zwischen den
+  // Endperlen zusammenziehen, sonst hängt ein einseitiges Seil falsch.
+  if (!draw.pinA || !draw.pinB) return;
   if (!draw.fixedPins && (pinBodyMass(draw.pinA) > 0 || pinBodyMass(draw.pinB) > 0)) return;
   const bodies = draw.bodies.filter((b) => b && (typeof b.isValid !== "function" || b.isValid()));
   if (bodies.length < 3) return;
@@ -3037,9 +3051,15 @@ function commitStrokeApply(drawnPts, rawInk) {
     }
   }
   if (!closed) {
-    const a = nearestPin(pts[0].x, pts[0].y, 0.55);
-    const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55);
+    const a = nearestPin(pts[0].x, pts[0].y, 0.55) || nearestPin(ink[0].x, ink[0].y, 0.55);
+    const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55) || nearestPin(ink[ink.length - 1].x, ink[ink.length - 1].y, 0.55);
     if (a && b && a !== b) return spawnRope(a, b, ink);
+    // Zug, der auf einem Nagel beginnt: Seil, auch wenn das andere Ende frei bleibt.
+    const fromNail = nearestPin(ink[0].x, ink[0].y, NAIL_HIT) || nearestPin(pts[0].x, pts[0].y, NAIL_HIT);
+    if (fromNail) {
+      if (pathLength(ink) < ROPE_FROM_NAIL_MIN && pathLength(pts) < ROPE_FROM_NAIL_MIN) return null;
+      return spawnRope(fromNail, (b && b !== fromNail) ? b : null, ink);
+    }
   }
   if (closed && !selfIntersects(pts, true) && Math.abs(signedArea(pts)) >= 0.05) {
     const solid = spawnSolid(regularizeClosed(pts), {});
@@ -3363,6 +3383,17 @@ function snapDrag(dt) {
   playDrag.prevGoal = { x: playDrag.goal.x, y: playDrag.goal.y };
 }
 
+// Gegriffenen Körper beim Loslassen an alle Nägel heften, die in seiner
+// Form liegen (Innennägel dieses Körpers ausgenommen). Mehrere Nägel
+// halten ihn fest. Ein Nagel in einem anderen Körper verbindet beide.
+function tryPinDragEnd(body) {
+  if (!world || !body || body === ball) return 0;
+  if (world.isLocked && world.isLocked()) return 0;
+  const meta = bodyMeta.get(body);
+  if (!meta) return 0;
+  return attachExistingPins(body, meta);
+}
+
 function beginDrag(x, y) {
   if (!world || world.isLocked()) return false;
   const draw = drawingAt(x, y);
@@ -3618,6 +3649,7 @@ function releaseAnchorAt(x, y) {
 function tryAnchorGesture(trail) {
   if (!world || !anchorStrokeOk(trail)) return false;
   const from = trail[0];
+  if (nearestPin(from.x, from.y, NAIL_HIT)) return false;
   const to = trail[trail.length - 1];
   // Vom verankerten Körper zurück auf seine Basis: lösen.
   const startIn = anchorableAt(from.x, from.y);
@@ -3644,7 +3676,9 @@ function tryAnchorGesture(trail) {
 function tryAdoptAnchorGrab(trail) {
   if (!pointer || pointer.dragging || playDrag || !world) return false;
   if (!anchorStrokeOk(trail)) return false;
+  if (pointer.nailClick) return false;
   const from = trail[0];
+  if (nearestPin(from.x, from.y, NAIL_HIT)) return false;
   const to = trail[trail.length - 1];
   const base = anchorBaseAt(from.x, from.y);
   if (!base) return false;
@@ -5732,8 +5766,9 @@ function renderHelp() {
     "Ein runder Strich wird eine Kugel. Sie rollt und gibt ihren Schwung weiter.",
     "Winziger Kreis in der Fläche eines Körpers oder auf dem Boden: Nagel. Ein Seil daran hält fest.",
     "Zwei Nägel in derselben Fläche machen sie starr.",
-    "Linie von Nagel zu Nagel: Seil, so lang wie der Strich, mit allen Schlenkern. Eine Spitze unter 15°, die senkrecht trifft, zerschneidet es.",
-    "Am Rand eines Gegenstands fasst du ihn und ziehst ihn. In der Fläche wird gezeichnet; ein kleiner Kreis setzt einen Nagel. Ein längerer Zug aus der Mitte greift nachträglich.",
+    "Vom Nagel weg ziehen: Seil, so lang wie der Strich, fest am Nagel. Endet der Zug auf einem anderen Nagel, hängt es dort; sonst bleibt das Ende frei. Eine Spitze unter 15°, die senkrecht trifft, zerschneidet es.",
+    "Am Rand eines Gegenstands fasst du ihn und ziehst ihn. Lässt du ihn über einem Nagel los, heftet er sich dort drehbar fest; mehrere Nägel halten ihn gleichzeitig. In der Fläche wird gezeichnet; ein kleiner Kreis setzt einen Nagel. Ein längerer Zug aus der Mitte greift nachträglich.",
+    "Nägel werden nicht verschoben. Einen selbst gesetzten Nagel zieht man mit Rechtsklick oder einem schnellen Doppeltipp heraus.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
     "Klick auf die Spielkugel: kleiner Schubs. Rechtsklick oder Doppeltipp: radiert das Deine.",
@@ -6083,7 +6118,9 @@ function pressKind(x, y) {
 function tryAdoptCenterGrab(trail) {
   if (!pointer || pointer.dragging || playDrag || !world) return false;
   if (!trail || trail.length < 2) return false;
+  if (pointer.nailClick) return false;
   const from = trail[0];
+  if (nearestPin(from.x, from.y, NAIL_HIT)) return false;
   if (pressZone(from.x, from.y) !== "interior") return false;
   let maxD = 0;
   for (const p of trail) {
@@ -6167,7 +6204,10 @@ function onPointerUp(e) {
       ? { body: playDrag.body, at: playDrag.body.getWorldPoint(V(playDrag.local.x, playDrag.local.y)) }
       : null;
     endDrag();
-    if (held && mode === "play") tryAnchorDragEnd(held.body, { x: held.at.x, y: held.at.y }, current.trail);
+    if (held && mode === "play") {
+      const pinned = tryPinDragEnd(held.body);
+      if (!pinned) tryAnchorDragEnd(held.body, { x: held.at.x, y: held.at.y }, current.trail);
+    }
     return;
   }
   if (current.cradle) {
@@ -6183,6 +6223,15 @@ function onPointerUp(e) {
   }
   if (!current.moved) {
     if (mode === "play" && current.nailClick) {
+      const now = performance.now();
+      // Doppeltipp zieht einen selbst gesetzten Nagel heraus; ein einzelner
+      // kurzer Klick schaltet nur den Motor.
+      if (now - lastTap < 320) {
+        eraseAt(w.x, w.y);
+        lastTap = 0;
+        return;
+      }
+      lastTap = now;
       cycleNailMotor(current.nailClick);
       return;
     }
@@ -6353,6 +6402,24 @@ function boot() {
         commitStroke(pts);
       }
       for (let i = 0; i < 2; i++) step(1 / 60);
+    } else if (id === "nagel-seil") {
+      buildLevel(LEVELS["ein-klotz"]);
+      if (ball) {
+        ball.setTransform(V(3.2, 2.2), 0);
+        ball.setLinearVelocity(V(0, 0));
+        ball.setAngularVelocity(0);
+      }
+      rememberPin(9.0, 4.4, ground, true);
+      rememberPin(15.2, 4.4, ground, true);
+      commitStroke([
+        { x: 7.4, y: 3.7 }, { x: 16.8, y: 3.7 }, { x: 16.8, y: 5.1 }, { x: 7.4, y: 5.1 }, { x: 7.4, y: 3.7 },
+      ]);
+      rememberPin(21.2, 8.2, ground, true);
+      const hangPin = pins[pins.length - 1];
+      spawnRope(hangPin, null, [
+        { x: 21.2, y: 8.2 }, { x: 24.0, y: 7.4 }, { x: 26.4, y: 5.2 }, { x: 27.2, y: 3.0 },
+      ]);
+      for (let i = 0; i < 90; i++) step(1 / 60);
     } else if (id === "trebuchet" || id === "trebuchet-wurf") {
       showMap();
       setMapDemo("trebuchet");
@@ -8266,6 +8333,7 @@ function runTests() {
     check("a lone nail still cycles its motor state", nailLone0 === 1 && nailLone1 === -1 && nailLone2 === 0 && nailLone.motor === 0);
 
     buildLevel(LEVELS["ein-klotz"]);
+    lastTap = 0;
     const nailMot = rememberPin(16, 8, ground, true);
     const nailMotBox = ancBox(14, 7.2, 4, 0.8, "#8d5a34");
     for (let i = 0; i < 60; i++) step(1 / 60);
@@ -8276,18 +8344,139 @@ function runTests() {
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWccw = nailMotBox.body.getAngularVelocity();
     check("left motor reaches about +90 deg/s", Math.abs(nailWccw - Math.PI / 2) < 0.35 && !stats.dragTrick);
+    lastTap = 0;
     onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
     onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
     check("second click switches to right turn", nailMot.motor === -1);
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWcw = nailMotBox.body.getAngularVelocity();
     check("right motor reaches about -90 deg/s", Math.abs(nailWcw + Math.PI / 2) < 0.35);
+    lastTap = 0;
     onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
     onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
     check("third click turns the motor off", nailMot.motor === 0 && nailMot.joints.every((j) => !j || !j.isMotorEnabled()));
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWoff = nailMotBox.body.getAngularVelocity();
     check("an off nail joint is not driven", Math.abs(nailWoff) < 1.0);
+
+    function strokeFromTo(x0, y0, x1, y1, pointerId) {
+      const a = worldToScreen(x0, y0);
+      const b = worldToScreen(x1, y1);
+      const mx = (a.x + b.x) / 2;
+      const my = (a.y + b.y) / 2;
+      const ev = { button: 0, pointerId };
+      onPointerDown(Object.assign({ clientX: a.x, clientY: a.y }, ev));
+      onPointerMove(Object.assign({ clientX: mx, clientY: my }, ev));
+      onPointerMove(Object.assign({ clientX: b.x, clientY: b.y }, ev));
+      onPointerUp(Object.assign({ clientX: b.x, clientY: b.y }, ev));
+      pointer = null;
+      endDrag();
+    }
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    const hangStart = rememberPin(10, 8, ground, true);
+    const hangStart0 = pinWorld(hangStart);
+    const ropesBeforeHang = drawings.filter((d) => d.kind === "rope").length;
+    strokeFromTo(hangStart0.x, hangStart0.y, 16, 5, 71);
+    const hangDrawn = drawings.filter((d) => d.kind === "rope").slice(-1)[0];
+    const hangStart1 = pinWorld(hangStart);
+    check("a stroke from a nail makes a rope hung on that nail", !!hangDrawn && hangDrawn.kind === "rope" && hangDrawn.pinA === hangStart && !hangDrawn.pinB && drawings.filter((d) => d.kind === "rope").length === ropesBeforeHang + 1);
+    check("drawing a rope from a nail does not move the nail", Math.hypot(hangStart1.x - hangStart0.x, hangStart1.y - hangStart0.y) < 0.02 && !playDrag);
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    const tapNail = rememberPin(12, 8, ground, true);
+    const ropesBeforeTap = drawings.filter((d) => d.kind === "rope").length;
+    const drawingsBeforeTap = drawings.length;
+    const tapScr = worldToScreen(pinWorld(tapNail).x, pinWorld(tapNail).y);
+    onPointerDown({ button: 0, clientX: tapScr.x, clientY: tapScr.y, pointerId: 72 });
+    onPointerUp({ button: 0, clientX: tapScr.x, clientY: tapScr.y, pointerId: 72 });
+    pointer = null;
+    check("a click on a nail does not spawn a rope fragment", drawings.filter((d) => d.kind === "rope").length === ropesBeforeTap && drawings.length === drawingsBeforeTap && tapNail.motor === 1 && pins.indexOf(tapNail) >= 0);
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    world.setGravity(V(0, 0));
+    const edgeHost = makeBox({ x: 10, y: 8, hw: 1.6, hh: 0.9, color: "#8d5a34" });
+    const edgeNail = rememberPin(11.55, 8, edgeHost, true);
+    const edgeHost0 = { x: edgeHost.getPosition().x, y: edgeHost.getPosition().y };
+    const ropesBeforeEdge = drawings.filter((d) => d.kind === "rope").length;
+    strokeFromTo(11.55, 8, 18, 5.5, 73);
+    const edgeRope = drawings.filter((d) => d.kind === "rope").slice(-1)[0];
+    const edgeHost1 = edgeHost.getPosition();
+    const edgeNail1 = pinWorld(edgeNail);
+    check("a stroke from a nail on a body does not grab the body", !!edgeRope && edgeRope.pinA === edgeNail && !playDrag && Math.hypot(edgeHost1.x - edgeHost0.x, edgeHost1.y - edgeHost0.y) < 0.04);
+    check("the nail on a body stays put while the rope is drawn", Math.hypot(edgeNail1.x - 11.55, edgeNail1.y - 8) < 0.04 && drawings.filter((d) => d.kind === "rope").length === ropesBeforeEdge + 1);
+    world.setGravity(V(0, -24));
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    world.setGravity(V(0, 0));
+    const dropOne = rememberPin(16, 8, ground, true);
+    const dropBox = makeBox({ x: 9, y: 8, hw: 1.4, hh: 0.8, color: "#8d5a34" });
+    const dropGrabX = 10.3;
+    const dropGrabY = 8;
+    const dropOk = beginDrag(dropGrabX, dropGrabY);
+    moveDrag(16 + (dropGrabX - 9), 8);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    endDrag();
+    const dropPinned = tryPinDragEnd(dropBox);
+    const dropHolds = dropOne.joints.some((j) => j && (j.getBodyA() === dropBox || j.getBodyB() === dropBox));
+    const dropAt = pinWorld(dropOne);
+    const dropLocal = dropBox.getLocalPoint(V(dropAt.x, dropAt.y));
+    check("releasing a body over a nail pins it there", dropOk && dropPinned >= 1 && dropHolds && Math.hypot(dropLocal.x, dropLocal.y) < 1.6);
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    world.setGravity(V(0, 0));
+    const lockA = rememberPin(14, 8, ground, true);
+    const lockB = rememberPin(18, 8, ground, true);
+    const lockBox = makeBox({ x: 8, y: 8, hw: 2.6, hh: 0.7, color: "#3c7fd6" });
+    const lockGrabX = 10.4;
+    const lockGrabY = 8;
+    const lockOk = beginDrag(lockGrabX, lockGrabY);
+    moveDrag(16 + (lockGrabX - 8), 8);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    endDrag();
+    const lockPinned = tryPinDragEnd(lockBox);
+    const lockHoldsA = lockA.joints.some((j) => j && (j.getBodyA() === lockBox || j.getBodyB() === lockBox));
+    const lockHoldsB = lockB.joints.some((j) => j && (j.getBodyA() === lockBox || j.getBodyB() === lockBox));
+    const lockPos0 = { x: lockBox.getPosition().x, y: lockBox.getPosition().y };
+    const lockAng0 = lockBox.getAngle();
+    world.setGravity(V(0, -24));
+    for (let i = 0; i < 120; i++) step(1 / 60);
+    const lockPos1 = lockBox.getPosition();
+    const lockAng1 = lockBox.getAngle();
+    check("releasing a body over two nails pins it to both", lockOk && lockPinned >= 2 && lockHoldsA && lockHoldsB);
+    check("a body pinned to two nails stays put under gravity", Math.hypot(lockPos1.x - lockPos0.x, lockPos1.y - lockPos0.y) < 0.08 && Math.abs(lockAng1 - lockAng0) < 0.08);
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    world.setGravity(V(0, 0));
+    const hostBox = makeBox({ x: 14.5, y: 8, hw: 0.7, hh: 0.7, color: "#8d5a34" });
+    const hostPin = rememberPin(15.18, 8, hostBox, true);
+    const guestBox = makeBox({ x: 20, y: 8, hw: 1.1, hh: 0.7, color: "#3c7fd6" });
+    const guestGrabX = 18.95;
+    const guestOk = beginDrag(guestGrabX, 8);
+    // Nagel sitzt am rechten Rand des Wirts; der Gast kommt von rechts
+    // und deckt ihn gerade noch ab, ohne sich durch den Wirt zu schieben.
+    const guestGoalX = 15.18 + 1.0 + (guestGrabX - 20);
+    moveDrag(guestGoalX, 8);
+    for (let i = 0; i < 40; i++) step(1 / 60);
+    endDrag();
+    const guestPinned = tryPinDragEnd(guestBox);
+    const guestHeld = hostPin.joints.some((j) => j && (j.getBodyA() === guestBox || j.getBodyB() === guestBox));
+    check("releasing a body onto a nail in another body joins them", guestOk && guestPinned >= 1 && guestHeld && hostPin.body === hostBox);
+    world.setGravity(V(0, -24));
+
+    lastTap = 0;
+    buildLevel(LEVELS["ein-klotz"]);
+    const pullNail = rememberPin(12, 6, ground, true);
+    const pullAt = pinWorld(pullNail);
+    const pullScr = worldToScreen(pullAt.x, pullAt.y);
+    onPointerDown({ button: 2, clientX: pullScr.x, clientY: pullScr.y, pointerId: 74 });
+    check("right-click pulls out a user nail", pins.indexOf(pullNail) < 0 && !pins.some((pn) => Math.hypot(pinWorld(pn).x - pullAt.x, pinWorld(pn).y - pullAt.y) < 0.2));
 
     buildLevel(LEVELS["ein-klotz"]);
     addStaticSolid([

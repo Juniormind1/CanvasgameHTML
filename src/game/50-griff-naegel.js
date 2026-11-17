@@ -248,6 +248,17 @@ function snapDrag(dt) {
   playDrag.prevGoal = { x: playDrag.goal.x, y: playDrag.goal.y };
 }
 
+// Gegriffenen Körper beim Loslassen an alle Nägel heften, die in seiner
+// Form liegen (Innennägel dieses Körpers ausgenommen). Mehrere Nägel
+// halten ihn fest. Ein Nagel in einem anderen Körper verbindet beide.
+function tryPinDragEnd(body) {
+  if (!world || !body || body === ball) return 0;
+  if (world.isLocked && world.isLocked()) return 0;
+  const meta = bodyMeta.get(body);
+  if (!meta) return 0;
+  return attachExistingPins(body, meta);
+}
+
 function beginDrag(x, y) {
   if (!world || world.isLocked()) return false;
   const draw = drawingAt(x, y);
