@@ -4794,9 +4794,12 @@ const TREB_COCKED = -1.05;
 const TREB_HOLD_DELAY = 0.7;
 const TREB_BALL_R = 0.28;
 const TREB_SLING_LEN = 1.42;
-const TREB_SLING_RELEASE = -1.05;
-const TREB_SLING_WOUND = -1.05;
-const TREB_ARM_SAFETY = 1.55;
+const TREB_SLING_RELEASE = 0;
+const TREB_SLING_WOUND = -0.8;
+const TREB_ARM_SAFETY = 1.35;
+const TREB_VIEW_W = 36;
+const TREB_VIEW_H = 16;
+const TREB_VIEW_RIGHT = 4.5;
 const TREB_POUCH_INNER = 0.7;
 const TREB_POUCH_WALL = 0.09;
 const TREB_POUCH_DEPTH = 0.52;
@@ -5073,7 +5076,7 @@ function ensureTrebuchet() {
   if (trebWorld && treb) return;
   trebWorld = new planck.World(V(0, -24));
   trebGround = trebWorld.createBody();
-  trebGround.createFixture(new planck.Edge(V(-12, 0), V(48, 0)), {
+  trebGround.createFixture(new planck.Edge(V(-200, 0), V(20, 0)), {
     friction: 0.55,
     restitution: 0,
     filterCategoryBits: TREB_CAT_GROUND,
@@ -5281,8 +5284,10 @@ function ensureTrebuchet() {
     wh,
     exploded: false,
     maxBallX: ball.getPosition().x,
+    minBallX: ball.getPosition().x,
     maxLive: 1,
     bestOut: 0,
+    noSlip: false,
   };
   for (let i = 0; i < 12; i++) {
     trebWorld.step(1 / 60, 20, 16);
@@ -5293,6 +5298,7 @@ function ensureTrebuchet() {
   if (treb.ball) {
     const p = treb.ball.getPosition();
     treb.maxBallX = p.x;
+    treb.minBallX = p.x;
     treb.ball.setLinearVelocity(V(0, 0));
     treb.ball.setAngularVelocity(0);
   }
@@ -5372,11 +5378,12 @@ function stepTrebuchet(dt) {
     while (ang > Math.PI) ang -= Math.PI * 2;
     while (ang < -Math.PI) ang += Math.PI * 2;
     const bv = treb.ball.getLinearVelocity();
-    if (bv.x > treb.bestOut) treb.bestOut = bv.x;
-    const pastPeak = treb.slingWound && treb.bestOut > 8 && bv.x < treb.bestOut * 0.92 && bv.y > 6 && ang > -0.1;
-    if (treb.slingWound && rel >= TREB_SLING_RELEASE) slipTrebuchetHook();
-    else if (pastPeak) slipTrebuchetHook();
-    else if (ang >= TREB_ARM_SAFETY) slipTrebuchetHook();
+    const speed = Math.hypot(bv.x, bv.y);
+    if (speed > treb.bestOut) treb.bestOut = speed;
+    if (!treb.noSlip) {
+      if (treb.slingWound && rel >= TREB_SLING_RELEASE) slipTrebuchetHook();
+      else if (ang >= TREB_ARM_SAFETY) slipTrebuchetHook();
+    }
   }
   tightenTrebStrands();
   trebWorld.step(dt, 24, 20);
@@ -5386,6 +5393,7 @@ function stepTrebuchet(dt) {
   if (treb.ball) {
     const p = treb.ball.getPosition();
     treb.maxBallX = Math.max(treb.maxBallX, p.x);
+    treb.minBallX = Math.min(treb.minBallX, p.x);
   }
   const pouchOk = [treb.pouchBottom, treb.pouchLeft, treb.pouchRight].every((b) => !b || trebFinite(b));
   if (![treb.arm, treb.weight, treb.ball].every(trebFinite) || !pouchOk) treb.exploded = true;
@@ -5395,14 +5403,14 @@ function trebuchetLayout() {
   ensureTrebuchet();
   const frame = mapFrame();
   const band = frame.cradle;
-  const worldW = 28;
-  const worldH = 12;
+  const worldW = TREB_VIEW_W;
+  const worldH = TREB_VIEW_H;
   const scale = Math.max(5, Math.min((band.w - 16) / worldW, (band.h - 36) / worldH));
   return {
     frame,
     band,
     scale,
-    originX: band.x + 10 + 3.4 * scale,
+    originX: band.x + band.w - 10 - TREB_VIEW_RIGHT * scale,
     originY: band.y + band.h - 10,
   };
 }
@@ -5507,8 +5515,8 @@ function drawTrebuchet() {
   ctx.beginPath();
   roundRect(band.x, band.y, band.w, band.h, 14);
   ctx.clip();
-  const g0 = trebToScreen(-8, 0, lay);
-  const g1 = trebToScreen(22, 0, lay);
+  const g0 = trebToScreen(-(TREB_VIEW_W - TREB_VIEW_RIGHT), 0, lay);
+  const g1 = trebToScreen(TREB_VIEW_RIGHT + 2, 0, lay);
   ctx.strokeStyle = "#d7c39a";
   ctx.lineWidth = 4;
   ctx.beginPath();
@@ -7177,6 +7185,18 @@ function runTests() {
     lines.push("INFO cradle swing far " + farSwing.toFixed(2) + " mid " + midSwing.toFixed(2) + " overlap " + cradleOverlap.toFixed(3));
 
     resetTrebuchet();
+    treb.noSlip = true;
+    for (let i = 0; i < 18; i++) stepTrebuchet(1 / 60);
+    releaseTrebuchet();
+    let trebPeak = 0;
+    for (let i = 0; i < 180; i++) {
+      stepTrebuchet(1 / 60);
+      if (treb && treb.ball) {
+        const peakV = treb.ball.getLinearVelocity();
+        trebPeak = Math.max(trebPeak, Math.hypot(peakV.x, peakV.y));
+      }
+    }
+    resetTrebuchet();
     const trebStart = { x: treb.ball.getPosition().x, y: treb.ball.getPosition().y };
     const trebStartX = trebStart.x;
     for (let i = 0; i < 18; i++) stepTrebuchet(1 / 60);
@@ -7198,17 +7218,20 @@ function runTests() {
         trebLandX = treb.ball.getPosition().x;
       }
     }
-    const trebFly = treb ? treb.maxBallX - trebStartX : 0;
+    const trebFly = treb ? trebStartX - treb.minBallX : 0;
     const trebLive = treb ? treb.maxLive : 99;
     const trebOk = treb && !treb.exploded && trebFinite(treb.ball) && trebFinite(treb.arm);
     const trebEnd = treb && treb.ball ? treb.ball.getPosition() : { x: 0, y: 0 };
     const sl = treb && treb.slip ? treb.slip : { x: 0, y: 0, vx: 0, vy: 0 };
     const trebRel = treb && treb.slipRel != null ? treb.slipRel : 0;
-    const trebLand = trebLandX != null ? trebLandX - trebStartX : trebFly;
-    lines.push("INFO trebuchet fly " + trebFly.toFixed(2) + " land " + trebLand.toFixed(2) + " live " + trebLive.toFixed(3) + " maxY " + trebMaxY.toFixed(2) + " end " + trebEnd.x.toFixed(2) + "," + trebEnd.y.toFixed(2) + " vSlip " + sl.vx.toFixed(2) + "," + sl.vy.toFixed(2) + " slipRel " + trebRel.toFixed(2) + " didSlip " + trebDidSlip + " leftPouch " + trebLeftPouch);
+    const trebSlipV = Math.hypot(sl.vx, sl.vy);
+    const trebLand = trebLandX != null ? trebStartX - trebLandX : trebFly;
+    lines.push("INFO trebuchet fly " + trebFly.toFixed(2) + " land " + trebLand.toFixed(2) + " live " + trebLive.toFixed(3) + " maxY " + trebMaxY.toFixed(2) + " end " + trebEnd.x.toFixed(2) + "," + trebEnd.y.toFixed(2) + " vSlip " + sl.vx.toFixed(2) + "," + sl.vy.toFixed(2) + " slipRel " + trebRel.toFixed(2) + " peak " + trebPeak.toFixed(2) + " slipV " + trebSlipV.toFixed(2) + " didSlip " + trebDidSlip + " leftPouch " + trebLeftPouch);
     check("trebuchet ball stays in the pouch until release", !trebLeftPouch && trebDidSlip);
-    check("trebuchet ball flies far after release", trebFly > 10);
-    check("trebuchet throws to the right", trebFly > 10);
+    check("trebuchet sling swings past the arm tip before release", trebDidSlip && trebRel >= -0.2 && trebRel <= 0.55);
+    check("trebuchet release speed is near the measured maximum", trebSlipV >= trebPeak * 0.9 && trebPeak > 20);
+    check("trebuchet ball flies far after release", trebFly > 15);
+    check("trebuchet throws to the left", trebFly > 15 && sl.vx < 0);
     check("trebuchet sling stays within 102 percent of its length", trebLive <= 1.02);
     check("trebuchet does not explode", trebOk);
 
@@ -8234,6 +8257,8 @@ function runTests() {
   testlog.textContent = lines.join("\n");
   document.title = fail ? "FAIL" : "PASS";
 }
+
+
 
 window.__crayon = {
   start: (id) => buildLevel(LEVELS[id]),
