@@ -963,6 +963,11 @@ const ELLIPSE_PHYS_VERTS = 16;                // Physik-Polygon; über maxPolygo
 
 // Parameter-Bildschirm (?tune=1). Ohne diesen Modus gelten immer die Konstanten oben.
 const TUNE_STORE = "crayon-tune-v1";
+const DRAG_FREQ = 5;                         // MouseJoint-Frequenz, weich genug gegen Peitschen
+const DRAG_DAMPING = 0.85;                    // nahezu kritische Dämpfung
+const DRAG_FORCE_G = 8;                       // maxForce = Masse * 24 * Faktor
+const DRAG_ANG_DAMP = 0.6;                    // mäßige Winkeldämpfung nur während des Ziehens
+const DRAG_MAX_V = 22;                        // m/s, Deckel für die Greifpunkt-Geschwindigkeit
 const TUNE_SPEC = [
   { group: "Kreis", key: "maxCv", label: "Radiusstreuung", min: 0.02, max: 0.30, step: 0.005, def: CIRCLE_MAX_CV, fmt: (v) => (v * 100).toFixed(1) + " %" },
   { group: "Kreis", key: "samples", label: "Abtastpunkte", min: 16, max: 128, step: 8, def: CIRCLE_SAMPLES, int: true },
@@ -992,6 +997,11 @@ const TUNE_SPEC = [
   { group: "Seil", key: "ropeCutAngle", label: "Schnitt-Spitze", min: 5, max: 30, step: 1, def: 15, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Seil", key: "ropeCutAlign", label: "Senkrecht-Toleranz", min: 10, max: 45, step: 1, def: 30, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Seil", key: "ropeCutSpeed", label: "Schnitt-Mindesttempo", min: 0.5, max: 8, step: 0.25, def: 2.5, fmt: (v) => Number(v).toFixed(2) + " m/s" },
+  { group: "Griff", key: "dragFreq", label: "Griff-Steifigkeit", min: 1, max: 12, step: 0.5, def: DRAG_FREQ, fmt: (v) => Number(v).toFixed(1) + " Hz" },
+  { group: "Griff", key: "dragDamp", label: "Griff-Dämpfung", min: 0.2, max: 1.5, step: 0.05, def: DRAG_DAMPING, fmt: (v) => Number(v).toFixed(2) },
+  { group: "Griff", key: "dragForceG", label: "Max. Kraft / Gewicht", min: 2, max: 20, step: 0.5, def: DRAG_FORCE_G, fmt: (v) => Number(v).toFixed(1) + " × mg" },
+  { group: "Griff", key: "dragAngDamp", label: "Winkeldämpfung", min: 0, max: 2, step: 0.05, def: DRAG_ANG_DAMP, fmt: (v) => Number(v).toFixed(2) },
+  { group: "Griff", key: "dragMaxV", label: "Zieltempo", min: 8, max: 40, step: 1, def: DRAG_MAX_V, fmt: (v) => Number(v).toFixed(0) + " m/s" },
 ];
 const TUNE_BY_KEY = {};
 for (const spec of TUNE_SPEC) TUNE_BY_KEY[spec.key] = spec;
@@ -2913,14 +2923,40 @@ function constrainNailedGoal(body, goal) {
   return null;
 }
 
-function chaseDrag() {
-  if (!playDrag || !world || !playDrag.joint) return;
-  const body = playDrag.body;
-  const nailed = constrainNailedGoal(body, playDrag.goal);
-  if (nailed) {
-    playDrag.joint.setTarget(V(nailed.x, nailed.y));
-    return;
+function dragGoalVelocity(dt) {
+  if (!playDrag || !playDrag.prevGoal) return { x: 0, y: 0 };
+  const stepDt = dt > 1e-8 ? dt : 1 / 60;
+  let vx = (playDrag.goal.x - playDrag.prevGoal.x) / stepDt;
+  let vy = (playDrag.goal.y - playDrag.prevGoal.y) / stepDt;
+  const speed = Math.hypot(vx, vy);
+  const maxV = tuneCode("dragMaxV", DRAG_MAX_V);
+  if (speed > maxV && speed > 1e-12) {
+    vx *= maxV / speed;
+    vy *= maxV / speed;
   }
+  return { x: vx, y: vy };
+}
+
+function applyDragPivotImpulse(body, offx, offy, dt) {
+  const goalV = dragGoalVelocity(dt);
+  const lastV = playDrag.lastGoalV || { x: 0, y: 0 };
+  const dvx = goalV.x - lastV.x;
+  const dvy = goalV.y - lastV.y;
+  const mass = Math.max(1e-6, body.getMass());
+  const inertia = Math.max(1e-6, body.getInertia());
+  const pivotI = inertia + mass * (offx * offx + offy * offy);
+  const w = body.getAngularVelocity() + mass * (offy * dvx - offx * dvy) / pivotI;
+  body.setAngularVelocity(w);
+  body.setLinearVelocity(V(-w * offy, w * offx));
+  playDrag.lastGoalV = { x: goalV.x, y: goalV.y };
+}
+
+function restDragAboutGrab(body, offx, offy) {
+  const w = body.getAngularVelocity();
+  body.setLinearVelocity(V(-w * offy, w * offx));
+}
+
+function clampDragFollow(body) {
   const anchor = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
   const com = body.getPosition();
   const offx = com.x - anchor.x;
@@ -2929,10 +2965,25 @@ function chaseDrag() {
     x: playDrag.goal.x + offx,
     y: playDrag.goal.y + offy,
   });
-  playDrag.joint.setTarget(V(clamped.x - offx, clamped.y - offy));
+  return { offx, offy, clamped };
 }
 
-function snapDrag() {
+function chaseDrag(dt) {
+  if (!playDrag || !world || !playDrag.joint) return;
+  const body = playDrag.body;
+  const nailed = constrainNailedGoal(body, playDrag.goal);
+  if (nailed) {
+    playDrag.joint.setTarget(V(nailed.x, nailed.y));
+    return;
+  }
+  const follow = clampDragFollow(body);
+  body.setTransform(V(follow.clamped.x, follow.clamped.y), body.getAngle());
+  applyDragPivotImpulse(body, follow.offx, follow.offy, dt);
+  body.setAwake(true);
+  playDrag.joint.setTarget(V(follow.clamped.x - follow.offx, follow.clamped.y - follow.offy));
+}
+
+function snapDrag(dt) {
   if (!playDrag || !playDrag.body) return;
   const body = playDrag.body;
   const nailed = constrainNailedGoal(body, playDrag.goal);
@@ -2963,19 +3014,12 @@ function snapDrag() {
     playDrag.joint.setTarget(V(nailed.x, nailed.y));
     return;
   }
-  const anchor = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
-  const com = body.getPosition();
-  const offx = com.x - anchor.x;
-  const offy = com.y - anchor.y;
-  const clamped = clampDragGoal(body, {
-    x: playDrag.goal.x + offx,
-    y: playDrag.goal.y + offy,
-  });
-  body.setTransform(V(clamped.x, clamped.y), body.getAngle());
-  const spin = body.getAngularVelocity();
-  body.setLinearVelocity(V(-spin * offy, spin * offx));
+  const follow = clampDragFollow(body);
+  body.setTransform(V(follow.clamped.x, follow.clamped.y), body.getAngle());
+  restDragAboutGrab(body, follow.offx, follow.offy);
   body.setAwake(true);
-  playDrag.joint.setTarget(V(clamped.x - offx, clamped.y - offy));
+  playDrag.joint.setTarget(V(follow.clamped.x - follow.offx, follow.clamped.y - follow.offy));
+  playDrag.prevGoal = { x: playDrag.goal.x, y: playDrag.goal.y };
 }
 
 function beginDrag(x, y) {
@@ -2987,7 +3031,7 @@ function beginDrag(x, y) {
   const wasBullet = body.isBullet();
   const angularDamping = body.getAngularDamping();
   body.setBullet(true);
-  body.setAngularDamping(1.8);
+  body.setAngularDamping(tuneCode("dragAngDamp", DRAG_ANG_DAMP));
   body.setAwake(true);
   const mass = Math.max(0.2, body.getMass());
   const local = body.getLocalPoint(V(x, y));
@@ -2995,9 +3039,9 @@ function beginDrag(x, y) {
     bodyA: ground,
     bodyB: body,
     target: V(x, y),
-    maxForce: mass * 160,
-    frequencyHz: 7,
-    dampingRatio: 1,
+    maxForce: mass * 24 * tuneCode("dragForceG", DRAG_FORCE_G),
+    frequencyHz: tuneCode("dragFreq", DRAG_FREQ),
+    dampingRatio: tuneCode("dragDamp", DRAG_DAMPING),
     collideConnected: true,
   }));
   playDrag = {
@@ -3007,6 +3051,8 @@ function beginDrag(x, y) {
     angularDamping,
     local: { x: local.x, y: local.y },
     goal: { x, y },
+    prevGoal: { x, y },
+    lastGoalV: { x: 0, y: 0 },
   };
   return true;
 }
@@ -3503,7 +3549,7 @@ function handleContacts() {
 
 function step(dt) {
   if (!world) return;
-  chaseDrag();
+  chaseDrag(dt);
   simTime += dt;
   if (simTime > 0.35) {
     for (const rocket of rockets) rocket.armed = true;
@@ -3511,7 +3557,7 @@ function step(dt) {
   const ropeLive = drawings.some((d) => d.kind === "rope" && d.bodies && d.bodies.length);
   world.step(dt, ropeLive ? 20 : 10, ropeLive ? 16 : 8);
   if (ropeLive) tightenRopes();
-  snapDrag();
+  snapDrag(dt);
   handleContacts();
   applyRopeCuts();
   stepDragFresh(dt);
@@ -6175,6 +6221,66 @@ function runTests() {
     check("weight hangs below the grab", hangY < -0.85 && Math.abs(hangX) < 0.16);
     lines.push("INFO hang " + hangX.toFixed(2) + "," + hangY.toFixed(2));
     endDrag();
+
+    function measureDragSweep(label, localX, localY, speed) {
+      buildLevel(LEVELS["ein-klotz"]);
+      const plank = makeBox({ x: 12, y: 8, hw: 1.2, hh: 0.35, color: "#3c7fd6" });
+      for (let i = 0; i < 8; i++) step(1 / 60);
+      const g0 = plank.getWorldPoint(V(localX, localY));
+      beginDrag(g0.x, g0.y);
+      for (let i = 0; i < 300; i++) {
+        moveDrag(g0.x, g0.y);
+        step(1 / 60);
+      }
+      const settleW = plank.getAngularVelocity();
+      const hangA = plank.getAngle();
+      const mass = plank.getMass();
+      const inertia = plank.getInertia();
+      const off = plank.getWorldPoint(V(localX, localY));
+      const c0 = plank.getPosition();
+      const rx = c0.x - off.x;
+      const ry = c0.y - off.y;
+      const pivotI = inertia + mass * (rx * rx + ry * ry);
+      const refW = Math.abs(mass * (ry * speed) / pivotI);
+      let maxW = 0;
+      let maxTilt = 0;
+      let maxErr = 0;
+      const sweepDt = 1 / 60;
+      const nSweep = 48;
+      for (let i = 1; i <= nSweep; i++) {
+        moveDrag(g0.x + speed * sweepDt * i, g0.y);
+        step(sweepDt);
+        const w = Math.abs(plank.getAngularVelocity());
+        if (w > maxW) maxW = w;
+        const tilt = Math.abs(plank.getAngle() - hangA);
+        if (tilt > maxTilt) maxTilt = tilt;
+        const g = plank.getWorldPoint(V(localX, localY));
+        const err = Math.hypot(g.x - (g0.x + speed * sweepDt * i), g.y - g0.y);
+        if (err > maxErr) maxErr = err;
+      }
+      const wAtEnd = Math.abs(plank.getAngularVelocity());
+      const tiltEnd = Math.abs(plank.getAngle() - hangA);
+      for (let i = 0; i < 180; i++) {
+        moveDrag(g0.x + speed * sweepDt * nSweep, g0.y);
+        step(sweepDt);
+        const w = Math.abs(plank.getAngularVelocity());
+        if (w > maxW) maxW = w;
+      }
+      const wAfter = Math.abs(plank.getAngularVelocity());
+      const held = plank.getWorldPoint(V(localX, localY));
+      const comAfter = plank.getPosition();
+      const hangAfterY = comAfter.y - held.y;
+      endDrag();
+      lines.push("INFO drag-spin " + label + " settleW " + settleW.toFixed(3) + " maxW " + maxW.toFixed(2) + " refW " + refW.toFixed(2) + " wSweep " + wAtEnd.toFixed(2) + " wAfter " + wAfter.toFixed(2) + " maxTilt " + (maxTilt * 180 / Math.PI).toFixed(1) + " tiltEnd " + (tiltEnd * 180 / Math.PI).toFixed(1) + " hangY " + hangAfterY.toFixed(2) + " err " + maxErr.toFixed(3));
+      return { maxW, maxTilt, maxErr, wAfter, refW, hangAfterY };
+    }
+    const dragCorner = measureDragSweep("corner-8", 1.05, 0.28, 8);
+    const dragCenter = measureDragSweep("center-8", 0.05, 0.02, 8);
+    const dragCornerFast = measureDragSweep("corner-14", 1.05, 0.28, 14);
+    check("corner drag at 8 m/s stays a pendulum", dragCorner.maxW < dragCorner.refW * 1.4 + 1 && dragCorner.maxTilt < 100 * Math.PI / 180 && dragCorner.maxErr < 0.25);
+    check("near-center drag stays near the reference spin", dragCenter.maxW < dragCenter.refW * 1.4 + 0.5 && dragCenter.maxTilt < 25 * Math.PI / 180);
+    check("dragged plank hangs again after a sweep", dragCorner.hangAfterY < -0.7);
+    check("a 14 m/s corner drag does not spin away", dragCornerFast.maxW < dragCornerFast.refW * 1.5 + 2 && dragCornerFast.maxErr < 0.25);
 
     buildLevel(LEVELS["ein-klotz"]);
     const pusher = makeBox({ x: 3.1, y: 2.3, hw: 0.4, hh: 0.4, color: "#d94b3a" });
