@@ -7,6 +7,7 @@
 - **Bedienung nur über intuitive Mausgesten.** Was der Spieler zeichnet oder anfasst, soll sich von selbst erklären.
 - **Abwechslung kommt aus gutem Leveldesign**, nicht aus immer mehr Werkzeugen oder Objekttypen.
 - Vorschläge für neue Bedienelemente (Buttons, Menüs, Modi) vorher mit dem Nutzer klären.
+- **Ausnahme Parameter-Bildschirm:** Nur über den Entwicklungs-Link `?tune=1`. Im normalen Spiel gibt es keine Werkzeugleiste. Der Schirm hat Schieberegler für Kreis-, Ellipsen-, Vieleck- und Dreieckerkennung (unter anderem `CIRCLE_MAX_CV`, `ELLIPSE_MAX_CV`, Kreisgrenze `b/a`, Ecken- und Aufräumwerte). Änderungen gelten nur in diesem Modus und werden in `localStorage` gemerkt; ohne `?tune=1` gelten immer die Konstanten in `src/game.js`. Zurücksetzen stellt die Vorgaben wieder her, Kopieren liefert die aktuellen Werte plus die Messung des letzten Zugs als JSON.
 
 ## Gesten im Spiel
 
