@@ -463,6 +463,49 @@ function simplify(points, epsilon) {
   return out;
 }
 
+function simplifyClosed(points, epsilon) {
+  const ring = (closedRing(points) || points).map((p) => ({ x: p.x, y: p.y }));
+  if (ring.length < 3) return ring;
+  let ia = 0;
+  let ib = 1;
+  let best = -1;
+  for (let i = 0; i < ring.length; i++) {
+    for (let j = i + 1; j < ring.length; j++) {
+      const d = dist(ring[i], ring[j]);
+      if (d > best) {
+        best = d;
+        ia = i;
+        ib = j;
+      }
+    }
+  }
+  const keep = new Array(ring.length).fill(false);
+  keep[ia] = true;
+  keep[ib] = true;
+  const walk = (a, b) => {
+    const n = ring.length;
+    let maxD = 0;
+    let idx = -1;
+    for (let i = (a + 1) % n; i !== b; i = (i + 1) % n) {
+      const d = distPointSeg(ring[i].x, ring[i].y, ring[a].x, ring[a].y, ring[b].x, ring[b].y);
+      if (d > maxD) {
+        maxD = d;
+        idx = i;
+      }
+    }
+    if (idx !== -1 && maxD > epsilon) {
+      keep[idx] = true;
+      walk(a, idx);
+      walk(idx, b);
+    }
+  };
+  walk(ia, ib);
+  walk(ib, ia);
+  const out = [];
+  for (let i = 0; i < ring.length; i++) if (keep[i]) out.push(ring[i]);
+  return out;
+}
+
 function selfIntersects(pts, closed) {
   const n = pts.length;
   const last = closed ? n : n - 1;
@@ -693,27 +736,232 @@ function cornerGap(hull, box) {
   return worst;
 }
 
+function rightCornerTol() {
+  return tuneCode("rightCorner", RIGHT_CORNER);
+}
+
+function anglesNearRight(pts, tol) {
+  const limit = tol == null ? rightCornerTol() : tol;
+  const angs = interiorAngles(pts);
+  return angs.length > 0 && angs.every((a) => Math.abs(a - Math.PI / 2) <= limit);
+}
+
+function squareCornerPoint(prev, cur, next) {
+  const mx = (prev.x + next.x) / 2;
+  const my = (prev.y + next.y) / 2;
+  const r = dist(prev, next) / 2;
+  if (r < 1e-6) return { x: cur.x, y: cur.y };
+  let dx = cur.x - mx;
+  let dy = cur.y - my;
+  let d = Math.hypot(dx, dy);
+  if (d < 1e-6) {
+    dx = -(next.y - prev.y);
+    dy = next.x - prev.x;
+    d = Math.hypot(dx, dy) || 1;
+  }
+  return { x: mx + dx / d * r, y: my + dy / d * r };
+}
+
+function squareNearRightCorners(pts) {
+  if (!pts || pts.length < 3) return pts;
+  let out = ensureCCW(pts.map((p) => ({ x: p.x, y: p.y })));
+  const tol = rightCornerTol();
+  if (out.length === 4 && anglesNearRight(out, tol)) {
+    const box = orientedRect(out, out);
+    if (box) return ensureCCW(box);
+  }
+  for (let pass = 0; pass < 3; pass++) {
+    const angs = interiorAngles(out);
+    let moved = false;
+    const next = out.map((p) => ({ x: p.x, y: p.y }));
+    for (let i = 0; i < out.length; i++) {
+      if (Math.abs(angs[i] - Math.PI / 2) > tol) continue;
+      if (Math.abs(angs[i] - Math.PI / 2) < 1e-4) continue;
+      const prev = out[(i + out.length - 1) % out.length];
+      const cur = out[i];
+      const nxt = out[(i + 1) % out.length];
+      next[i] = squareCornerPoint(prev, cur, nxt);
+      moved = true;
+    }
+    out = ensureCCW(next);
+    if (!moved) break;
+  }
+  if (out.length === 4 && anglesNearRight(out, tol)) {
+    const box = orientedRect(out, out);
+    if (box) return ensureCCW(box);
+  }
+  return out;
+}
+
+function cornerPeaks(pts, minDeg) {
+  const ring = closedRing(pts);
+  if (!ring || ring.length < 3) return [];
+  const samples = resampleRing(ring, Math.max(64, ring.length * 3));
+  if (!samples || samples.length < 8) return [];
+  const n = samples.length;
+  const minTurn = (minDeg == null ? 32 : minDeg) * Math.PI / 180;
+  const win = Math.max(1, Math.round(n * 0.03));
+  const turns = [];
+  for (let i = 0; i < n; i++) {
+    const prev = samples[(i - win + n) % n];
+    const cur = samples[i];
+    const nxt = samples[(i + win) % n];
+    turns.push(turnAngle(prev, cur, nxt));
+  }
+  const peaks = [];
+  for (let i = 0; i < n; i++) {
+    const a = Math.abs(turns[(i + n - 1) % n]);
+    const b = Math.abs(turns[i]);
+    const c = Math.abs(turns[(i + 1) % n]);
+    if (b >= a && b >= c && b >= minTurn) peaks.push({ i, turn: b, p: samples[i] });
+  }
+  const merged = [];
+  const minSep = Math.max(4, Math.round(n / 16));
+  peaks.sort((u, v) => v.turn - u.turn);
+  for (const pk of peaks) {
+    if (merged.some((m) => Math.min((pk.i - m.i + n) % n, (m.i - pk.i + n) % n) < minSep)) continue;
+    merged.push(pk);
+  }
+  merged.sort((u, v) => u.i - v.i);
+  return merged.map((pk) => ({ x: pk.p.x, y: pk.p.y }));
+}
+
+function mergeCornerSets(a, b, minDist) {
+  const out = (a || []).map((p) => ({ x: p.x, y: p.y }));
+  for (const p of (b || [])) {
+    if (out.some((q) => dist(p, q) < minDist)) continue;
+    out.push({ x: p.x, y: p.y });
+  }
+  if (out.length < 3) return out;
+  const c = polygonCentroid(out) || { x: 0, y: 0 };
+  out.sort((p, q) => Math.atan2(p.y - c.y, p.x - c.x) - Math.atan2(q.y - c.y, q.x - c.x));
+  return ensureCCW(out);
+}
+
+function nearestRingIndex(ring, p) {
+  let best = 0;
+  let bestD = 1e9;
+  for (let i = 0; i < ring.length; i++) {
+    const d = dist(ring[i], p);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function edgeBulge(a, b, stroke) {
+  const ring = closedRing(stroke);
+  if (!ring || ring.length < 2) return 0;
+  const n = ring.length;
+  const ia = nearestRingIndex(ring, a);
+  const ib = nearestRingIndex(ring, b);
+  if (ia === ib) return 0;
+  let best = 0;
+  for (let i = (ia + 1) % n; i !== ib; i = (i + 1) % n) {
+    const p = ring[i];
+    const d = distPointSeg(p.x, p.y, a.x, a.y, b.x, b.y);
+    if (d > best) best = d;
+  }
+  return best;
+}
+
+function edgesAreStraight(corners, stroke) {
+  if (!corners || corners.length < 3) return false;
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i];
+    const b = corners[(i + 1) % corners.length];
+    const len = dist(a, b);
+    if (len < 0.12) return false;
+    if (edgeBulge(a, b, stroke) > Math.max(0.16, len * 0.16)) return false;
+  }
+  return true;
+}
+
+function cornersFromStroke(pts) {
+  const ring = ensureCCW(dedupe(closedRing(pts) || pts));
+  if (ring.length < 3) return [];
+  const eps = Math.max(tuneCode("simplify", 0.045), 0.05);
+  let simple = simplifyClosed(ring, eps);
+  if (simple.length > 4) simple = pruneByTurn(simple, tuneCode("pruneTurn", 25));
+  if (simple.length > 4 && simple.length <= 8) {
+    const softer = pruneByTurn(simple, tuneCode("pruneSoft", 42));
+    if (softer.length === 3 || softer.length === 4) simple = softer;
+  }
+  const peaks = cornerPeaks(ring, 32);
+  if ((simple.length < 3 || simple.length > 4) && (peaks.length === 3 || peaks.length === 4)) {
+    simple = ensureCCW(peaks);
+  } else if (simple.length > 4 && peaks.length >= 3 && peaks.length <= 4) {
+    const mixed = mergeCornerSets(simple, peaks, Math.max(0.18, ringLen(ring) * 0.04));
+    const pruned = mixed.length > 4 ? pruneByTurn(mixed, tuneCode("pruneSoft", 42)) : mixed;
+    if (pruned.length === 3 || pruned.length === 4) simple = ensureCCW(pruned);
+  }
+  return simple;
+}
+
+function recognizePolygon(pts) {
+  if (!pts || pts.length < 3) return null;
+  let ring = closedRing(pts);
+  if (!ring || ring.length < 3) return null;
+  if (dist(ring[0], ring[ring.length - 1]) > 0.02 && isClosedStroke(pts)) {
+    ring = ring.map((p) => ({ x: p.x, y: p.y }));
+  }
+  const area2 = Math.abs(signedArea(ensureCCW(ring)));
+  if (area2 < 0.05) return null;
+  if (selfIntersects(ring, true)) return null;
+  const hull = ensureCCW(convexHull(ring));
+  const hArea = Math.abs(signedArea(hull));
+  if (hArea < 1e-4 || area2 / hArea < tuneCode("hullFill", 0.7)) return null;
+  let corners = cornersFromStroke(ring);
+  if (!(corners.length === 3 || corners.length === 4)) return null;
+  if (!isConvex(corners)) return null;
+  const angs = interiorAngles(corners);
+  if (angs.some((a) => a < 22 * Math.PI / 180 || a > 158 * Math.PI / 180)) return null;
+  if (!edgesAreStraight(corners, ring)) return null;
+  corners = ensureCCW(corners);
+  if (corners.length === 3) return { kind: "tri", corners: ensureCCW(snapTriangle(corners)) };
+  if (anglesNearRight(corners)) {
+    const box = orientedRect(corners, ring);
+    if (box) return { kind: "quad", corners: ensureCCW(box) };
+  }
+  return { kind: "quad", corners: ensureCCW(squareNearRightCorners(corners)) };
+}
+function snapPolygonPose(pts) {
+  if (!strokeSnaps() || !pts || pts.length < 3) return pts;
+  const c = polygonCentroid(pts);
+  if (!c) return pts;
+  const g = snapDrawPoint(c);
+  const dx = g.x - c.x;
+  const dy = g.y - c.y;
+  if (Math.hypot(dx, dy) < 1e-6) return pts;
+  return pts.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+}
+
 function regularizeClosed(pts) {
+  const rec = recognizePolygon(pts);
+  if (rec) return rec.corners;
   const src = ensureCCW(dedupe(pts));
   if (src.length < 3 || Math.abs(signedArea(src)) < 0.04) return src;
   const hull = ensureCCW(convexHull(src));
-  if (hull.length < 3) return src;
+  if (hull.length < 3) return squareNearRightCorners(src);
   const area = Math.abs(signedArea(src));
   const hArea = Math.abs(signedArea(hull));
-  if (hArea < 1e-4 || area / hArea < tuneCode("hullFill", 0.7)) return src;
+  if (hArea < 1e-4 || area / hArea < tuneCode("hullFill", 0.7)) return squareNearRightCorners(src);
   let shape = pruneByTurn(hull, tuneCode("pruneTurn", 25));
   if (shape.length > 4 && shape.length <= 6) {
     const softer = pruneByTurn(shape, tuneCode("pruneSoft", 42));
-    if ((softer.length === 4 && isRoughRect(softer)) || softer.length === 3) shape = softer;
+    if ((softer.length === 4 && anglesNearRight(softer)) || softer.length === 3) shape = softer;
   }
-  if (shape.length === 4 && isRoughRect(shape)) {
+  if (shape.length === 4 && anglesNearRight(shape)) {
     const box = orientedRect(shape, src);
     if (box) return ensureCCW(box);
   }
+  if (shape.length === 4) return ensureCCW(squareNearRightCorners(shape));
   if (shape.length === 3) return ensureCCW(snapTriangle(shape));
   if (shape.length > 4) {
     const box = orientedRect(hull, src);
-    if (box) {
+    if (box && anglesNearRight(box, rightCornerTol() * 1.5)) {
       const bArea = Math.abs(signedArea(box));
       const shortSide = Math.min(dist(box[0], box[1]), dist(box[1], box[2]));
       if (bArea > 1e-4 && hArea / bArea > tuneCode("boxFill", 0.9) && cornerGap(hull, box) < shortSide * tuneCode("boxGap", 0.16)) {
@@ -721,7 +969,7 @@ function regularizeClosed(pts) {
       }
     }
   }
-  return src;
+  return squareNearRightCorners(src);
 }
 
 function straightenOpen(pts) {
@@ -750,16 +998,24 @@ function straightenOpen(pts) {
 // Residuum ist die relative Streuung der elliptischen Radien (CV-artig)
 // unter ELLIPSE_MAX_CV. Eine Ellipse entsteht erst, wenn die Achsen um mehr
 // als (1 - ELLIPSE_CIRCLE_RATIO)*a + ELLIPSE_EXTRA_GAP (eine Rasterweite)
-// auseinanderliegen, sonst ein Kreis mit r=(a+b)/2. Erst wenn keine
-// Ellipse/kein Kreis entsteht, rastet
-// die fertige Form auf das Raster ein (Geraden, rechte Winkel). 3- und
-// 4-Ecke nach dieser Aufräumung bleiben Vielecke. Ohne Geodreieck nur
-// Kreise, Felsbrocken bleiben eckig.
+// auseinanderliegen, sonst ein Kreis mit r=(a+b)/2.
+// 3- und 4-Ecke werden immer zuerst auf dem Rohzug erkannt (Ecken über
+// geschlossenes Douglas-Peucker und Krümmungsspitzen, unabhängig vom
+// Startpunkt). Ein erkanntes Viereck behält seine Drehung; mit Geodreieck
+// wird es nicht auf das achsenparallele Raster in Treppen zerlegt
+// (höchstens der Schwerpunkt rastet, die Kantenrichtungen bleiben).
+// Jede erkannte Ecke zwischen 80 und 100 Grad wird exakt 90 Grad, mit und ohne
+// Geodreieck. Vier solche Ecken ergeben ein exaktes gedrehtes Rechteck.
+// Kreis und Ellipse werden uebersprungen, wenn 3-4 klare Ecken vorliegen.
+// Erst wenn keine Ellipse/kein Kreis und kein 3-/4-Eck entsteht, rastet
+// eine eckige Form auf das Raster ein. Ohne Geodreieck nur Kreise;
+// Felsen und schiefe Dreiecke bleiben unregelmäßig, außer 80–100°-Ecken.
 const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an krakeligen Kreisen und 1:2-Ovalen
 const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
 const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
 const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
 const CIRCLE_RIGHT_TOL = 10 * Math.PI / 180;  // Geodreieck: Toleranz für 90°
+const RIGHT_CORNER = 10 * Math.PI / 180;      // Ecke 80-100° wird exakt 90°, drehunabhängig
 const CIRCLE_MIN_R = 0.16;
 const CIRCLE_MAX_R = 4;
 const CIRCLE_MIN_PTS = 5;
@@ -794,6 +1050,7 @@ const TUNE_SPEC = [
   { group: "Vieleck / Dreieck", key: "rectMaxAng", label: "Rechteck max. Winkel", min: 100, max: 140, step: 1, def: 125, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Vieleck / Dreieck", key: "rectMeanDev", label: "Rechteck mittl. Abweichung", min: 8, max: 45, step: 1, def: 28, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Vieleck / Dreieck", key: "triSnap", label: "Dreieck 90° einrasten", min: 5, max: 40, step: 1, def: 22, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
+  { group: "Vieleck / Dreieck", key: "rightCorner", label: "Rechtwinkel-Toleranz", min: 4, max: 20, step: 1, def: 10, int: true, unit: "°", toCode: (d) => d * Math.PI / 180 },
   { group: "Vieleck / Dreieck", key: "hullFill", label: "Füllung zur Hülle", min: 0.50, max: 0.95, step: 0.01, def: 0.7, fmt: (v) => (v * 100).toFixed(0) + " %" },
   { group: "Vieleck / Dreieck", key: "boxFill", label: "Füllung zum Rechteck", min: 0.70, max: 0.99, step: 0.01, def: 0.9, fmt: (v) => (v * 100).toFixed(0) + " %" },
   { group: "Vieleck / Dreieck", key: "boxGap", label: "Eckenabstand / kurze Seite", min: 0.04, max: 0.30, step: 0.01, def: 0.16, fmt: (v) => (v * 100).toFixed(0) + " %" },
@@ -1390,12 +1647,8 @@ function snapStrokePoints(raw) {
 }
 
 function geoKeepsPolygon(pts) {
-  if (!pts || pts.length < 3) return false;
-  const simple = dedupe(simplify(pts, tuneCode("simplify", 0.045)));
-  const ring = closedRing(simple);
-  if (!ring || ring.length < 3 || Math.abs(signedArea(ring)) < 0.05) return false;
-  const neat = regularizeClosed(ring);
-  return !!(neat && (neat.length === 3 || neat.length === 4));
+  const rec = recognizePolygon(pts);
+  return !!(rec && rec.corners && (rec.corners.length === 3 || rec.corners.length === 4));
 }
 
 function strokeSnaps() {
@@ -2470,8 +2723,14 @@ function commitStrokeApply(drawnPts, rawInk) {
   const inkOpen = dist(ink[0], ink[ink.length - 1]);
   const ptsOpen = dist(pts[0], pts[pts.length - 1]);
   if (closed || inkOpen < closeTol || ptsOpen < closeTol) {
-    // Polygon-Sperre auf dem Rohzug, nicht auf dem gerasterten Strich:
-    // eine flache Ellipse würde nach dem Snap wie ein Rechteck wirken.
+    // 3-/4-Ecke immer auf dem Rohzug: keine Ellipse/kein Kreis, und mit
+    // Geodreieck kein Raster, das schräge Kanten zu Treppen macht.
+    const poly = recognizePolygon(ink);
+    if (poly) {
+      const neat = snapPolygonPose(poly.corners);
+      const solid = spawnSolid(neat, {});
+      if (solid) return solid;
+    }
     if (!(strokeSnaps() && geoKeepsPolygon(ink))) {
       const fit = tryMakeCircle(dedupe(ink));
       if (fit) {
@@ -5220,7 +5479,7 @@ function boot() {
     } else if (id === "material") {
       buildLevel(LEVELS["ein-klotz"]);
       const ring = (cx, cy, r, n) => {
-        const pts = [];
+        let pts = [];
         for (let i = 0; i <= n; i++) {
           const a = (i / n) * Math.PI * 2;
           pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
@@ -5248,6 +5507,29 @@ function boot() {
       commitStroke(ring(6.2, 3.6, 1.05, 28));
       commitStroke([{ x: 8.8, y: 1.38 }, { x: 11.0, y: 3.3 }]);
       for (let i = 0; i < 100; i++) step(1 / 60);
+    } else if (id === "rauten") {
+      buildLevel(LEVELS["ein-klotz"]);
+      const rautenSet = [
+        [6.5, 8.2, 1.15, 1.15, 0],
+        [11.2, 8.2, 1.15, 1.15, 30],
+        [16.0, 8.2, 1.15, 1.15, 45],
+        [21.0, 8.2, 1.15, 1.15, 60],
+        [26.0, 8.4, 1.35, 0.95, 25],
+      ];
+      for (const [cx, cy, hw, hh, rot] of rautenSet) {
+        const a = rot * Math.PI / 180;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        const pts = [
+          { x: cx + (-hw) * ca - (-hh) * sa, y: cy + (-hw) * sa + (-hh) * ca },
+          { x: cx + (hw) * ca - (-hh) * sa, y: cy + (hw) * sa + (-hh) * ca },
+          { x: cx + (hw) * ca - (hh) * sa, y: cy + (hw) * sa + (hh) * ca },
+          { x: cx + (-hw) * ca - (hh) * sa, y: cy + (-hw) * sa + (hh) * ca },
+        ];
+        pts.push({ x: pts[0].x, y: pts[0].y });
+        commitStroke(pts);
+      }
+      for (let i = 0; i < 2; i++) step(1 / 60);
     } else if (id === "trebuchet") {
       showMap();
       setMapDemo("trebuchet");
@@ -6582,6 +6864,150 @@ function runTests() {
     geoSnap = false;
     const geoWobTri = drawings.find((d) => d.kind === "solid" && !d.preset);
     check("geodreieck non-right triangle stays a polygon", !!geoWobTri && geoWobTri.kind === "solid" && geoWobTri.meta.outline.local.length === 3 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    function diaRng(seed) {
+      let s = (seed >>> 0) || 1;
+      return () => {
+        s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+        return s / 4294967296;
+      };
+    }
+    function rotPt(x, y, ca, sa, cx, cy) {
+      return { x: cx + x * ca - y * sa, y: cy + x * sa + y * ca };
+    }
+    function squareStroke(cx, cy, hw, hh, rotDeg, kind, seed) {
+      const a = rotDeg * Math.PI / 180;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      const corners = [
+        rotPt(-hw, -hh, ca, sa, cx, cy),
+        rotPt(hw, -hh, ca, sa, cx, cy),
+        rotPt(hw, hh, ca, sa, cx, cy),
+        rotPt(-hw, hh, ca, sa, cx, cy),
+      ];
+      const rand = diaRng(seed);
+      let pts = [];
+      const startEdge = kind === "mid" ? 0 : 0;
+      const startT = kind === "mid" ? 0.48 : 0;
+      for (let e = 0; e < 4; e++) {
+        const i = (startEdge + e) % 4;
+        const a0 = corners[i];
+        const a1 = corners[(i + 1) % 4];
+        const len = Math.hypot(a1.x - a0.x, a1.y - a0.y) || 1;
+        const nx = -(a1.y - a0.y) / len;
+        const ny = (a1.x - a0.x) / len;
+        const nSamp = kind === "clean" ? 3 : 7;
+        for (let k = 0; k < nSamp; k++) {
+          let t = k / nSamp;
+          if (e === 0) t = startT + (1 - startT) * t;
+          if (t >= 0.999) continue;
+          let wob = 0;
+          if (kind === "hand" || kind === "gap" || kind === "mid") {
+            wob = (rand() - 0.5) * 0.14 + 0.05 * Math.sin((t + e) * 6 + seed * 0.1);
+          }
+          pts.push({ x: a0.x + (a1.x - a0.x) * t + nx * wob, y: a0.y + (a1.y - a0.y) * t + ny * wob });
+        }
+      }
+      if (kind === "gap") {
+        if (pts.length > 6) pts = pts.slice(0, Math.max(5, pts.length - 2));
+        return pts;
+      }
+      if (kind === "mid") {
+        pts.push({ x: pts[0].x + (rand() - 0.5) * 0.08, y: pts[0].y + (rand() - 0.5) * 0.08 });
+        return pts;
+      }
+      pts.push({ x: pts[0].x, y: pts[0].y });
+      return pts;
+    }
+    function rautenOk(draw, rotDeg) {
+      if (!draw || draw.kind !== "solid" || !draw.meta || !draw.meta.outline) return false;
+      const loc = draw.meta.outline.local;
+      if (!loc || loc.length !== 4) return false;
+      const angs = interiorAngles(loc).map((a) => a * 180 / Math.PI);
+      if (!angs.every((a) => Math.abs(a - 90) < 6)) return false;
+      let best = -1;
+      let edgeAng = 0;
+      for (let i = 0; i < loc.length; i++) {
+        const q = loc[(i + 1) % loc.length];
+        const len = Math.hypot(q.x - loc[i].x, q.y - loc[i].y);
+        if (len > best) {
+          best = len;
+          edgeAng = Math.atan2(q.y - loc[i].y, q.x - loc[i].x) * 180 / Math.PI;
+        }
+      }
+      let line = Math.abs(edgeAng) % 90;
+      if (line > 45) line = 90 - line;
+      const want = ((Math.abs(rotDeg) % 90) > 45) ? 90 - (Math.abs(rotDeg) % 90) : (Math.abs(rotDeg) % 90);
+      return Math.abs(line - want) < 10;
+    }
+    function rautenKind(draw) {
+      if (!draw) return "none";
+      if (draw.kind === "roller") return "circle";
+      if (draw.kind === "ellipse") return "ellipse";
+      if (draw.kind === "solid" && draw.meta && draw.meta.outline) return "n" + draw.meta.outline.local.length;
+      return draw.kind;
+    }
+
+    const rautenAngles = [0, 25, 30, 45, 60];
+    const rautenModes = ["free", "geo"];
+    const rautenKinds = ["clean", "hand", "gap", "mid"];
+    for (const modeName of rautenModes) {
+      for (const ang of rautenAngles) {
+        let ok = 0;
+        let total = 0;
+        const useGeo = modeName === "geo";
+        for (const kind of rautenKinds) {
+          const n = kind === "clean" ? 2 : 4;
+          for (let i = 0; i < n; i++) {
+            buildLevel(LEVELS["ein-klotz"]);
+            geoSnap = useGeo;
+            const stroke = squareStroke(16, 8, 1.6, 1.6, ang, kind, 100 + ang * 17 + i * 31 + (useGeo ? 7 : 0) + kind.length * 13);
+            commitStroke(stroke);
+            geoSnap = false;
+            const draw = drawings.find((d) => (d.kind === "solid" && !d.preset) || d.kind === "roller" || d.kind === "ellipse");
+            total += 1;
+            if (rautenOk(draw, ang)) ok += 1;
+          }
+        }
+        lines.push("INFO rauten " + modeName + "-" + ang + " " + ok + "/" + total);
+        check("rauten " + modeName + " " + ang + " deg stay rotated rectangles", ok >= Math.ceil(total * 0.8));
+      }
+    }
+
+    buildLevel(LEVELS["ein-klotz"]);
+    const skew = squareStroke(16, 8, 1.7, 1.7, 45, "hand", 77);
+    // pull one corner inward so one angle is about 85 degrees
+    const skc = [
+      { x: 14.4, y: 8.0 }, { x: 16.0, y: 6.3 }, { x: 17.6, y: 8.0 }, { x: 16.0, y: 9.55 }, { x: 14.4, y: 8.0 },
+    ];
+    geoSnap = false;
+    commitStroke(skc);
+    const skewDraw = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const skewAng = skewDraw ? interiorAngles(skewDraw.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    check("80-to-100 degree corners become right angles without geodreieck", !!skewDraw && skewDraw.meta.outline.local.length === 4 && skewAng.every((a) => Math.abs(a - 90) < 2));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke(skc);
+    geoSnap = false;
+    const skewGeo = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const skewGeoAng = skewGeo ? interiorAngles(skewGeo.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    check("80-to-100 degree corners become right angles with geodreieck", !!skewGeo && skewGeo.meta.outline.local.length === 4 && skewGeoAng.every((a) => Math.abs(a - 90) < 2) && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    buildLevel(LEVELS["ein-klotz"]);
+    geoSnap = true;
+    commitStroke([
+      { x: 16, y: 6.2 }, { x: 18.4, y: 8.0 }, { x: 16, y: 9.8 }, { x: 13.6, y: 8.0 }, { x: 16, y: 6.2 },
+    ]);
+    geoSnap = false;
+    const rhomb = drawings.find((d) => d.kind === "solid" && !d.preset);
+    const rhombAng = rhomb ? interiorAngles(rhomb.meta.outline.local).map((a) => a * 180 / Math.PI) : [];
+    const rhombIsRect = rhombAng.length === 4 && rhombAng.every((a) => Math.abs(a - 90) < 8);
+    check("acute rhombus is not forced into a rectangle", !!rhomb && rhomb.kind === "solid" && rhomb.meta.outline.local.length === 4 && !rhombIsRect && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+    lines.push("INFO rhomb angles " + rhombAng.map((a) => a.toFixed(1)).join(","));
+
+    geoSnap = false;
+
 
     check("tune panel is absent during tests", !document.getElementById("tune-panel"));
     const tunePrevOn = tuneOn;
