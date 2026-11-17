@@ -726,6 +726,7 @@ function applyScene(data, opt) {
       segJoints,
       endJoints,
       spanJoint,
+      chordJoint: createRopeChord(world, pinA, pinB, restLength),
       pinA: pinA || null,
       pinB: pinB || null,
       fixedPins: !!rp.fixedPins,

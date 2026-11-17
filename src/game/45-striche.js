@@ -157,6 +157,7 @@ function commitStrokeApply(drawnPts, rawInk) {
 function destroyDrawing(draw) {
   if (!draw || !world) return;
   if (draw.kind === "rope") {
+    dropRopeChord(draw);
     for (const body of draw.bodies) {
       bodyMeta.delete(body);
       world.destroyBody(body);
@@ -164,6 +165,9 @@ function destroyDrawing(draw) {
   } else if (draw.body) {
     const doomed = draw.body;
     if (isAnchored(doomed)) releaseAnchor(doomed);
+    for (const d of drawings) {
+      if (d.kind === "rope" && ((d.pinA && d.pinA.body === doomed) || (d.pinB && d.pinB.body === doomed))) dropRopeChord(d);
+    }
     pins = pins.filter((pin) => {
       if (pin.body !== doomed) return true;
       return false;

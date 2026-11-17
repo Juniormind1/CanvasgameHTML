@@ -2372,6 +2372,7 @@ const ROPE_SPACING = 0.22;
 const ROPE_BEAD_R = 0.10;
 const ROPE_BEAD_DENSITY = 1.6;
 const ROPE_MAX_STRETCH = 1.01;
+const ROPE_CHORD_SLIP = 0.002;               // Anteil, ab dem die Sehne hart nachgefasst wird
 const ROPE_CUT_ANGLE = 15 * Math.PI / 180;   // Innenwinkel der Spitze
 const ROPE_CUT_ALIGN = 30 * Math.PI / 180;   // Abweichung von der Senkrechten
 const ROPE_CUT_SPEED = 2.5;                  // m/s, Mindestgeschwindigkeit
@@ -2436,6 +2437,37 @@ function linkRopeSegment(targetWorld, a, b, length) {
   return { dist: distJ, rope: ropeJ, length };
 }
 
+// Seil-Sehne direkt zwischen den beiden Nagelkörpern. Die Perlen sind sehr
+// leicht (rund 0,05 kg); hängt an ihnen ein Klotz von 20 kg, kann der Löser die
+// Kette allein nicht halten. Die Sehne trägt deshalb die Last im selben
+// Lösungsschritt wie die Kontakte, so kämpft das Seil nicht gegen den Boden.
+// collideConnected bleibt an, sonst fiele ein Klotz am Bodennagel durch den Boden.
+function createRopeChord(targetWorld, pinA, pinB, restLength) {
+  if (!pinA || !pinB || !pinA.body || !pinB.body || pinA.body === pinB.body) return null;
+  return targetWorld.createJoint(new planck.RopeJoint({
+    bodyA: pinA.body,
+    bodyB: pinB.body,
+    localAnchorA: V(pinA.local.x, pinA.local.y),
+    localAnchorB: V(pinB.local.x, pinB.local.y),
+    maxLength: restLength * ROPE_MAX_STRETCH,
+    collideConnected: true,
+  }));
+}
+
+function jointAlive(targetWorld, joint) {
+  if (!targetWorld || !joint) return false;
+  for (let j = targetWorld.getJointList(); j; j = j.getNext()) {
+    if (j === joint) return true;
+  }
+  return false;
+}
+
+function dropRopeChord(draw) {
+  if (!draw || !draw.chordJoint) return;
+  if (jointAlive(world, draw.chordJoint)) world.destroyJoint(draw.chordJoint);
+  draw.chordJoint = null;
+}
+
 function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
   const strokePts = (stroke && stroke.length >= 2) ? stroke.map((p) => ({ x: p.x, y: p.y })) : null;
   const start = pinA ? pinWorld(pinA) : (strokePts && strokePts[0]);
@@ -2492,6 +2524,7 @@ function buildRope(targetWorld, pinA, pinB, stroke, trackFn) {
     segJoints,
     endJoints,
     spanJoint,
+    chordJoint: createRopeChord(targetWorld, pinA, pinB, restLength),
     pinA: pinA || null,
     pinB: pinB || null,
   };
@@ -2509,6 +2542,13 @@ function movePinWithBead(pin, dx, dy) {
   pin.body.setPosition(V(p.x + dx, p.y + dy));
 }
 
+function snapBeadToPin(bead, pin) {
+  const p = pinWorld(pin);
+  bead.setTransform(V(p.x, p.y), bead.getAngle());
+  const v = pin.body.isDynamic() ? velocityAt(pin.body, p.x, p.y) : { x: 0, y: 0 };
+  bead.setLinearVelocity(V(v.x, v.y));
+}
+
 function tightenRopeDraw(draw, passes) {
   if (!draw || !draw.bodies || !draw.segJoints) return;
   const bodies = draw.bodies;
@@ -2523,9 +2563,12 @@ function tightenRopeDraw(draw, passes) {
       inv[i] = m > 1e-8 ? 1 / m : 0;
     }
   }
+  // Mit Sehne trägt der Löser die Last; die Perlen folgen dem Endkörper,
+  // statt ihn ohne Rücksicht auf Kontakte zu verschieben.
+  const chordLive = !!draw.chordJoint;
   function endMass(pin) {
     if (!pin) return -1;
-    if (draw.fixedPins) return 0;
+    if (draw.fixedPins || chordLive) return 0;
     return pinBodyMass(pin);
   }
   const massA = endMass(draw.pinA);
@@ -2589,18 +2632,54 @@ function tightenRopeDraw(draw, passes) {
       }
     }
   }
-  if (massA === 0 && draw.pinA && bodies[0]) {
-    const p = pinWorld(draw.pinA);
-    bodies[0].setTransform(V(p.x, p.y), bodies[0].getAngle());
-    bodies[0].setLinearVelocity(V(0, 0));
-  }
-  if (massB === 0 && draw.pinB && bodies[n - 1]) {
-    const p = pinWorld(draw.pinB);
-    bodies[n - 1].setTransform(V(p.x, p.y), bodies[n - 1].getAngle());
-    bodies[n - 1].setLinearVelocity(V(0, 0));
-  }
+  if (massA === 0 && draw.pinA && bodies[0]) snapBeadToPin(bodies[0], draw.pinA);
+  if (massB === 0 && draw.pinB && bodies[n - 1]) snapBeadToPin(bodies[n - 1], draw.pinB);
 }
 
+// Effektive Masse eines Nagelpunkts entlang n: 1/m + (r x n)^2 / I.
+// Nur dynamische Körper zählen; statische und kinematische halten fest.
+function pinPointInfo(pin, nx, ny) {
+  const body = pin && pin.body;
+  if (!body || !body.isDynamic()) return null;
+  const m = body.getMass();
+  if (!(m > 1e-8)) return null;
+  const c = body.getWorldCenter();
+  const lc = body.getLocalCenter();
+  const iCenter = body.getInertia() - m * (lc.x * lc.x + lc.y * lc.y);
+  const invI = (body.isFixedRotation && body.isFixedRotation()) || !(iCenter > 1e-9) ? 0 : 1 / iCenter;
+  const p = pinWorld(pin);
+  const rx = p.x - c.x;
+  const ry = p.y - c.y;
+  const rn = rx * ny - ry * nx;
+  return { body, invM: 1 / m, invI, rx, ry, k: 1 / m + invI * rn * rn, p };
+}
+
+// Verschiebt den Körper so, als wirke der Positionsimpuls (px, py) am
+// Nagelpunkt: Schwerpunkt wandert, der Körper dreht sich um ihn.
+function shiftPinBody(info, px, py) {
+  const body = info.body;
+  const dA = info.invI * (info.rx * py - info.ry * px);
+  const c = body.getWorldCenter();
+  const o = body.getPosition();
+  const cx = c.x + px * info.invM;
+  const cy = c.y + py * info.invM;
+  const ox = o.x - c.x;
+  const oy = o.y - c.y;
+  const cs = Math.cos(dA);
+  const sn = Math.sin(dA);
+  body.setTransform(V(cx + ox * cs - oy * sn, cy + ox * sn + oy * cs), body.getAngle() + dA);
+}
+
+function pinPointVelocity(info) {
+  return velocityAt(info.body, info.p.x, info.p.y);
+}
+
+// Harte Sehne zwischen den Nägeln. Früher wurde der Endkörper nur verschoben,
+// seine Geschwindigkeit nach außen blieb aber stehen: Ein schwerer Klotz am
+// gespannten Seil sammelte so jeden Schritt Fallgeschwindigkeit, wurde
+// zurückteleportiert und rammte sich in den Boden. Jetzt wirkt die Sehne wie
+// ein unelastisches Seil: Positionskorrektur am Nagelpunkt (mit Drehung) und
+// ein Impuls, der die Trenngeschwindigkeit entlang des Seils aufhebt.
 function limitRopeChord(draw) {
   if (!draw || !draw.pinA || !draw.pinB || draw.restLength == null) return;
   if (draw.fixedPins || draw.pinA.body === draw.pinB.body) return;
@@ -2608,33 +2687,39 @@ function limitRopeChord(draw) {
   const b = pinWorld(draw.pinB);
   const chord = dist(a, b);
   const maxL = draw.restLength * ROPE_MAX_STRETCH;
-  if (chord <= maxL + 1e-6) return;
-  const massA = pinBodyMass(draw.pinA);
-  const massB = pinBodyMass(draw.pinB);
-  const wA = massA > 0 ? 1 / massA : 0;
-  const wB = massB > 0 ? 1 / massB : 0;
-  const w = wA + wB;
-  if (w <= 0) return;
+  // Die Sehne im Löser hält das Seil normalerweise; hier wird nur noch
+  // nachgefasst, wenn sie bei harten Stößen merklich nachgibt.
+  const slack = draw.chordJoint ? ROPE_CHORD_SLIP * draw.restLength : 0;
+  if (chord <= maxL + slack + 1e-6) return;
   const nx = (b.x - a.x) / chord;
   const ny = (b.y - a.y) / chord;
-  const excess = chord - maxL;
-  if (wA) {
-    const mx = nx * excess * (wA / w);
-    const my = ny * excess * (wA / w);
-    movePinWithBead(draw.pinA, mx, my);
-    if (draw.bodies[0]) {
-      const p = draw.bodies[0].getPosition();
-      draw.bodies[0].setPosition(V(p.x + mx, p.y + my));
-    }
+  const infoA = pinPointInfo(draw.pinA, nx, ny);
+  const infoB = pinPointInfo(draw.pinB, nx, ny);
+  const kSum = (infoA ? infoA.k : 0) + (infoB ? infoB.k : 0);
+  if (!(kSum > 0)) return;
+  // Trenngeschwindigkeit der beiden Nagelpunkte entlang des Seils aufheben.
+  const vA = infoA ? pinPointVelocity(infoA) : { x: 0, y: 0 };
+  const vB = infoB ? pinPointVelocity(infoB) : { x: 0, y: 0 };
+  const vSep = (vB.x - vA.x) * nx + (vB.y - vA.y) * ny;
+  if (vSep > 0) {
+    const jv = vSep / kSum;
+    if (infoA) infoA.body.applyLinearImpulse(V(nx * jv, ny * jv), V(infoA.p.x, infoA.p.y), true);
+    if (infoB) infoB.body.applyLinearImpulse(V(-nx * jv, -ny * jv), V(infoB.p.x, infoB.p.y), true);
   }
-  if (wB) {
-    const mx = nx * excess * (wB / w);
-    const my = ny * excess * (wB / w);
-    movePinWithBead(draw.pinB, -mx, -my);
-    const last = draw.bodies[draw.bodies.length - 1];
-    if (last) {
-      const p = last.getPosition();
-      last.setPosition(V(p.x - mx, p.y - my));
+  // Lage korrigieren: Nagelpunkte zurück auf Seillänge, mit Drehung.
+  const lambda = (chord - maxL) / kSum;
+  const ends = [
+    [infoA, 1, draw.bodies[0], draw.pinA],
+    [infoB, -1, draw.bodies[draw.bodies.length - 1], draw.pinB],
+  ];
+  for (const [info, sign, bead, pin] of ends) {
+    if (!info) continue;
+    const before = pinWorld(pin);
+    shiftPinBody(info, nx * lambda * sign, ny * lambda * sign);
+    const after = pinWorld(pin);
+    if (bead) {
+      const p = bead.getPosition();
+      bead.setPosition(V(p.x + after.x - before.x, p.y + after.y - before.y));
     }
   }
 }
@@ -2769,6 +2854,32 @@ function ropeTangentAtBead(draw, index, contact) {
   return { x: (bx - ax) / d, y: (by - ay) / d };
 }
 
+// Perlen stoßen nicht mit dem beweglichen Körper zusammen, an dem ihr eigenes
+// Seil festgenagelt ist. Sonst klemmen die 0,05-kg-Perlen unter einem schweren
+// Klotz: Er liegt auf ihnen statt auf dem Boden, die Kette zieht sie jeden
+// Schritt zurück, und der Klotz sammelt Geschwindigkeit, ohne sich zu bewegen.
+function ropeOwnEndContact(contact) {
+  const ba = contact.getFixtureA().getBody();
+  const bb = contact.getFixtureB().getBody();
+  const ma = bodyMeta.get(ba);
+  const mb = bodyMeta.get(bb);
+  let beadMeta = null;
+  let other = null;
+  if (ma && ma.kind === "rope" && !(mb && mb.kind === "rope")) {
+    beadMeta = ma;
+    other = bb;
+  } else if (mb && mb.kind === "rope" && !(ma && ma.kind === "rope")) {
+    beadMeta = mb;
+    other = ba;
+  }
+  if (!beadMeta || !other || !other.isDynamic()) return false;
+  for (const d of drawings) {
+    if (d.kind !== "rope" || d.ropeId !== beadMeta.ropeId) continue;
+    return !!((d.pinA && d.pinA.body === other) || (d.pinB && d.pinB.body === other));
+  }
+  return false;
+}
+
 function noteRopeCutContact(contact) {
   const ba = contact.getFixtureA().getBody();
   const bb = contact.getFixtureB().getBody();
@@ -2870,6 +2981,7 @@ function cutRopeAtBead(ev) {
     world.destroyJoint(draw.spanJoint);
     draw.spanJoint = null;
   }
+  dropRopeChord(draw);
   const leftBodies = bodies.slice(0, cut + 1);
   const rightBodies = bodies.slice(cut + 1);
   const leftJoints = draw.segJoints.slice(0, cut);
@@ -2896,6 +3008,7 @@ function cutRopeAtBead(ev) {
     segJoints: rightJoints,
     endJoints: [null, ends[1]],
     spanJoint: null,
+    chordJoint: null,
     pinA: null,
     pinB: rightPin,
   });
@@ -3085,6 +3198,7 @@ function commitStrokeApply(drawnPts, rawInk) {
 function destroyDrawing(draw) {
   if (!draw || !world) return;
   if (draw.kind === "rope") {
+    dropRopeChord(draw);
     for (const body of draw.bodies) {
       bodyMeta.delete(body);
       world.destroyBody(body);
@@ -3092,6 +3206,9 @@ function destroyDrawing(draw) {
   } else if (draw.body) {
     const doomed = draw.body;
     if (isAnchored(doomed)) releaseAnchor(doomed);
+    for (const d of drawings) {
+      if (d.kind === "rope" && ((d.pinA && d.pinA.body === doomed) || (d.pinB && d.pinB.body === doomed))) dropRopeChord(d);
+    }
     pins = pins.filter((pin) => {
       if (pin.body !== doomed) return true;
       return false;
@@ -3867,6 +3984,10 @@ function attachPlayContacts(targetWorld) {
     contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
   });
   targetWorld.on("pre-solve", (contact) => {
+    if (ropeOwnEndContact(contact)) {
+      contact.setEnabled(false);
+      return;
+    }
     const ma = bodyMeta.get(contact.getFixtureA().getBody());
     const mb = bodyMeta.get(contact.getFixtureB().getBody());
     const roundA = ma && (ma.kind === "ball" || ma.round);
@@ -7020,6 +7141,7 @@ function applyScene(data, opt) {
       segJoints,
       endJoints,
       spanJoint,
+      chordJoint: createRopeChord(world, pinA, pinB, restLength),
       pinA: pinA || null,
       pinB: pinB || null,
       fixedPins: !!rp.fixedPins,

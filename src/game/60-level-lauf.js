@@ -129,6 +129,10 @@ function attachPlayContacts(targetWorld) {
     contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
   });
   targetWorld.on("pre-solve", (contact) => {
+    if (ropeOwnEndContact(contact)) {
+      contact.setEnabled(false);
+      return;
+    }
     const ma = bodyMeta.get(contact.getFixtureA().getBody());
     const mb = bodyMeta.get(contact.getFixtureB().getBody());
     const roundA = ma && (ma.kind === "ball" || ma.round);
