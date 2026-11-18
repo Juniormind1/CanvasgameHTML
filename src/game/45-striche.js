@@ -99,6 +99,8 @@ function commitStrokeApply(drawnPts, rawInk) {
   if (won || !world) return null;
   let ink = (rawInk && rawInk.length >= 2) ? rawInk : drawnPts;
   if (!ink || ink.length < 2) return null;
+  const motor = doodleMotor(ink);
+  if (motor) return motor;
   // Überschuss am Ende eines geschlossenen Zugs abschneiden (nicht bei Seilen vom Nagel).
   if (!nearestPin(ink[0].x, ink[0].y, NAIL_HIT)) {
     const loop = closeLoop(ink);
@@ -189,6 +191,71 @@ function destroyDrawing(draw) {
     world.destroyBody(doomed);
   }
   drawings = drawings.filter((d) => d !== draw);
+}
+
+// Einen selbst gesetzten Nagel herausziehen (Doppeltipp auf genau diesen Nagel).
+function pullPin(pin) {
+  if (!world || world.isLocked() || !pin || !pin.userMade) return false;
+  const i = pins.indexOf(pin);
+  if (i < 0) return false;
+  for (const j of pin.joints) {
+    if (j) world.destroyJoint(j);
+  }
+  pins.splice(i, 1);
+  return true;
+}
+
+// Klick-Nagel: Ein kurzer Klick ohne Bewegung in die Innenfläche eines
+// Gegenstands oder auf den Boden setzt dort einen Nagel (Ort wie beim
+// Kringel-Nagel, nie in die Spielkugel). Auf leerem Papier passiert nichts.
+function clickNailAt(x, y) {
+  if (!world || world.isLocked()) return null;
+  const host = hostAt(x, y);
+  if (!host) return null;
+  const meta = bodyMeta.get(host);
+  if (meta && meta.kind === "ball") return null;
+  stats.userPins += 1;
+  return rememberPin(x, y, host, true);
+}
+
+// Kringel um (oder auf) einen Nagel stellt den Motor: Drehsinn des Kringels
+// auf dem Bildschirm = Drehsinn des Motors. Gleicher Sinn wie der laufende
+// Motor ändert nichts, Gegensinn hält ihn an. Weltkoordinaten haben y nach
+// oben wie das Bild (die Bildschirm-y-Spiegelung betrifft nur Pixelwerte),
+// also gilt: Fläche > 0 = gegen den Uhrzeigersinn = linksrum (+1).
+const MOTOR_DOODLE_MAX = 0.9;   // m, größte Kringelausdehnung
+const MOTOR_DOODLE_FILL = 0.15; // |Fläche| / Rechteck mindestens (echte Schleife)
+
+function doodleMotor(ink) {
+  if (!ink || ink.length < 6 || !pins.length) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of ink) {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  const bw = maxX - minX;
+  const bh = maxY - minY;
+  const size = Math.max(bw, bh);
+  if (size > MOTOR_DOODLE_MAX || Math.min(bw, bh) < 0.05) return null;
+  if (dist(ink[0], ink[ink.length - 1]) > Math.max(0.12, size * 0.6)) return null;
+  let area = 0;
+  for (let i = 0; i < ink.length; i++) {
+    const a = ink[i];
+    const b = ink[(i + 1) % ink.length];
+    area += a.x * b.y - b.x * a.y;
+  }
+  area *= 0.5;
+  if (Math.abs(area) < MOTOR_DOODLE_FILL * bw * bh) return null;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const pin = nearestPin(cx, cy, Math.max(NAIL_HIT, size * 0.5 + 0.1));
+  if (!pin) return null;
+  const dir = area > 0 ? 1 : -1;
+  const cur = pin.motor || 0;
+  if (cur === -dir) pin.motor = 0;
+  else if (cur === 0) pin.motor = dir;
+  applyNailMotor(pin);
+  return { kind: "motor", pin, motor: pin.motor, dir };
 }
 
 function eraseAt(x, y) {

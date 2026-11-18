@@ -280,23 +280,7 @@ function onPointerUp(e) {
     return;
   }
   if (!current.moved) {
-    if (mode === "play" && current.nailClick) {
-      const now = performance.now();
-      // Doppeltipp zieht einen selbst gesetzten Nagel heraus; ein einzelner
-      // kurzer Klick schaltet nur den Motor.
-      if (now - lastTap < 320) {
-        eraseAt(w.x, w.y);
-        lastTap = 0;
-        return;
-      }
-      lastTap = now;
-      cycleNailMotor(current.nailClick);
-      return;
-    }
-    const now = performance.now();
-    if (mode === "play" && now - lastTap < 320) eraseAt(w.x, w.y);
-    lastTap = now;
-    if (mode === "play" && current.onBall) doNudge(current.nudgeDir);
+    if (mode === "play") playClick(current, w);
     return;
   }
   if (mode === "play") finishPlayStroke(current.trail, current.pts);
@@ -310,6 +294,53 @@ function onPointerUp(e) {
       points: shaped.map((p) => [p.x, p.y]),
     });
   }
+}
+
+// Kurzer Klick ohne Bewegung im Spiel.
+// - Auf einem Nagel: nichts (der Motor kommt per Kringel). Doppeltipp auf einen
+//   Nagel, der schon vor dem ersten Tipp da war, zieht ihn heraus.
+// - In der Innenfläche eines Gegenstands oder auf dem Boden: neuer Nagel. Ein
+//   schneller zweiter Klick auf diesen frischen Nagel ändert nichts.
+// - Sonst (leeres Papier, Seil): Doppeltipp radiert wie bisher.
+const CLICK_NAIL_MAX_MS = 600;   // längeres Drücken ohne Bewegung setzt keinen Nagel
+const DOUBLE_TAP_MS = 320;
+
+function playClick(current, w) {
+  const now = performance.now();
+  const quickPair = now - lastTap < DOUBLE_TAP_MS;
+  if (current.nailClick) {
+    const pin = current.nailClick;
+    if (quickPair && lastTapPin === pin) {
+      if (!lastTapMade) pullPin(pin);
+      lastTap = 0;
+      lastTapPin = null;
+      lastTapMade = false;
+      return;
+    }
+    lastTap = now;
+    lastTapPin = pin;
+    lastTapMade = false;
+    return;
+  }
+  if (current.onBall) {
+    lastTap = now;
+    lastTapPin = null;
+    lastTapMade = false;
+    doNudge(current.nudgeDir);
+    return;
+  }
+  const held = now - (current.downT || now);
+  const made = held <= CLICK_NAIL_MAX_MS ? clickNailAt(w.x, w.y) : null;
+  if (made) {
+    lastTap = now;
+    lastTapPin = made;
+    lastTapMade = true;
+    return;
+  }
+  if (quickPair && !lastTapPin) eraseAt(w.x, w.y);
+  lastTap = now;
+  lastTapPin = null;
+  lastTapMade = false;
 }
 
 function finishPlayStroke(trail, pts) {

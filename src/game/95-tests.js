@@ -2061,32 +2061,59 @@ function runTests() {
     const nailLone2 = cycleNailMotor(nailLone);
     check("a lone nail still cycles its motor state", nailLone0 === 1 && nailLone1 === -1 && nailLone2 === 0 && nailLone.motor === 0);
 
+    // Nagel-Motor per Kringel: Drehsinn des Kringels auf dem Bildschirm = Motor.
+    function doodleAround(cx, cy, r, clockwise, pointerId) {
+      const ev = { button: 0, pointerId };
+      const n = 20;
+      for (let k = 0; k <= n + 2; k++) {
+        const a = (clockwise ? -1 : 1) * (k / n) * Math.PI * 2;
+        const sp = worldToScreen(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+        const e2 = Object.assign({ clientX: sp.x, clientY: sp.y }, ev);
+        if (k === 0) onPointerDown(e2);
+        else onPointerMove(e2);
+        if (k === n + 2) onPointerUp(e2);
+      }
+      pointer = null;
+      endDrag();
+    }
     buildLevel(LEVELS["ein-klotz"]);
     lastTap = 0;
     const nailMot = rememberPin(16, 8, ground, true);
     const nailMotBox = ancBox(14, 7.2, 4, 0.8, "#8d5a34");
     for (let i = 0; i < 60; i++) step(1 / 60);
     const nailMotScr = worldToScreen(pinWorld(nailMot).x, pinWorld(nailMot).y);
+    const nailMotPins = pins.length;
     onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 61 });
     onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 61 });
-    check("clicking a nail cycles to left turn", nailMot.motor === 1 && !playDrag && nailMot.joints.some(Boolean));
+    check("clicking a nail changes nothing (no motor, no new nail)", nailMot.motor === 0 && !playDrag && pins.length === nailMotPins && pins.indexOf(nailMot) >= 0);
+    const nailMotShapes = stats.shapes;
+    doodleAround(16, 8, 0.25, false, 62);
+    check("a counter-clockwise doodle around a nail starts a left turn", nailMot.motor === 1 && nailMot.joints.some(Boolean) && pins.length === nailMotPins && stats.shapes === nailMotShapes);
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWccw = nailMotBox.body.getAngularVelocity();
     check("left motor reaches about +90 deg/s", Math.abs(nailWccw - Math.PI / 2) < 0.35 && !stats.dragTrick);
-    lastTap = 0;
-    onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
-    onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 62 });
-    check("second click switches to right turn", nailMot.motor === -1);
+    doodleAround(16, 8, 0.25, false, 63);
+    check("the same doodle direction again changes nothing", nailMot.motor === 1);
+    doodleAround(16, 8, 0.25, true, 64);
+    check("an opposite doodle stops the motor", nailMot.motor === 0 && nailMot.joints.every((j) => !j || !j.isMotorEnabled()));
+    // Ohne Motor pendelt der Klotz frei: die Drehzahl bleibt nicht bei ±90°/s stehen.
+    let nailWmin = Infinity;
+    let nailWmax = -Infinity;
+    for (let i = 0; i < 180; i++) {
+      step(1 / 60);
+      const w = nailMotBox.body.getAngularVelocity();
+      nailWmin = Math.min(nailWmin, w);
+      nailWmax = Math.max(nailWmax, w);
+    }
+    lines.push("INFO off nail w " + nailWmin.toFixed(2) + " .. " + nailWmax.toFixed(2));
+    check("an off nail joint is not driven", nailWmax - nailWmin > 0.5);
+    doodleAround(16, 8, 0.25, true, 65);
+    check("a clockwise doodle around a nail starts a right turn", nailMot.motor === -1 && pins.length === nailMotPins);
     for (let i = 0; i < 180; i++) step(1 / 60);
     const nailWcw = nailMotBox.body.getAngularVelocity();
     check("right motor reaches about -90 deg/s", Math.abs(nailWcw + Math.PI / 2) < 0.35);
-    lastTap = 0;
-    onPointerDown({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
-    onPointerUp({ button: 0, clientX: nailMotScr.x, clientY: nailMotScr.y, pointerId: 63 });
-    check("third click turns the motor off", nailMot.motor === 0 && nailMot.joints.every((j) => !j || !j.isMotorEnabled()));
-    for (let i = 0; i < 180; i++) step(1 / 60);
-    const nailWoff = nailMotBox.body.getAngularVelocity();
-    check("an off nail joint is not driven", Math.abs(nailWoff) < 1.0);
+    nailMot.motor = 0;
+    applyNailMotor(nailMot);
 
     function strokeFromTo(x0, y0, x1, y1, pointerId) {
       const a = worldToScreen(x0, y0);
@@ -2122,7 +2149,7 @@ function runTests() {
     onPointerDown({ button: 0, clientX: tapScr.x, clientY: tapScr.y, pointerId: 72 });
     onPointerUp({ button: 0, clientX: tapScr.x, clientY: tapScr.y, pointerId: 72 });
     pointer = null;
-    check("a click on a nail does not spawn a rope fragment", drawings.filter((d) => d.kind === "rope").length === ropesBeforeTap && drawings.length === drawingsBeforeTap && tapNail.motor === 1 && pins.indexOf(tapNail) >= 0);
+    check("a click on a nail does not spawn a rope fragment", drawings.filter((d) => d.kind === "rope").length === ropesBeforeTap && drawings.length === drawingsBeforeTap && tapNail.motor === 0 && pins.indexOf(tapNail) >= 0);
 
     lastTap = 0;
     buildLevel(LEVELS["ein-klotz"]);
@@ -2865,6 +2892,84 @@ function runTests() {
       const swLoad = loadSceneFromTextSync(swText);
       const swRopes2 = drawings.filter((d) => d.kind === "rope");
       check("reeled rope lengths survive scene export and import", !!(swLoad && swLoad.ok) && swRopes2.some((d) => Math.abs(d.restLength - swRopeA.restLength) < 1e-6 && Math.abs(d.drawnLength - swRopeA.drawnLength) < 1e-6));
+    }
+
+    {
+      // Klick-Nagel und Kringel-Motor (Sprachnachricht 2026-11-18).
+      buildLevel(LEVELS["ein-klotz"]);
+      world.setGravity(V(0, 0));
+      cam.cx = 16;
+      cam.cy = 8;
+      cam.zoom = 1;
+      const ckClick = (x, y, id) => {
+        const sp = worldToScreen(x, y);
+        onPointerDown({ button: 0, clientX: sp.x, clientY: sp.y, pointerId: id });
+        onPointerUp({ button: 0, clientX: sp.x, clientY: sp.y, pointerId: id });
+        pointer = null;
+        endDrag();
+      };
+      const ckBox = makeBox({ x: 12, y: 8, hw: 1.6, hh: 0.9, color: "#3c7fd6" });
+      lastTap = 0;
+      const ckPins0 = pins.length;
+      ckClick(12.2, 8.1, 101);
+      const ckNail = pins.find((pn) => pn.body === ckBox);
+      check("a single click inside a box sets a nail in it", !!ckNail && ckNail.userMade && pins.length === ckPins0 + 1 && Math.hypot(pinWorld(ckNail).x - 12.2, pinWorld(ckNail).y - 8.1) < 0.02 && ckNail.motor === 0 && !playDrag);
+      lastTap = 0;
+      ckClick(12.2, 8.1, 102);
+      check("a second click on the nail changes nothing", pins.length === ckPins0 + 1 && pins.indexOf(ckNail) >= 0 && ckNail.motor === 0);
+      lastTap = 0;
+      const ckEdgeP = ckBox.getPosition();
+      const ckEdgeSp = worldToScreen(ckEdgeP.x + 1.5, ckEdgeP.y);
+      onPointerDown({ button: 0, clientX: ckEdgeSp.x, clientY: ckEdgeSp.y, pointerId: 103 });
+      const ckEdgeGrab = !!playDrag && playDrag.body === ckBox;
+      onPointerUp({ button: 0, clientX: ckEdgeSp.x, clientY: ckEdgeSp.y, pointerId: 103 });
+      pointer = null;
+      check("a click at the edge grabs and sets no nail", ckEdgeGrab && pins.length === ckPins0 + 1);
+      lastTap = 0;
+      ckClick(20, 1.2, 104);
+      const ckGround = pins.find((pn) => pn.body === ground && Math.hypot(pinWorld(pn).x - 20, pinWorld(pn).y - 1.2) < 0.02);
+      check("a single click on the ground sets a ground nail", !!ckGround && pins.length === ckPins0 + 2);
+      lastTap = 0;
+      ckClick(22, 9, 105);
+      check("a click on empty paper sets nothing", pins.length === ckPins0 + 2);
+      // Schneller Doppelklick auf eine leere Stelle im Klotz: genau ein Nagel.
+      lastTap = 0;
+      ckClick(11.3, 7.9, 106);
+      ckClick(11.3, 7.9, 107);
+      const ckFresh = pins.filter((pn) => Math.hypot(pinWorld(pn).x - 11.3, pinWorld(pn).y - 7.9) < 0.05);
+      check("a quick double click creates exactly one nail and keeps it", ckFresh.length === 1 && pins.length === ckPins0 + 3);
+      // Doppeltipp auf einen schon vorhandenen Nagel zieht ihn heraus.
+      lastTap = 0;
+      ckClick(20, 1.2, 108);
+      ckClick(20, 1.2, 109);
+      check("a double tap on an existing nail pulls it out", pins.indexOf(ckGround) < 0 && pins.length === ckPins0 + 2);
+      // Kringel rechtsrum um einen Nagel mit Seil und Klotz: Winde spult auf.
+      world.setGravity(V(0, -24));
+      const ckWinch = rememberPin(17, 9, ground, true);
+      const ckLoad = makeBox({ x: 17, y: 6, hw: 0.4, hh: 0.4 });
+      const ckHook = rememberPin(17, 6.4, ckLoad, true);
+      const ckRope = spawnRope(ckWinch, ckHook, [{ x: 17, y: 9 }, { x: 17, y: 6.4 }]);
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      const ckL0 = ckRope.restLength;
+      const ckY0 = ckLoad.getPosition().y;
+      doodleAround(17, 9, 0.25, true, 110);
+      for (let i = 0; i < 90; i++) step(1 / 60);
+      lines.push("INFO doodle winch: motor " + ckWinch.motor + ", rope " + ckL0.toFixed(3) + " -> " + ckRope.restLength.toFixed(3) + " m, box +" + (ckLoad.getPosition().y - ckY0).toFixed(3) + " m");
+      check("a clockwise doodle around a rope nail turns right and reels in", ckWinch.motor === -1 && ckRope.restLength < ckL0 - 0.5 && ckLoad.getPosition().y > ckY0 + 0.5);
+      doodleAround(17, 9, 0.25, false, 111);
+      const ckL1 = ckRope.restLength;
+      for (let i = 0; i < 30; i++) step(1 / 60);
+      check("an opposite doodle stops the winch", ckWinch.motor === 0 && Math.abs(ckRope.restLength - ckL1) < 1e-9);
+      doodleAround(17, 9, 0.25, false, 112);
+      for (let i = 0; i < 30; i++) step(1 / 60);
+      check("a counter-clockwise doodle turns left and pays out", ckWinch.motor === 1 && ckRope.restLength > ckL1 + 0.1);
+      ckWinch.motor = 0;
+      applyNailMotor(ckWinch);
+      // Ein Kringel ohne Nagel in der Nähe bleibt ein Kringel-Nagel.
+      lastTap = 0;
+      const ckPinsK = pins.length;
+      doodleAround(25, 0.9, 0.16, true, 113);
+      check("a doodle away from nails still sets a nail", pins.length === ckPinsK + 1 && pins[pins.length - 1].motor === 0);
     }
 
     mountTunePanel();
