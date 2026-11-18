@@ -297,8 +297,10 @@ function onPointerUp(e) {
 }
 
 // Kurzer Klick ohne Bewegung im Spiel.
-// - Auf einem Nagel: nichts (der Motor kommt per Kringel). Doppeltipp auf einen
-//   Nagel, der schon vor dem ersten Tipp da war, zieht ihn heraus.
+// - Auf einem schlichten Nagel: nichts (zum Motor wird er per Kringel).
+// - Auf einem Motornagel: links -> rechts -> Stillstand (Umlenkrolle) -> links.
+// - Doppeltipp auf einen Nagel, der schon vor dem ersten Tipp da war, zieht ihn
+//   heraus (beim Motornagel nimmt der zweite Tipp den Wechsel des ersten zurück).
 // - In der Innenfläche eines Gegenstands oder auf dem Boden: neuer Nagel. Ein
 //   schneller zweiter Klick auf diesen frischen Nagel ändert nichts.
 // - Sonst (leeres Papier, Seil): Doppeltipp radiert wie bisher.
@@ -311,15 +313,24 @@ function playClick(current, w) {
   if (current.nailClick) {
     const pin = current.nailClick;
     if (quickPair && lastTapPin === pin) {
-      if (!lastTapMade) pullPin(pin);
+      if (!lastTapMade && !pullPin(pin) && lastTapMotor != null) {
+        pin.motor = lastTapMotor;
+        applyNailMotor(pin);
+      }
       lastTap = 0;
       lastTapPin = null;
       lastTapMade = false;
+      lastTapMotor = null;
       return;
     }
     lastTap = now;
     lastTapPin = pin;
     lastTapMade = false;
+    lastTapMotor = null;
+    if (pin.isMotor) {
+      lastTapMotor = pin.motor || 0;
+      cycleNailMotor(pin);
+    }
     return;
   }
   if (current.onBall) {

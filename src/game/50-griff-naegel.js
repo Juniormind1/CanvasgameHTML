@@ -17,8 +17,11 @@ function applyNailMotor(pin) {
   }
 }
 
+// Klick auf einen Motornagel: links (+1) -> rechts (-1) -> Stillstand (0) -> links.
+// Ein Motornagel bleibt Motornagel, auch im Stillstand (dann Umlenkrolle).
 function cycleNailMotor(pin) {
   if (!pin) return 0;
+  pin.isMotor = true;
   const cur = pin.motor || 0;
   pin.motor = cur === 0 ? 1 : cur === 1 ? -1 : 0;
   applyNailMotor(pin);

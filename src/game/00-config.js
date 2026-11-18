@@ -63,6 +63,7 @@ let pointer = null;
 let lastTap = 0;
 let lastTapPin = null;   // Nagel, auf den (oder durch den) der letzte Klick ging
 let lastTapMade = false; // true: der letzte Klick hat diesen Nagel gerade erst gesetzt
+let lastTapMotor = null; // Motorzustand vor dem letzten Klick auf einen Motornagel
 let paper = null;
 let confetti = [];
 let playDrag = null;

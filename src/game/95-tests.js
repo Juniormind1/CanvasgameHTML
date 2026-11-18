@@ -2114,6 +2114,33 @@ function runTests() {
     check("right motor reaches about -90 deg/s", Math.abs(nailWcw + Math.PI / 2) < 0.35);
     nailMot.motor = 0;
     applyNailMotor(nailMot);
+    // Motornagel (per Kringel entstanden) per Klick: links -> rechts -> Stillstand -> links.
+    function clickNail(pin, pointerId) {
+      const sp = worldToScreen(pinWorld(pin).x, pinWorld(pin).y);
+      onPointerDown({ button: 0, clientX: sp.x, clientY: sp.y, pointerId });
+      onPointerUp({ button: 0, clientX: sp.x, clientY: sp.y, pointerId });
+      pointer = null;
+    }
+    const nailCyc = [];
+    for (let k = 0; k < 4; k++) {
+      lastTap = 0;
+      clickNail(nailMot, 70 + k);
+      nailCyc.push(nailMot.motor);
+    }
+    lines.push("INFO motor nail clicks: " + nailCyc.join(" "));
+    check("clicking a motor nail cycles left, right, stop, left", nailMot.isMotor && nailCyc.join(",") === "1,-1,0,1" && pins.indexOf(nailMot) >= 0 && pins.length === nailMotPins && !playDrag);
+    check("the click cycle drives the nail joint", nailMot.joints.some((j) => j && j.isMotorEnabled() && j.getMotorSpeed() > 0));
+    lastTap = 0;
+    clickNail(nailMot, 75);
+    clickNail(nailMot, 76);
+    check("a quick double tap on a motor nail still pulls it", pins.indexOf(nailMot) < 0);
+    lastTap = 0;
+    const nailPlain = rememberPin(20, 1.42, ground, true);
+    for (let k = 0; k < 3; k++) {
+      lastTap = 0;
+      clickNail(nailPlain, 77 + k);
+    }
+    check("clicking a plain nail never makes it a motor", !nailPlain.isMotor && nailPlain.motor === 0 && pins.indexOf(nailPlain) >= 0);
 
     function strokeFromTo(x0, y0, x1, y1, pointerId) {
       const a = worldToScreen(x0, y0);

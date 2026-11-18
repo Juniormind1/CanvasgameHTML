@@ -364,6 +364,7 @@ function captureScene() {
       y: wp.y,
       userMade: !!pin.userMade,
       motor: pin.motor || 0,
+      isMotor: !!(pin.isMotor || pin.motor),
       held,
     });
   });
@@ -669,6 +670,7 @@ function applyScene(data, opt) {
       : V(pn.x, pn.y);
     const pin = rememberPin(wp.x, wp.y, host, !!pn.userMade);
     pin.motor = pn.motor || 0;
+    pin.isMotor = !!(pn.isMotor || pn.motor);
     pinById[pn.id] = pin;
   }
 

@@ -234,6 +234,7 @@ function boot() {
         const hook = rememberPin(x, 5.5, box, true);
         spawnRope(nail, hook, [{ x, y: 9 }, { x, y: 7.25 }, { x, y: 5.5 }]);
         nail.motor = motor;
+        nail.isMotor = true;
         applyNailMotor(nail);
       };
       rig(12, -1);

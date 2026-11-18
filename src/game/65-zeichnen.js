@@ -353,6 +353,23 @@ function drawPin(pin) {
     ctx.closePath();
     ctx.fillStyle = ctx.strokeStyle;
     ctx.fill();
+  } else if (pin.isMotor) {
+    // Motornagel im Stillstand = Umlenkrolle: Rad mit Speichen, das sich mit
+    // dem darüber laufenden Seil mitdreht (pin.rollAngle, 42-umlenkrolle.js).
+    ctx.strokeStyle = "#2f5d8a";
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.rotate(-(pin.rollAngle || 0));
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    for (let k = 0; k < 3; k++) {
+      const a = k * Math.PI / 3;
+      ctx.moveTo(Math.cos(a) * r * 0.85, Math.sin(a) * r * 0.85);
+      ctx.lineTo(-Math.cos(a) * r * 0.85, -Math.sin(a) * r * 0.85);
+    }
+    ctx.stroke();
   } else {
     ctx.rotate(simTime * 2);
     ctx.beginPath();

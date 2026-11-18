@@ -128,6 +128,7 @@ let pointer = null;
 let lastTap = 0;
 let lastTapPin = null;   // Nagel, auf den (oder durch den) der letzte Klick ging
 let lastTapMade = false; // true: der letzte Klick hat diesen Nagel gerade erst gesetzt
+let lastTapMotor = null; // Motorzustand vor dem letzten Klick auf einen Motornagel
 let paper = null;
 let confetti = [];
 let playDrag = null;
@@ -2249,6 +2250,7 @@ function rememberPin(x, y, body, userMade) {
     userMade: !!userMade,
     joints: [],
     motor: 0,
+    isMotor: false, // per Kringel zum Motornagel gemacht (Klick schaltet dann)
   };
   pins.push(pin);
   return pin;
@@ -3602,6 +3604,7 @@ function doodleMotor(ink) {
   const pin = nearestPin(cx, cy, Math.max(NAIL_HIT, size * 0.5 + 0.1));
   if (!pin) return null;
   const dir = area > 0 ? 1 : -1;
+  pin.isMotor = true;
   const cur = pin.motor || 0;
   if (cur === -dir) pin.motor = 0;
   else if (cur === 0) pin.motor = dir;
@@ -3673,8 +3676,11 @@ function applyNailMotor(pin) {
   }
 }
 
+// Klick auf einen Motornagel: links (+1) -> rechts (-1) -> Stillstand (0) -> links.
+// Ein Motornagel bleibt Motornagel, auch im Stillstand (dann Umlenkrolle).
 function cycleNailMotor(pin) {
   if (!pin) return 0;
+  pin.isMotor = true;
   const cur = pin.motor || 0;
   pin.motor = cur === 0 ? 1 : cur === 1 ? -1 : 0;
   applyNailMotor(pin);
@@ -5196,6 +5202,23 @@ function drawPin(pin) {
     ctx.closePath();
     ctx.fillStyle = ctx.strokeStyle;
     ctx.fill();
+  } else if (pin.isMotor) {
+    // Motornagel im Stillstand = Umlenkrolle: Rad mit Speichen, das sich mit
+    // dem darüber laufenden Seil mitdreht (pin.rollAngle, 42-umlenkrolle.js).
+    ctx.strokeStyle = "#2f5d8a";
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.rotate(-(pin.rollAngle || 0));
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    for (let k = 0; k < 3; k++) {
+      const a = k * Math.PI / 3;
+      ctx.moveTo(Math.cos(a) * r * 0.85, Math.sin(a) * r * 0.85);
+      ctx.lineTo(-Math.cos(a) * r * 0.85, -Math.sin(a) * r * 0.85);
+    }
+    ctx.stroke();
   } else {
     ctx.rotate(simTime * 2);
     ctx.beginPath();
@@ -7192,8 +7215,10 @@ function onPointerUp(e) {
 }
 
 // Kurzer Klick ohne Bewegung im Spiel.
-// - Auf einem Nagel: nichts (der Motor kommt per Kringel). Doppeltipp auf einen
-//   Nagel, der schon vor dem ersten Tipp da war, zieht ihn heraus.
+// - Auf einem schlichten Nagel: nichts (zum Motor wird er per Kringel).
+// - Auf einem Motornagel: links -> rechts -> Stillstand (Umlenkrolle) -> links.
+// - Doppeltipp auf einen Nagel, der schon vor dem ersten Tipp da war, zieht ihn
+//   heraus (beim Motornagel nimmt der zweite Tipp den Wechsel des ersten zurück).
 // - In der Innenfläche eines Gegenstands oder auf dem Boden: neuer Nagel. Ein
 //   schneller zweiter Klick auf diesen frischen Nagel ändert nichts.
 // - Sonst (leeres Papier, Seil): Doppeltipp radiert wie bisher.
@@ -7206,15 +7231,24 @@ function playClick(current, w) {
   if (current.nailClick) {
     const pin = current.nailClick;
     if (quickPair && lastTapPin === pin) {
-      if (!lastTapMade) pullPin(pin);
+      if (!lastTapMade && !pullPin(pin) && lastTapMotor != null) {
+        pin.motor = lastTapMotor;
+        applyNailMotor(pin);
+      }
       lastTap = 0;
       lastTapPin = null;
       lastTapMade = false;
+      lastTapMotor = null;
       return;
     }
     lastTap = now;
     lastTapPin = pin;
     lastTapMade = false;
+    lastTapMotor = null;
+    if (pin.isMotor) {
+      lastTapMotor = pin.motor || 0;
+      cycleNailMotor(pin);
+    }
     return;
   }
   if (current.onBall) {
@@ -7610,6 +7644,7 @@ function captureScene() {
       y: wp.y,
       userMade: !!pin.userMade,
       motor: pin.motor || 0,
+      isMotor: !!(pin.isMotor || pin.motor),
       held,
     });
   });
@@ -7915,6 +7950,7 @@ function applyScene(data, opt) {
       : V(pn.x, pn.y);
     const pin = rememberPin(wp.x, wp.y, host, !!pn.userMade);
     pin.motor = pn.motor || 0;
+    pin.isMotor = !!(pn.isMotor || pn.motor);
     pinById[pn.id] = pin;
   }
 
@@ -8397,6 +8433,7 @@ function boot() {
         const hook = rememberPin(x, 5.5, box, true);
         spawnRope(nail, hook, [{ x, y: 9 }, { x, y: 7.25 }, { x, y: 5.5 }]);
         nail.motor = motor;
+        nail.isMotor = true;
         applyNailMotor(nail);
       };
       rig(12, -1);
@@ -10542,6 +10579,33 @@ function runTests() {
     check("right motor reaches about -90 deg/s", Math.abs(nailWcw + Math.PI / 2) < 0.35);
     nailMot.motor = 0;
     applyNailMotor(nailMot);
+    // Motornagel (per Kringel entstanden) per Klick: links -> rechts -> Stillstand -> links.
+    function clickNail(pin, pointerId) {
+      const sp = worldToScreen(pinWorld(pin).x, pinWorld(pin).y);
+      onPointerDown({ button: 0, clientX: sp.x, clientY: sp.y, pointerId });
+      onPointerUp({ button: 0, clientX: sp.x, clientY: sp.y, pointerId });
+      pointer = null;
+    }
+    const nailCyc = [];
+    for (let k = 0; k < 4; k++) {
+      lastTap = 0;
+      clickNail(nailMot, 70 + k);
+      nailCyc.push(nailMot.motor);
+    }
+    lines.push("INFO motor nail clicks: " + nailCyc.join(" "));
+    check("clicking a motor nail cycles left, right, stop, left", nailMot.isMotor && nailCyc.join(",") === "1,-1,0,1" && pins.indexOf(nailMot) >= 0 && pins.length === nailMotPins && !playDrag);
+    check("the click cycle drives the nail joint", nailMot.joints.some((j) => j && j.isMotorEnabled() && j.getMotorSpeed() > 0));
+    lastTap = 0;
+    clickNail(nailMot, 75);
+    clickNail(nailMot, 76);
+    check("a quick double tap on a motor nail still pulls it", pins.indexOf(nailMot) < 0);
+    lastTap = 0;
+    const nailPlain = rememberPin(20, 1.42, ground, true);
+    for (let k = 0; k < 3; k++) {
+      lastTap = 0;
+      clickNail(nailPlain, 77 + k);
+    }
+    check("clicking a plain nail never makes it a motor", !nailPlain.isMotor && nailPlain.motor === 0 && pins.indexOf(nailPlain) >= 0);
 
     function strokeFromTo(x0, y0, x1, y1, pointerId) {
       const a = worldToScreen(x0, y0);

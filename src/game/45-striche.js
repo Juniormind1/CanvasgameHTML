@@ -251,6 +251,7 @@ function doodleMotor(ink) {
   const pin = nearestPin(cx, cy, Math.max(NAIL_HIT, size * 0.5 + 0.1));
   if (!pin) return null;
   const dir = area > 0 ? 1 : -1;
+  pin.isMotor = true;
   const cur = pin.motor || 0;
   if (cur === -dir) pin.motor = 0;
   else if (cur === 0) pin.motor = dir;

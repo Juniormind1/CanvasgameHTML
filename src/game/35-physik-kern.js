@@ -184,6 +184,7 @@ function rememberPin(x, y, body, userMade) {
     userMade: !!userMade,
     joints: [],
     motor: 0,
+    isMotor: false, // per Kringel zum Motornagel gemacht (Klick schaltet dann)
   };
   pins.push(pin);
   return pin;
