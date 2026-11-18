@@ -167,6 +167,10 @@ function pressKind(x, y) {
     const bp = ball.getPosition();
     if (Math.hypot(bp.x - x, bp.y - y) < BALL_R * 1.3) return "nudge";
   }
+  // Solange etwas auf einem Körper ruht, bleibt er liegen. Der Strich kann
+  // nach oben in die Auflage verbinden; Wegziehen beginnt hier nicht.
+  const under = drawingAt(x, y);
+  if (under && under.body && loadRestingOn(under.body)) return "draw";
   if (pressZone(x, y) === "edge") return "drag";
   return "draw";
 }
@@ -179,6 +183,8 @@ function tryAdoptCenterGrab(trail) {
   const from = trail[0];
   if (nearestPin(from.x, from.y, NAIL_HIT)) return false;
   if (pressZone(from.x, from.y) !== "interior") return false;
+  const adoptHost = drawingAt(from.x, from.y);
+  if (adoptHost && loadRestingOn(adoptHost.body)) return false;
   let maxD = 0;
   for (const p of trail) {
     const d = Math.hypot(p.x - from.x, p.y - from.y);

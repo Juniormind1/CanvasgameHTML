@@ -1101,14 +1101,43 @@ function edgeBulge(a, b, stroke) {
   return best;
 }
 
+// Längere Seite des umschließenden Kastens. Darunter schrumpfen die
+// Zentimeter-Schwellen mit; ab einem Meter bleiben sie die bisherigen Werte.
+const SHAPE_TOL_SPAN = 1;
+
+function strokeSpan(pts) {
+  if (!pts || !pts.length) return SHAPE_TOL_SPAN;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of pts) {
+    if (!p) continue;
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  }
+  if (!isFinite(minX)) return SHAPE_TOL_SPAN;
+  return Math.max(maxX - minX, maxY - minY, 1e-3);
+}
+
 function edgesAreStraight(corners, stroke) {
   if (!corners || corners.length < 3) return false;
+  const ref = (stroke && stroke.length) ? stroke : corners;
+  const span = strokeSpan(ref);
+  // Unter einem Meter darf die Kante kürzer sein, im selben Anteil.
+  const minLen = span >= SHAPE_TOL_SPAN ? 0.12 : Math.max(0.04, span * 0.12);
+  // 16 cm wären bei einem kleinen Kreis mehr als die Bauchung einer Sehne
+  // (etwa 0,15 des Durchmessers). Der Boden sinkt mit dem Zug, bleibt aber
+  // unter dieser Bauchung, und 16 cm bleiben die Obergrenze.
+  const bulgeFloor = Math.min(0.16, span * 0.10);
   for (let i = 0; i < corners.length; i++) {
     const a = corners[i];
     const b = corners[(i + 1) % corners.length];
     const len = dist(a, b);
-    if (len < 0.12) return false;
-    if (edgeBulge(a, b, stroke) > Math.max(0.16, len * 0.16)) return false;
+    if (len < minLen) return false;
+    if (edgeBulge(a, b, stroke) > Math.max(bulgeFloor, len * 0.16)) return false;
   }
   return true;
 }
@@ -1116,7 +1145,9 @@ function edgesAreStraight(corners, stroke) {
 function cornersFromStroke(pts) {
   const ring = ensureCCW(dedupe(closedRing(pts) || pts));
   if (ring.length < 3) return [];
-  const eps = Math.max(tuneCode("simplify", 0.045), 0.05);
+  const absEps = Math.max(tuneCode("simplify", 0.045), 0.05);
+  const span = strokeSpan(ring);
+  const eps = span >= SHAPE_TOL_SPAN ? absEps : Math.max(0.01, absEps * span / SHAPE_TOL_SPAN);
   let simple = simplifyClosed(ring, eps);
   if (simple.length > 4) simple = pruneByTurn(simple, tuneCode("pruneTurn", 25));
   if (simple.length > 4 && simple.length <= 8) {
@@ -1127,7 +1158,8 @@ function cornersFromStroke(pts) {
   if ((simple.length < 3 || simple.length > 4) && (peaks.length === 3 || peaks.length === 4)) {
     simple = ensureCCW(peaks);
   } else if (simple.length > 4 && peaks.length >= 3 && peaks.length <= 4) {
-    const mixed = mergeCornerSets(simple, peaks, Math.max(0.18, ringLen(ring) * 0.04));
+    const mergeFloor = span >= SHAPE_TOL_SPAN ? 0.18 : Math.max(0.04, span * 0.10);
+    const mixed = mergeCornerSets(simple, peaks, Math.max(mergeFloor, ringLen(ring) * 0.04));
     const pruned = mixed.length > 4 ? pruneByTurn(mixed, tuneCode("pruneSoft", 42)) : mixed;
     if (pruned.length === 3 || pruned.length === 4) simple = ensureCCW(pruned);
   }
@@ -1372,6 +1404,9 @@ const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an k
 const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
 const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
 const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
+// Vereinfachen, Kanten-Bauchung und Eckenabstand sind unter SHAPE_TOL_SPAN
+// ein Anteil der Zuggröße, darüber die festen Zentimeter. Sonst wird ein
+// kleiner Kreis zum Viereck, weil seine Sehne weniger als 16 cm baucht.
 const CIRCLE_RIGHT_TOL = 10 * Math.PI / 180;  // Geodreieck: Toleranz für 90°
 const RIGHT_CORNER = 15 * Math.PI / 180;      // Ecke 75-105° wird exakt 90°, drehunabhängig
 const CIRCLE_MIN_R = 0.16;
@@ -2245,6 +2280,7 @@ function hostAt(x, y) {
 
 function rememberPin(x, y, body, userMade) {
   const local = body.getLocalPoint(V(x, y));
+  const hostSolid = body === ground && typeof solidAt === "function" ? solidAt(x, y) : null;
   const pin = {
     x, y,
     local: { x: local.x, y: local.y },
@@ -2253,6 +2289,8 @@ function rememberPin(x, y, body, userMade) {
     joints: [],
     motor: 0,
     isMotor: false, // per Kringel zum Motornagel gemacht (Klick schaltet dann)
+    solidId: hostSolid ? hostSolid.solidId : 0,
+    solidFloor: !!(hostSolid && hostSolid.solidFloor),
   };
   pins.push(pin);
   return pin;
@@ -2335,6 +2373,7 @@ function spawnSolid(pts, opt) {
   const draw = { kind: "solid", body, meta, color: MAT.wood };
   drawings.push(draw);
   attachExistingPins(body, meta);
+  markBornBehindRopes(draw);
   noteShape(clean);
   return draw;
 }
@@ -2417,15 +2456,20 @@ function spawnWire(pts, opt) {
   const draw = { kind: "wire", body, meta, color: MAT.wire };
   drawings.push(draw);
   attachExistingPins(body, meta);
+  markBornBehindRopes(draw);
   noteShape(clean);
   return draw;
 }
 
 function spawnBlob(x, y, r) {
+  // Bullet wie die großen Kreise. Die Seilperlen sind selbst Bullets;
+  // ohne Bullet versinkt eine kleine Kugel in ihnen, und die Trennung
+  // schiebt sie durch das Seil.
   const body = world.createDynamicBody({
     position: V(x, y),
     linearDamping: 0.04,
     angularDamping: 0.04,
+    bullet: true,
   });
   body.createFixture(new planck.Circle(r), fixtureOpt({ density: 3.2, friction: 0.16, restitution: 0 }));
   const meta = track(body, {
@@ -2436,6 +2480,7 @@ function spawnBlob(x, y, r) {
   });
   const draw = { kind: "blob", body, meta, color: MAT.steel, x, y, r };
   drawings.push(draw);
+  markBornBehindRopes(draw);
   noteShape([{ x, y: y - r }, { x, y }]);
   return draw;
 }
@@ -2487,6 +2532,7 @@ function spawnEllipse(x, y, a, b, angle) {
   const draw = { kind: "ellipse", body, meta, color: MAT.steel, x, y, a, b, angle };
   drawings.push(draw);
   attachExistingPins(body, meta);
+  markBornBehindRopes(draw);
   noteShape([{ x: x - a, y }, { x, y: y - b }, { x: x + a, y }]);
   return draw;
 }
@@ -2508,6 +2554,7 @@ function spawnRoller(x, y, r) {
   const draw = { kind: "roller", body, meta, color: MAT.steel, x, y, r };
   drawings.push(draw);
   attachExistingPins(body, meta);
+  markBornBehindRopes(draw);
   noteShape([{ x: x - r, y }, { x, y: y - r }, { x: x + r, y }]);
   return draw;
 }
@@ -3001,30 +3048,65 @@ function ropeTangentAtBead(draw, index, contact) {
   return { x: (bx - ax) / d, y: (by - ay) / d };
 }
 
-// Perlen stoßen nicht mit dem beweglichen Körper zusammen, an dem ihr eigenes
-// Seil festgenagelt ist. Sonst klemmen die 0,05-kg-Perlen unter einem schweren
-// Klotz: Er liegt auf ihnen statt auf dem Boden, die Kette zieht sie jeden
-// Schritt zurück, und der Klotz sammelt Geschwindigkeit, ohne sich zu bewegen.
+// Perlen liegen vor den Gegenständen, in denen die eigenen Endnägel stecken,
+// und stoßen nicht mit ihnen zusammen. Sonst hängt das Seil nicht von Nagel
+// zu Nagel durch, sondern bleibt an A und B hängen. Der Boden als Liegefläche
+// (breite, flache Platte) bleibt ein Hindernis. Levelpfosten sind eigene
+// Flächen desselben Bodenkörpers und zählen als Nagelwirt.
+function ropePinHosts(draw, body) {
+  if (!draw || !body) return false;
+  if (draw.pinA && draw.pinA.body === body) return true;
+  if (draw.pinB && draw.pinB.body === body) return true;
+  return false;
+}
+
 function ropeOwnEndContact(contact) {
-  const ba = contact.getFixtureA().getBody();
-  const bb = contact.getFixtureB().getBody();
+  const fa = contact.getFixtureA();
+  const fb = contact.getFixtureB();
+  const ba = fa.getBody();
+  const bb = fb.getBody();
   const ma = bodyMeta.get(ba);
   const mb = bodyMeta.get(bb);
   let beadMeta = null;
   let other = null;
+  let otherFix = null;
   if (ma && ma.kind === "rope" && !(mb && mb.kind === "rope")) {
     beadMeta = ma;
     other = bb;
+    otherFix = fb;
   } else if (mb && mb.kind === "rope" && !(ma && ma.kind === "rope")) {
     beadMeta = mb;
     other = ba;
+    otherFix = fa;
   }
-  if (!beadMeta || !other || !other.isDynamic()) return false;
+  if (!beadMeta || !other) return false;
   for (const d of drawings) {
     if (d.kind !== "rope" || d.ropeId !== beadMeta.ropeId) continue;
-    return !!((d.pinA && d.pinA.body === other) || (d.pinB && d.pinB.body === other));
+    if (other !== ground) return ropePinHosts(d, other);
+    const sid = otherFix && otherFix._solidId;
+    if (!sid) return false;
+    const skipA = d.pinA && d.pinA.body === ground && d.pinA.solidId === sid && !d.pinA.solidFloor;
+    const skipB = d.pinB && d.pinB.body === ground && d.pinB.solidId === sid && !d.pinB.solidFloor;
+    return !!(skipA || skipB);
   }
   return false;
+}
+
+// Körper, der über diesem Seil gezeichnet wurde, fällt dahinter durch.
+function ropeBirthBehindContact(contact) {
+  const ma = bodyMeta.get(contact.getFixtureA().getBody());
+  const mb = bodyMeta.get(contact.getFixtureB().getBody());
+  let ropeId = null;
+  let other = null;
+  if (ma && ma.kind === "rope" && !(mb && mb.kind === "rope")) {
+    ropeId = ma.ropeId;
+    other = mb;
+  } else if (mb && mb.kind === "rope" && !(ma && ma.kind === "rope")) {
+    ropeId = mb.ropeId;
+    other = ma;
+  }
+  if (ropeId == null || !other || !other.behindRopeIds) return false;
+  return other.behindRopeIds.indexOf(ropeId) >= 0;
 }
 
 function noteRopeCutContact(contact) {
@@ -3144,6 +3226,7 @@ function cutRopeAtBead(ev) {
   const rightPin = draw.pinB;
   draw.pinB = null;
   const rightId = ropeSeq++;
+  carryRopeBehind(draw.ropeId, rightId);
   for (const body of rightBodies) {
     const meta = bodyMeta.get(body);
     if (meta) meta.ropeId = rightId;
@@ -4272,16 +4355,64 @@ function dragGoalVelocity(dt) {
   return { x: vx, y: vy };
 }
 
+// Masse, Schwerpunkt und Trägheit der starren Gruppe um den Greifpunkt.
+// Nur der Körper in der Hand wäre an einer leichten Spitze viel zu leicht:
+// das schwere Gegenstück kreiselt dann um den Griff.
+function dragPivotAbout(body) {
+  const grab = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+  const group = weldComponent(body);
+  let mass = 0;
+  let cx = 0;
+  let cy = 0;
+  const parts = [];
+  for (const b of group) {
+    if (!b || !b.isDynamic()) continue;
+    const m = b.getMass();
+    if (!(m > 0)) continue;
+    const p = b.getPosition();
+    parts.push({ b, m, x: p.x, y: p.y });
+    mass += m;
+    cx += m * p.x;
+    cy += m * p.y;
+  }
+  if (!(mass > 0)) {
+    mass = Math.max(1e-6, body.getMass());
+    const com = body.getPosition();
+    const ox = com.x - grab.x;
+    const oy = com.y - grab.y;
+    return {
+      mass,
+      offx: ox,
+      offy: oy,
+      inertia: Math.max(1e-6, body.getInertia()) + mass * (ox * ox + oy * oy),
+    };
+  }
+  cx /= mass;
+  cy /= mass;
+  let inertia = 0;
+  for (const part of parts) {
+    const rx = part.x - grab.x;
+    const ry = part.y - grab.y;
+    inertia += part.b.getInertia() + part.m * (rx * rx + ry * ry);
+  }
+  return {
+    mass,
+    offx: cx - grab.x,
+    offy: cy - grab.y,
+    inertia: Math.max(1e-6, inertia),
+  };
+}
+
 function applyDragPivotImpulse(body, offx, offy, dt) {
   const goalV = dragGoalVelocity(dt);
   const lastV = playDrag.lastGoalV || { x: 0, y: 0 };
   const dvx = goalV.x - lastV.x;
   const dvy = goalV.y - lastV.y;
-  const mass = Math.max(1e-6, body.getMass());
-  const inertia = Math.max(1e-6, body.getInertia());
-  const pivotI = inertia + mass * (offx * offx + offy * offy);
-  const w = body.getAngularVelocity() + mass * (offy * dvx - offx * dvy) / pivotI;
+  const pivot = dragPivotAbout(body);
+  const w = body.getAngularVelocity() + pivot.mass * (pivot.offy * dvx - pivot.offx * dvy) / pivot.inertia;
   body.setAngularVelocity(w);
+  // Geschwindigkeit des gegriffenen Körpers weiter um seinen eigenen Schwerpunkt,
+  // damit der Greifpunkt selbst stehen bleibt.
   body.setLinearVelocity(V(-w * offy, w * offx));
   playDrag.lastGoalV = { x: goalV.x, y: goalV.y };
 }
@@ -4489,8 +4620,13 @@ function stepDragFresh(dt) {
 // einem Nagel, dessen Wirt in Ebene n liegt, ist er Ebene n+1 und wird davor
 // gezeichnet. Direkt über einen Nagel verbundene Körper stoßen nie zusammen
 // (Nagel-Joints haben collideConnected: false, der pre-solve-Filter
-// `layerContactOff` sichert das zusätzlich ab). Seile zählen nicht als
-// Nagelverbindung: Sehne und Perlen kollidieren weiter wie bisher.
+// `layerContactOff` sichert das zusätzlich ab). Ein Seil an einem Nagel oder
+// Motor liegt eine Ebene davor und stößt nicht mit dem Nagelwirt zusammen
+// (`ropeOwnEndContact`). Die beiden Wirte stoßen weiter gegeneinander.
+// Überdeckt die fertige Form beim Zeichnen ein vorhandenes Seil, entsteht der
+// Körper hinter genau diesem Seil (`behindRopeIds`): er wird dahinter
+// gezeichnet und stößt nicht mit ihm zusammen. Neben dem Seil gezeichnet,
+// bleibt er auf derselben Stoßebene und wird vom Seil gefangen.
 // Ein Körper an der Maus stößt mit nichts zusammen. Überlappt er etwas, mit dem
 // er nach dem Loslassen zusammenstoßen würde, ist er ein Geist: halb
 // durchsichtig, und an der letzten freien Pose steht ein blasser Schatten.
@@ -4562,23 +4698,172 @@ function bodyLayers() {
   return layer;
 }
 
+// Seil: eine Ebene vor dem Gegenstand, in dem der Nagel oder Motor steckt.
+function ropeHostLayer(draw, layers) {
+  let host = 0;
+  let hung = false;
+  for (const pin of [draw.pinA, draw.pinB]) {
+    if (!pin) continue;
+    hung = true;
+    if (pin.body && pin.body !== ground) host = Math.max(host, layers.get(pin.body) || 0);
+  }
+  return hung ? host + 1 : 0;
+}
+
 function drawLayer(draw, layers) {
   if (!draw) return 0;
-  if (draw.kind === "rope" && draw.bodies && draw.bodies.length) {
-    let l = 0;
-    for (const b of draw.bodies) l = Math.max(l, layers.get(b) || 0);
-    return l;
-  }
+  if (draw.kind === "rope") return ropeHostLayer(draw, layers);
   return draw.body ? layers.get(draw.body) || 0 : 0;
 }
 
+function behindRopeIdsOf(draw) {
+  const ids = draw && draw.meta && draw.meta.behindRopeIds;
+  return ids && ids.length ? ids : null;
+}
+
+function drawingBehindRope(draw, rope) {
+  if (!draw || !rope || rope.kind !== "rope" || draw.kind === "rope") return false;
+  const ids = behindRopeIdsOf(draw);
+  return !!(ids && ids.indexOf(rope.ropeId) >= 0);
+}
+
+// Negativ, wenn a vor b gezeichnet werden muss, weil a hinter diesem Seil entstand.
+function ropeBehindOrder(a, b) {
+  if (drawingBehindRope(a, b)) return -1;
+  if (drawingBehindRope(b, a)) return 1;
+  return 0;
+}
+
 // Zeichenreihenfolge: nach Ebene, innerhalb einer Ebene wie bisher.
+// Ein hinter einem Seil geborener Körper kommt vor genau diesem Seil.
 function drawingsByLayer() {
   const layers = bodyLayers();
   return drawings
     .map((d, i) => ({ d, i, l: drawLayer(d, layers) }))
-    .sort((p, q) => p.l - q.l || p.i - q.i)
+    .sort((p, q) => ropeBehindOrder(p.d, q.d) || p.l - q.l || p.i - q.i)
     .map((p) => p.d);
+}
+
+function ropeSamplePoints(rope) {
+  const pts = [];
+  for (const body of (rope && rope.bodies) || []) {
+    if (!body || (typeof body.isValid === "function" && !body.isValid())) continue;
+    const p = body.getPosition();
+    pts.push({ x: p.x, y: p.y });
+  }
+  return pts;
+}
+
+function segCrosses(a, b, c, d) {
+  const side = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const d1 = side(c, d, a);
+  const d2 = side(c, d, b);
+  const d3 = side(a, b, c);
+  const d4 = side(a, b, d);
+  return ((d1 > 1e-8 && d2 < -1e-8) || (d1 < -1e-8 && d2 > 1e-8))
+    && ((d3 > 1e-8 && d4 < -1e-8) || (d3 < -1e-8 && d4 > 1e-8));
+}
+
+function segGap(a, b, c, d) {
+  if (segCrosses(a, b, c, d)) return 0;
+  return Math.min(
+    distPointSeg(a.x, a.y, c.x, c.y, d.x, d.y),
+    distPointSeg(b.x, b.y, c.x, c.y, d.x, d.y),
+    distPointSeg(c.x, c.y, a.x, a.y, b.x, b.y),
+    distPointSeg(d.x, d.y, a.x, a.y, b.x, b.y),
+  );
+}
+
+function ropeCrossesPoly(samples, poly) {
+  if (!poly || poly.length < 3) return false;
+  for (const p of samples) {
+    if (pointInPoly(p.x, p.y, poly)) return true;
+  }
+  for (let i = 0; i < samples.length - 1; i++) {
+    const a = samples[i];
+    const b = samples[i + 1];
+    for (let k = 0; k < poly.length; k++) {
+      if (segCrosses(a, b, poly[k], poly[(k + 1) % poly.length])) return true;
+    }
+  }
+  return false;
+}
+
+function ropeEntersCircle(samples, cx, cy, r) {
+  for (const p of samples) {
+    if (Math.hypot(p.x - cx, p.y - cy) < r) return true;
+  }
+  for (let i = 0; i < samples.length - 1; i++) {
+    const a = samples[i];
+    const b = samples[i + 1];
+    if (distPointSeg(cx, cy, a.x, a.y, b.x, b.y) < r) return true;
+  }
+  return false;
+}
+
+function ropeMeetsStroke(samples, stroke, reach) {
+  if (!stroke || stroke.length < 2) return false;
+  for (let i = 0; i < samples.length - 1; i++) {
+    for (let k = 0; k < stroke.length - 1; k++) {
+      if (segGap(samples[i], samples[i + 1], stroke[k], stroke[k + 1]) < reach) return true;
+    }
+  }
+  return false;
+}
+
+function bornOutlineWorld(body, local) {
+  const pts = [];
+  for (const p of local) {
+    const w = body.getWorldPoint(V(p.x, p.y));
+    pts.push({ x: w.x, y: w.y });
+  }
+  return pts;
+}
+
+// true, wenn die Seilmittellinie die fertige Form schneidet oder in ihr liegt.
+function bornOverRope(draw, rope) {
+  const samples = ropeSamplePoints(rope);
+  if (samples.length < 2 || !draw || !draw.body || !draw.meta) return false;
+  const meta = draw.meta;
+  const pos = draw.body.getPosition();
+  const ang = draw.body.getAngle();
+  const ca = Math.cos(ang);
+  const sa = Math.sin(ang);
+  if (meta.circles && meta.circles.length) {
+    for (const c of meta.circles) {
+      const cx = pos.x + c.x * ca - c.y * sa;
+      const cy = pos.y + c.x * sa + c.y * ca;
+      if (ropeEntersCircle(samples, cx, cy, c.r)) return true;
+    }
+    return false;
+  }
+  if (!meta.outline || !meta.outline.local || meta.outline.local.length < 2) return false;
+  const world = bornOutlineWorld(draw.body, meta.outline.local);
+  if (meta.outline.closed) return ropeCrossesPoly(samples, world);
+  return ropeMeetsStroke(samples, world, (meta.thick || THICK) * 0.5);
+}
+
+// Geburtsregel: überdeckt die fertige Form ein vorhandenes Seil, bleibt der
+// Körper hinter genau diesem Seil. Die Liste klebt am Paar.
+function markBornBehindRopes(draw) {
+  if (!draw || !draw.body || !draw.meta || draw.kind === "rope") return;
+  const ids = [];
+  for (const rope of drawings) {
+    if (!rope || rope.kind !== "rope" || rope.ropeId == null) continue;
+    if (bornOverRope(draw, rope) && ids.indexOf(rope.ropeId) < 0) ids.push(rope.ropeId);
+  }
+  if (!ids.length) return;
+  draw.meta.behindRopeIds = ids;
+}
+
+// Eine Seilhälfte nach dem Schnitt bleibt dasselbe Seil für die Geburtsregel.
+function carryRopeBehind(oldId, newId) {
+  if (oldId == null || newId == null || oldId === newId) return;
+  for (const d of drawings) {
+    const ids = d.meta && d.meta.behindRopeIds;
+    if (!ids || ids.indexOf(oldId) < 0 || ids.indexOf(newId) >= 0) continue;
+    ids.push(newId);
+  }
 }
 
 function poseOfBody(body) {
@@ -4775,12 +5060,16 @@ function restoreDragFree(drag) {
   body.setAwake(true);
   return true;
 }
-// Verbinden: ein kurzer, fast gerader Zug von einem festen Körper (oder vom
-// Boden) in einen anderen festen Körper, der ihn berührt. Zwei freie Körper
-// werden starr zu einem Gegenstand (WeldJoint). Boden oder ein schon fester
-// Körper macht die ganze Gruppe statisch. Umgekehrt: Körper greifen und auf
-// der Basis loslassen. Trifft die Geste einen Körper, der nicht verbunden
-// werden kann, entsteht kein Strich; er wird gegriffen und folgt der Maus.
+// Verbinden: ein kurzer, fast gerader Zug von unten nach oben.
+// Vom Boden in einen aufliegenden festen Körper macht ihn statisch. Liegt ein
+// Körper auf einem anderen, verbindet derselbe Zug die beiden starr
+// (WeldJoint); die Gruppe bleibt beweglich. Seitliche Berührung verbindet
+// nicht, der Strich bleibt eine Zeichnung. Ein Zug von oben nach unten
+// verbindet nicht: der obere Körper wird verschoben, denn auf ihm ruht nichts.
+// Ein Körper, auf dem noch etwas ruht, lässt sich nicht ziehen. Loslassen auf
+// dem Boden verankert weiter. Trifft ein Zug vom Boden einen Körper ohne
+// Kontakt, entsteht kein Strich; der Körper wird gegriffen.
+// Der Verbindungsstrich sitzt fest an den beiden Gegenständen und wandert mit.
 // Rechtsklick auf den Verbindungsstrich löst. Rechtsklick auf einen
 // verbundenen Körper löscht ihn nicht.
 const ANCHOR_MAX_LEN = 1.5;     // m, Weglänge des Zugs
@@ -4788,6 +5077,7 @@ const ANCHOR_MIN_LEN = 0.15;    // m, Sehne; kürzer ist ein Klick
 const ANCHOR_STRAIGHT = 0.8;    // Sehne / Weglänge
 const ANCHOR_MAX_BOW = 0.2;     // m, größte Abweichung von der Sehne
 const ANCHOR_TOUCH = 0.05;      // m, Abstand, der noch als Berührung gilt
+const ANCHOR_REST_UP = 0.65;    // Auflage: Normale von unten nach oben, steiler als eine Seitenlage
 const ANCHOR_BASE_TOL = 0.15;   // m, Start so nah am Boden zählt als „auf dem Boden“
 const ANCHOR_TARGET_TOL = 0.06; // m, Ende so nah am Umriss zählt als „im Körper“
 const ANCHOR_LINK_HIT = 0.22;   // m, Rechtsklick-Abstand zum Verbindungsstrich
@@ -4927,8 +5217,12 @@ function solidAnchorDraw(body) {
   return d;
 }
 
-function bodyGap(a, b) {
+// Nächster Abstand und Richtung von a nach b (ny > 0: b liegt über a).
+function bodyApproach(a, b) {
   let best = Infinity;
+  let nx = 0;
+  let ny = 0;
+  if (!a || !b || a === b) return { distance: best, nx, ny };
   const xa = a.getTransform();
   const xb = b.getTransform();
   for (let fa = a.getFixtureList(); fa; fa = fa.getNext()) {
@@ -4945,10 +5239,53 @@ function bodyGap(a, b) {
       input.useRadii = true;
       const output = new planck.DistanceOutput();
       planck.Distance(output, new planck.SimplexCache(), input);
-      best = Math.min(best, output.distance);
+      if (output.distance >= best) continue;
+      best = output.distance;
+      const pa = output.pointA;
+      const pb = output.pointB;
+      let dx = pb.x - pa.x;
+      let dy = pb.y - pa.y;
+      let len = Math.hypot(dx, dy);
+      if (len < 1e-5) {
+        const ca = a.getPosition();
+        const cb = b.getPosition();
+        dx = cb.x - ca.x;
+        dy = cb.y - ca.y;
+        len = Math.hypot(dx, dy);
+      }
+      if (len > 1e-6) { nx = dx / len; ny = dy / len; }
     }
   }
-  return best;
+  return { distance: best, nx, ny };
+}
+
+function bodyGap(a, b) {
+  return bodyApproach(a, b).distance;
+}
+
+// upper liegt auf lower: sie berühren sich, und die Berührung kommt von oben.
+// Teile derselben starren Verbindung zählen nicht als Auflage.
+function restsOn(upper, lower) {
+  if (!upper || !lower || upper === lower || lower === ground) return false;
+  if (weldComponent(upper).indexOf(lower) >= 0) return false;
+  const app = bodyApproach(lower, upper);
+  return app.distance <= ANCHOR_TOUCH && app.ny >= ANCHOR_REST_UP;
+}
+
+function loadRestingOn(body) {
+  if (!body || body === ground) return false;
+  const group = weldComponent(body);
+  for (let i = 0; i < group.length; i++) {
+    const base = group[i];
+    for (const d of drawings) {
+      if (!d.body || group.indexOf(d.body) >= 0) continue;
+      if (d.kind === "rope" || d.kind === "wire") continue;
+      if (!d.body.isDynamic()) continue;
+      if (restsOn(d.body, base)) return true;
+    }
+    if (typeof ball !== "undefined" && ball && group.indexOf(ball) < 0 && ball.isDynamic() && restsOn(ball, base)) return true;
+  }
+  return false;
 }
 
 function anchorAllowed(draw, base, groupTouch) {
@@ -4963,6 +5300,8 @@ function anchorAllowed(draw, base, groupTouch) {
     return false;
   }
   if (!freeze && weldComponent(body).indexOf(base) >= 0) return false;
+  // Zwei freie oder ein fester Körper: nur verbinden, wenn der Zielkörper darauf ruht.
+  if (base !== ground && !restsOn(body, base)) return false;
   if (groupTouch) {
     const group = weldComponent(body);
     if (!group.some((b) => bodyGap(b, base) <= ANCHOR_TOUCH)) return false;
@@ -5041,6 +5380,35 @@ function thawWeldGroup(body) {
   }
 }
 
+// Enden am Gegenstand, nicht im Raum. Der Boden hat keine Lage und bleibt in Weltkoordinaten.
+function anchorLinkLocals(base, body, from, to) {
+  let localA = null;
+  let localB = null;
+  if (base && base !== ground && base.getLocalPoint) {
+    const p = base.getLocalPoint(V(from.x, from.y));
+    localA = { x: p.x, y: p.y };
+  }
+  if (body && body !== ground && body.getLocalPoint) {
+    const p = body.getLocalPoint(V(to.x, to.y));
+    localB = { x: p.x, y: p.y };
+  }
+  return { localA, localB };
+}
+
+function anchorLinkEnds(link) {
+  let a = link.a;
+  let b = link.b;
+  if (link.localA && link.base && link.base !== ground && link.base.getWorldPoint) {
+    const p = link.base.getWorldPoint(V(link.localA.x, link.localA.y));
+    a = { x: p.x, y: p.y };
+  }
+  if (link.localB && link.body && link.body !== ground && link.body.getWorldPoint) {
+    const p = link.body.getWorldPoint(V(link.localB.x, link.localB.y));
+    b = { x: p.x, y: p.y };
+  }
+  return { a, b };
+}
+
 function anchorBody(draw, base, from, to, groupTouch) {
   if (!anchorAllowed(draw, base, groupTouch)) return false;
   const body = draw.body;
@@ -5051,10 +5419,13 @@ function anchorBody(draw, base, from, to, groupTouch) {
   if (freeze) freezeWeldGroup(body);
   else joint = makeAnchorWeld(base, body);
   if (!freeze) dragFresh.delete(body);
+  const locals = anchorLinkLocals(base, body, from, to);
   anchors.push({
     body, base, draw,
     a: { x: from.x, y: from.y },
     b: { x: to.x, y: to.y },
+    localA: locals.localA,
+    localB: locals.localB,
     color: savedColor,
     savedColor,
     weld: !freeze,
@@ -5114,7 +5485,8 @@ function anchorLinkAt(x, y) {
   let best = null;
   let bestD = ANCHOR_LINK_HIT;
   for (const link of anchors) {
-    const d = distPointSeg(x, y, link.a.x, link.a.y, link.b.x, link.b.y);
+    const ends = anchorLinkEnds(link);
+    const d = distPointSeg(x, y, ends.a.x, ends.a.y, ends.b.x, ends.b.y);
     if (d <= bestD) { bestD = d; best = link; }
   }
   return best;
@@ -5157,6 +5529,12 @@ function tryAnchorGesture(trail) {
     releaseAnchor(target.body);
     return "anchor";
   }
+  // Seitliche Berührung ist kein Verbindungsstrich (der Strich bleibt eine Zeichnung).
+  // Kein Kontakt bleibt ein Fehlversuch, damit der Zielkörper gegriffen wird.
+  if (base !== ground && !restsOn(target.body, base)) {
+    if (bodyGap(target.body, base) > ANCHOR_TOUCH) return "miss";
+    return false;
+  }
   if (anchorBody(target, base, from, to)) return "anchor";
   return "miss";
 }
@@ -5193,14 +5571,15 @@ function tryAnchorDragEnd(body, grabPt, trail) {
   const draw = drawings.find((d) => d.body === body);
   if (!draw || insideDraw(draw, to.x, to.y, 0)) return false;
   const base = anchorBaseAt(to.x, to.y, body);
-  if (!base) return false;
+  if (!base || (base !== ground && base.isDynamic())) return false;
   return anchorBody(draw, base, to, grabPt);
 }
 
 function drawAnchorLinks() {
   for (const link of anchors) {
-    crayonPath([link.a, link.b], link.color, 0.1);
-    for (const p of [link.a, link.b]) {
+    const ends = anchorLinkEnds(link);
+    crayonPath([ends.a, ends.b], link.color, 0.1);
+    for (const p of [ends.a, ends.b]) {
       const s = worldToScreen(p.x, p.y);
       ctx.save();
       ctx.fillStyle = link.color;
@@ -5225,9 +5604,49 @@ function doNudge(dir) {
   ball.applyLinearImpulse(V(dir * 8.2, 0.55), ball.getWorldCenter(), true);
 }
 
+let solidSeq = 1;
+
+function solidSpan(pts) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  // Breite Bodenplatte, auf der ein Seil liegen bleiben darf. Pfosten nicht.
+  return { floor: minY <= 0.05 && h <= 1.6 && w >= 8 };
+}
+
+// Planck hängt jede neue Fixture vorn an (m_fixtureList = fixture). `older`
+// ist der bisherige Kopf, die Schleife trifft also nur die gerade erzeugten.
+function stampSolidFixtures(body, older, solid) {
+  for (let f = body.getFixtureList(); f && f !== older; f = f.getNext()) {
+    f._solidId = solid.id;
+    f._solidFloor = solid.floor;
+  }
+}
+
+function solidAt(x, y) {
+  for (let i = geometry.length - 1; i >= 0; i--) {
+    const g = geometry[i];
+    if (!g.closed || !g.solidId) continue;
+    if (distToPoly(x, y, g.pts) <= 0.02) return g;
+  }
+  return null;
+}
+
 function addStaticSolid(pts, color) {
   const clean = ensureCCW(dedupe(pts));
   if (clean.length < 3) return;
+  const span = solidSpan(clean);
+  const solid = { id: solidSeq++, floor: span.floor };
+  const older = ground.getFixtureList();
   const opt = fixtureOpt({ density: 0, friction: 0.5, restitution: 0 });
   if (!addConvexFixture(ground, clean, opt)) {
     const localTris = triangulate(clean.map((p) => ({ x: p.x, y: p.y })));
@@ -5239,7 +5658,8 @@ function addStaticSolid(pts, color) {
     })();
     for (const tri of tris) addTriFixture(ground, tri, opt);
   }
-  geometry.push({ closed: true, pts: clean });
+  stampSolidFixtures(ground, older, solid);
+  geometry.push({ closed: true, pts: clean, solidId: solid.id, solidFloor: solid.floor });
   scenery.push({ kind: "poly", pts: clean, color, width: 0.16 });
 }
 
@@ -5345,7 +5765,7 @@ function attachPlayContacts(targetWorld) {
     contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
   });
   targetWorld.on("pre-solve", (contact) => {
-    if (layerContactOff(contact) || ropeOwnEndContact(contact)) {
+    if (layerContactOff(contact) || ropeOwnEndContact(contact) || ropeBirthBehindContact(contact)) {
       contact.setEnabled(false);
       return;
     }
@@ -7392,7 +7812,7 @@ function renderHelp() {
     "Zwei Nägel in derselben Fläche machen sie starr.",
     "Vom Nagel weg ziehen: Seil, so lang wie der Strich, fest am Nagel. Endet der Zug auf einem anderen Nagel, hängt es dort; sonst bleibt das Ende frei. Eine Spitze unter 15°, die senkrecht trifft, zerschneidet es.",
     "Am Rand eines Gegenstands fasst du ihn und ziehst ihn. Lässt du ihn über einem Nagel los, heftet er sich dort drehbar fest; mehrere Nägel halten ihn gleichzeitig. In der Fläche wird gezeichnet; ein Klick oder ein kleiner Kreis setzt einen Nagel. Ein längerer Zug aus der Mitte greift nachträglich.",
-    "Ein kurzer gerader Strich von einem Gegenstand in einen anderen, der ihn berührt, macht beide zu einem Stück. Vom Boden aus wird das Stück fest. Rechtsklick auf den Strich löst.",
+    "Ein kurzer Strich von unten nach oben, vom tragenden Gegenstand in den, der auf ihm liegt, macht beide zu einem Stück. Den unteren ziehst du erst, wenn nichts mehr auf ihm ruht. Vom Boden aus wird das Stück fest. Rechtsklick auf den Strich löst.",
     "Nägel werden nicht verschoben. Einen selbst gesetzten Nagel zieht man mit Rechtsklick oder einem schnellen Doppeltipp auf ihn heraus.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
@@ -7750,6 +8170,10 @@ function pressKind(x, y) {
     const bp = ball.getPosition();
     if (Math.hypot(bp.x - x, bp.y - y) < BALL_R * 1.3) return "nudge";
   }
+  // Solange etwas auf einem Körper ruht, bleibt er liegen. Der Strich kann
+  // nach oben in die Auflage verbinden; Wegziehen beginnt hier nicht.
+  const under = drawingAt(x, y);
+  if (under && under.body && loadRestingOn(under.body)) return "draw";
   if (pressZone(x, y) === "edge") return "drag";
   return "draw";
 }
@@ -7762,6 +8186,8 @@ function tryAdoptCenterGrab(trail) {
   const from = trail[0];
   if (nearestPin(from.x, from.y, NAIL_HIT)) return false;
   if (pressZone(from.x, from.y) !== "interior") return false;
+  const adoptHost = drawingAt(from.x, from.y);
+  if (adoptHost && loadRestingOn(adoptHost.body)) return false;
   let maxD = 0;
   for (const p of trail) {
     const d = Math.hypot(p.x - from.x, p.y - from.y);
@@ -8169,6 +8595,7 @@ function exportBodyState(body, id, role) {
   if (meta.quadKind) rec.quadKind = meta.quadKind;
   if (meta.tag) rec.tag = meta.tag;
   if (meta.ropeId) rec.ropeId = meta.ropeId;
+  if (meta.behindRopeIds && meta.behindRopeIds.length) rec.behindRopeIds = meta.behindRopeIds.slice();
   return rec;
 }
 
@@ -8367,17 +8794,20 @@ function captureScene() {
     joints.push(rec);
   }
 
-  const anchorList = anchors.map((link) => ({
-    body: idOf.get(link.body),
-    base: idOf.has(link.base) ? idOf.get(link.base) : 0,
-    a: scenePt(link.a),
-    b: scenePt(link.b),
-    color: link.color || null,
-    savedColor: link.savedColor || null,
-    weld: !!link.weld,
-    freeze: !!link.freeze,
-    frozen: !!(link.weld && !link.joint),
-  })).filter((a) => a.body != null);
+  const anchorList = anchors.map((link) => {
+    const ends = anchorLinkEnds(link);
+    return {
+      body: idOf.get(link.body),
+      base: idOf.has(link.base) ? idOf.get(link.base) : 0,
+      a: scenePt(ends.a),
+      b: scenePt(ends.b),
+      color: link.color || null,
+      savedColor: link.savedColor || null,
+      weld: !!link.weld,
+      freeze: !!link.freeze,
+      frozen: !!(link.weld && !link.joint),
+    };
+  }).filter((a) => a.body != null);
 
   return {
     v: 1,
@@ -8513,6 +8943,7 @@ function restoreMeta(body, rec) {
   if (rec.quadKind) meta.quadKind = rec.quadKind;
   if (rec.tag) meta.tag = rec.tag;
   if (rec.ropeId) meta.ropeId = rec.ropeId;
+  if (rec.behindRopeIds && rec.behindRopeIds.length) meta.behindRopeIds = rec.behindRopeIds.slice();
   return track(body, meta);
 }
 
@@ -8606,6 +9037,11 @@ function applyScene(data, opt) {
       draw.r = rec.r || (rec.circles && rec.circles[0] && rec.circles[0].r);
     }
     drawings.push(draw);
+    // Kringel-Kugeln aus älteren Zetteln stehen ohne Bullet. Dieselbe
+    // Physik wie beim Zeichnen, sonst versinken sie im Seil.
+    if (body.isDynamic() && (drawKind === "blob" || drawKind === "roller" || drawKind === "ellipse")) {
+      body.setBullet(true);
+    }
     if (wantStatic && !body.isStatic()) {
       // Verankerung setzt gleich setStatic; hier nur merken, nicht vorab frieren,
       // außer der Körper ist ohne Anker als statisch gespeichert.
@@ -8729,12 +9165,17 @@ function applyScene(data, opt) {
       joint = makeAnchorWeld(base, body);
     }
     dragFresh.delete(body);
+    const a = scenePt(link.a);
+    const b = scenePt(link.b);
+    const locals = anchorLinkLocals(base, body, a, b);
     anchors.push({
       body,
       base,
       draw,
-      a: scenePt(link.a),
-      b: scenePt(link.b),
+      a,
+      b,
+      localA: locals.localA,
+      localB: locals.localB,
       color: link.color || draw.color,
       savedColor: link.savedColor || draw.color,
       weld,
@@ -9945,6 +10386,140 @@ function runTests() {
     check("dragged plank hangs again after a sweep", dragCorner.hangAfterY < -0.7);
     check("a 14 m/s corner drag does not spin away", dragCornerFast.maxW < dragCornerFast.refW * 1.5 + 2 && dragCornerFast.maxErr < 0.25);
 
+    // Starre Gruppe: der Impuls am Griff nutzt die Trägheit der ganzen Gruppe.
+    {
+      function gvWeld(baseBody, child) {
+        const wp = child.body.getPosition();
+        const from = baseBody.getPosition();
+        const locals = anchorLinkLocals(baseBody, child.body, { x: from.x, y: from.y }, { x: wp.x, y: wp.y });
+        anchors.push({
+          body: child.body,
+          base: baseBody,
+          draw: child,
+          a: { x: from.x, y: from.y },
+          b: { x: wp.x, y: wp.y },
+          localA: locals.localA,
+          localB: locals.localB,
+          color: child.color,
+          savedColor: child.color,
+          weld: true,
+          freeze: false,
+          joint: makeAnchorWeld(baseBody, child.body),
+        });
+      }
+      function gvFarLocal(draw, other) {
+        const locals = draw.meta.outline.local;
+        const op = other.getPosition();
+        let best = null;
+        let bestD = -1;
+        for (const p of locals) {
+          const w = draw.body.getWorldPoint(V(p.x, p.y));
+          const d = Math.hypot(w.x - op.x, w.y - op.y);
+          if (d > bestD) {
+            bestD = d;
+            best = p;
+          }
+        }
+        return best;
+      }
+      function gvRefs(body, lx, ly, speed) {
+        const g = body.getWorldPoint(V(lx, ly));
+        const group = weldComponent(body);
+        let mass = 0;
+        let cx = 0;
+        let cy = 0;
+        let aloneM = body.getMass();
+        let aloneI = body.getInertia();
+        const ap = body.getPosition();
+        const aox = ap.x - g.x;
+        const aoy = ap.y - g.y;
+        aloneI += aloneM * (aox * aox + aoy * aoy);
+        for (const b of group) {
+          const m = b.getMass();
+          const p = b.getPosition();
+          mass += m;
+          cx += m * p.x;
+          cy += m * p.y;
+        }
+        cx /= mass;
+        cy /= mass;
+        let inertia = 0;
+        for (const b of group) {
+          const m = b.getMass();
+          const p = b.getPosition();
+          const rx = p.x - g.x;
+          const ry = p.y - g.y;
+          inertia += b.getInertia() + m * (rx * rx + ry * ry);
+        }
+        const offx = cx - g.x;
+        const offy = cy - g.y;
+        return {
+          group: Math.abs(mass * offx * speed / inertia),
+          alone: Math.abs(aloneM * aox * speed / aloneI),
+        };
+      }
+      function gvSweep(body, lx, ly, speed) {
+        const g0 = body.getWorldPoint(V(lx, ly));
+        const refs = gvRefs(body, lx, ly, speed);
+        beginDrag(g0.x, g0.y);
+        for (let i = 0; i < 20; i++) {
+          moveDrag(g0.x, g0.y);
+          step(1 / 60);
+        }
+        let maxW = 0;
+        let maxErr = 0;
+        const n = 36;
+        for (let i = 1; i <= n; i++) {
+          const gy = g0.y + speed * (1 / 60) * i;
+          moveDrag(g0.x, gy);
+          step(1 / 60);
+          const w = Math.abs(body.getAngularVelocity());
+          if (w > maxW) maxW = w;
+          const g = body.getWorldPoint(V(lx, ly));
+          const err = Math.hypot(g.x - g0.x, g.y - gy);
+          if (err > maxErr) maxErr = err;
+        }
+        endDrag();
+        return { maxW, maxErr, group: refs.group, alone: refs.alone };
+      }
+
+      function gvScene() {
+        buildLevel(LEVELS["ein-klotz"]);
+        ball.setTransform(V(2, 1.66), 0);
+        ball.setLinearVelocity(V(0, 0));
+        world.setGravity(V(0, 0));
+        const rect = makeBox({ x: 8, y: 6, hw: 0.6, hh: 2.5, density: 4 });
+        const tri = spawnSolid([
+          { x: 14, y: 5.2 },
+          { x: 14, y: 6.8 },
+          { x: 17.2, y: 6 },
+        ], { density: 1.2 });
+        gvWeld(rect, tri);
+        return { rect, tri };
+      }
+      const gvTipScene = gvScene();
+      const gvTip = gvFarLocal(gvTipScene.tri, gvTipScene.rect);
+      const gvTipSweep = gvSweep(gvTipScene.tri.body, gvTip.x, gvTip.y, 8);
+      lines.push("INFO weld-tip w " + gvTipSweep.maxW.toFixed(2)
+        + " group " + gvTipSweep.group.toFixed(2) + " alone " + gvTipSweep.alone.toFixed(2)
+        + " err " + gvTipSweep.maxErr.toFixed(3));
+      check("grabbing a welded tip uses the whole group's inertia",
+        gvTipSweep.alone > gvTipSweep.group * 1.8
+        && gvTipSweep.maxW < gvTipSweep.group * 1.55 + 0.45
+        && gvTipSweep.maxW < gvTipSweep.alone * 0.72
+        && gvTipSweep.maxErr < 0.3);
+      const gvEdgeScene = gvScene();
+      const gvEdgeSweep = gvSweep(gvEdgeScene.rect, 0.35, 2.2, 8);
+      lines.push("INFO weld-rect w " + gvEdgeSweep.maxW.toFixed(2)
+        + " group " + gvEdgeSweep.group.toFixed(2) + " alone " + gvEdgeSweep.alone.toFixed(2)
+        + " err " + gvEdgeSweep.maxErr.toFixed(3));
+      check("grabbing the heavy welded body does not outspin the group pendulum",
+        gvEdgeSweep.alone > gvEdgeSweep.group * 1.15
+        && gvEdgeSweep.maxW < gvEdgeSweep.group * 1.25 + 0.15
+        && gvEdgeSweep.maxW < gvEdgeSweep.alone * 0.9
+        && gvEdgeSweep.maxErr < 0.3);
+    }
+
     buildLevel(LEVELS["ein-klotz"]);
     const pusher = makeBox({ x: 3.1, y: 2.3, hw: 0.4, hh: 0.4, color: "#d94b3a" });
     for (let i = 0; i < 40; i++) step(1 / 60);
@@ -10102,7 +10677,7 @@ function runTests() {
     check("trebuchet does not explode", trebOk);
 
     {
-      // Verankern: kurzer gerader Zug Boden -> Körper, Ketten nur vom Boden aus.
+      // Verankern: kurzer gerader Zug von unten nach oben, Boden oder Auflage.
       buildLevel(LEVELS["ein-klotz"]);
       const ancRect = (x0, y0, w, h, color) => commitStroke([
         { x: x0, y: y0 }, { x: x0 + w, y: y0 }, { x: x0 + w, y: y0 + h }, { x: x0, y: y0 + h }, { x: x0, y: y0 },
@@ -10273,6 +10848,9 @@ function runTests() {
       joinB.body.setAngularVelocity(0);
       const joinX0 = joinA.body.getPosition().x;
       const joinBx0 = joinB.body.getPosition().x;
+      const joinLink = anchorOf(joinB.body);
+      const joinEnds0 = anchorLinkEnds(joinLink);
+      const joinMid0 = { x: (joinEnds0.a.x + joinEnds0.b.x) / 2, y: (joinEnds0.a.y + joinEnds0.b.y) / 2 };
       const joinGrab = beginDrag(joinX0, joinA.body.getPosition().y);
       moveDrag(joinX0 + 1.6, joinA.body.getPosition().y + 0.3);
       for (let i = 0; i < 24; i++) step(i % 2 ? 1 / 50 : 1 / 60);
@@ -10282,27 +10860,41 @@ function runTests() {
       const joinDragErr = Math.hypot(joinLoc3.x - joinLoc.x, joinLoc3.y - joinLoc.y);
       endDrag();
       check("dragging one welded body drags the other", !!joinGrab && !!freeNailGroup(joinA.body) && joinMoved > 0.8 && joinBMoved > 0.6 && joinDragErr < 0.05);
+      const joinEnds1 = anchorLinkEnds(joinLink);
+      const joinMid1 = { x: (joinEnds1.a.x + joinEnds1.b.x) / 2, y: (joinEnds1.a.y + joinEnds1.b.y) / 2 };
+      const joinExpectA = joinA.body.getWorldPoint(V(joinLink.localA.x, joinLink.localA.y));
+      const joinExpectB = joinB.body.getWorldPoint(V(joinLink.localB.x, joinLink.localB.y));
+      const joinFollow = Math.hypot(joinEnds1.a.x - joinExpectA.x, joinEnds1.a.y - joinExpectA.y) + Math.hypot(joinEnds1.b.x - joinExpectB.x, joinEnds1.b.y - joinExpectB.y);
+      const joinLeft = Math.hypot(joinEnds1.a.x - joinEnds0.a.x, joinEnds1.a.y - joinEnds0.a.y);
+      check("the join stroke moves with the welded bodies", !!joinLink.localA && !!joinLink.localB && joinFollow < 0.001 && joinLeft > 0.6 && !anchorLinkAt(joinMid0.x, joinMid0.y) && anchorLinkAt(joinMid1.x, joinMid1.y) === joinLink);
 
       const joinN = drawings.length;
-      const joinRoot = joinA.body.getPosition();
-      const joinRootScr = worldToScreen(joinRoot.x, joinRoot.y);
-      onPointerDown({ button: 2, clientX: joinRootScr.x, clientY: joinRootScr.y, pointerId: 61 });
+      const joinFar = joinA.body.getWorldPoint(V(0.55, -0.32));
+      const joinFarScr = worldToScreen(joinFar.x, joinFar.y);
+      onPointerDown({ button: 2, clientX: joinFarScr.x, clientY: joinFarScr.y, pointerId: 61 });
       check("right click on a welded body does not delete it", drawings.length === joinN && drawings.includes(joinA) && inAnchorLink(joinA.body) && inAnchorLink(joinB.body));
+      const joinHitScr = worldToScreen(joinMid1.x, joinMid1.y);
+      onPointerDown({ button: 2, clientX: joinHitScr.x, clientY: joinHitScr.y, pointerId: 62 });
+      check("right click on the moved join stroke releases it", !inAnchorLink(joinA.body) && !inAnchorLink(joinB.body) && drawings.includes(joinA) && drawings.includes(joinB));
 
       const joinC = ancRect(16, 6, 1.2, 0.8, "#3c7fd6");
       const joinD = ancRect(17.55, 6, 1.0, 0.7, "#d94b3a");
       const joinMiss = tryAnchorGesture([{ x: 16.4, y: 6.35 }, { x: 16.9, y: 6.4 }, { x: 17.7, y: 6.32 }]);
       check("short stroke between separated bodies does not join them", joinMiss === "miss" && !anchorOf(joinD.body) && joinC.body.isDynamic() && joinD.body.isDynamic());
 
-      const joinE = ancRect(4, 1.45, 1.2, 0.8, "#3c7fd6");
-      const joinF = ancRect(5.18, 1.45, 1.0, 0.8, "#d94b3a");
+      const joinE = ancRect(22, 1.45, 1.3, 0.8, "#3c7fd6");
+      const joinF = ancRect(22.15, 2.28, 1.0, 0.7, "#d94b3a");
       joinE.color = "#2244aa";
       if (joinE.meta && joinE.meta.outline) joinE.meta.outline.color = "#2244aa";
-      const joinSide = tryAnchorGesture([{ x: 4.4, y: 1.8 }, { x: 5.0, y: 1.85 }, { x: 5.6, y: 1.9 }]);
+      const joinUp = tryAnchorGesture([
+        { x: 22.5, y: 1.8 },
+        { x: 22.55, y: 2.2 },
+        { x: 22.6, y: 2.55 },
+      ]);
       for (let i = 0; i < 50; i++) step(1 / 60);
       const joinFp = joinF.body.getPosition();
       const joinGround = tryAnchorGesture([{ x: joinFp.x, y: 1.2 }, { x: joinFp.x, y: joinFp.y }]);
-      check("anchoring one piece of a joined object freezes the whole object", joinSide === "anchor" && joinGround === "anchor" && joinE.body.isStatic() && joinF.body.isStatic() && anchorOf(joinE.body) && anchorOf(joinE.body).freeze && anchorOf(joinE.body).base === ground && anchorOf(joinF.body).weld && !anchorOf(joinF.body).joint && joinE.color === "#3f8f55" && joinF.color === "#3f8f55");
+      check("anchoring one piece of a joined object freezes the whole object", joinUp === "anchor" && joinGround === "anchor" && joinE.body.isStatic() && joinF.body.isStatic() && anchorOf(joinE.body) && anchorOf(joinE.body).freeze && anchorOf(joinE.body).base === ground && anchorOf(joinF.body).weld && !anchorOf(joinF.body).joint && joinE.color === "#3f8f55" && joinF.color === "#3f8f55");
       releaseAnchor(joinE.body);
       const joinStill = anchorOf(joinF.body);
       check("releasing the ground link keeps the joined object in one piece", joinE.body.isDynamic() && joinF.body.isDynamic() && !!joinStill && joinStill.weld && !!joinStill.joint && joinE.color === "#2244aa" && joinF.color === "#2244aa");
@@ -10315,7 +10907,58 @@ function runTests() {
         if (String(jointTypeName(j)).indexOf("weld") >= 0) joinJoints++;
       }
       const joinBack = anchors.filter((a) => a.weld && a.joint && jointAlive(world, a.joint) && a.body.isDynamic() && a.base.isDynamic());
+      const joinStrokeFollows = joinBack.length > 0 && joinBack.every((link) => {
+        const ends = anchorLinkEnds(link);
+        const hostA = drawings.find((d) => d.body === link.base);
+        const hostB = drawings.find((d) => d.body === link.body);
+        return !!link.localA && !!link.localB && !!hostA && !!hostB && insideDraw(hostA, ends.a.x, ends.a.y, 0.12) && insideDraw(hostB, ends.b.x, ends.b.y, 0.12);
+      });
       check("welded bodies survive scene export and import", !!(joinLoad && joinLoad.ok) && joinBack.length === joinBefore && joinJoints === joinBefore);
+      check("imported join strokes sit on their bodies", joinStrokeFollows);
+
+      // Auflage: nur von unten nach oben verbinden. Der tragende Körper bleibt liegen.
+      buildLevel(LEVELS["ein-klotz"]);
+      const restLo = ancRect(26, 6, 2.4, 1.6, "#3c7fd6");
+      const restHi = ancRect(26.4, 7.62, 1.2, 0.8, "#d94b3a");
+      const restApp = bodyApproach(restLo.body, restHi.body);
+      lines.push("INFO rest ny " + restApp.ny.toFixed(3) + " gap " + restApp.distance.toFixed(3));
+      const loPos = restLo.body.getPosition();
+      const hiPos = restHi.body.getPosition();
+      const restEdge = { x: loPos.x - 1.05, y: loPos.y };
+      check("a loaded body is not grabbed", pressKind(loPos.x, loPos.y) === "draw" && pressKind(restEdge.x, restEdge.y) === "draw");
+      check("the body on top can be grabbed", pressKind(hiPos.x, hiPos.y) === "drag");
+      const downStroke = tryAnchorGesture([
+        { x: hiPos.x, y: hiPos.y },
+        { x: hiPos.x, y: (hiPos.y + loPos.y) / 2 },
+        { x: loPos.x, y: loPos.y },
+      ]);
+      check("a stroke from the load down does not join", downStroke !== "anchor" && !anchorOf(restHi.body) && !anchorOf(restLo.body));
+      const restExit = [
+        { x: loPos.x, y: loPos.y },
+        { x: loPos.x + 0.5, y: loPos.y },
+        { x: loPos.x + 1.3, y: loPos.y },
+      ];
+      pointer = { id: 82, pts: restExit.slice(), trail: restExit.slice(), moved: true, grab: null, dragging: false };
+      check("leaving a loaded body does not drag it", !tryAdoptCenterGrab(pointer.trail) && !playDrag && Math.abs(restLo.body.getPosition().x - loPos.x) < 0.01);
+      pointer = null;
+      const restUp = [
+        { x: loPos.x, y: loPos.y },
+        { x: loPos.x, y: (loPos.y + hiPos.y) / 2 },
+        { x: hiPos.x, y: hiPos.y },
+      ];
+      pointer = { id: 83, pts: restUp.slice(), trail: restUp.slice(), moved: true, grab: null, dragging: false };
+      check("an upward rest stroke is not stolen as a grab", !tryAdoptAnchorGrab(pointer.trail) && !playDrag);
+      pointer = null;
+      const restJoin = tryAnchorGesture(restUp);
+      check("a stroke from the support up into the load joins them", restJoin === "anchor" && anchorOf(restHi.body) && anchorOf(restHi.body).base === restLo.body && anchorOf(restHi.body).weld);
+      check("a joined pair can be grabbed", pressKind(restEdge.x, restEdge.y) === "drag");
+      const sideA = ancRect(12, 10, 1.2, 0.8, "#3c7fd6");
+      const sideB = ancRect(13.22, 10, 1.0, 0.8, "#d94b3a");
+      const sideApp = bodyApproach(sideA.body, sideB.body);
+      lines.push("INFO side ny " + sideApp.ny.toFixed(3) + " gap " + sideApp.distance.toFixed(3));
+      check("bodies side by side can both be moved", pressKind(12.3, 10.4) === "drag" && pressKind(13.5, 10.4) === "drag");
+      const sideStroke = tryAnchorGesture([{ x: 12.4, y: 10.4 }, { x: 13.0, y: 10.4 }, { x: 13.6, y: 10.4 }]);
+      check("a sideways stroke does not join bodies", sideStroke !== "anchor" && !anchorOf(sideA.body) && !anchorOf(sideB.body));
     }
 
     function circRing(cx, cy, rx, ry, n, wob1, wob2) {
@@ -10448,6 +11091,37 @@ function runTests() {
     ], "#3c7fd6");
     const circSquare = drawings.find((d) => d.kind === "solid" && !d.preset);
     check("square stays a polygon", !!circSquare && circSquare.kind === "solid" && circSquare.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    {
+      // Knapp über der Kringel-Grenze (0,62 m). Dieselbe relative Krakeligkeit
+      // wie bei einem großen Kreis, plus ein paar Zentimeter Handzittern.
+      geoSnap = false;
+      buildLevel(LEVELS["ein-klotz"]);
+      const scPts = circRing(15, 8, 0.42, 0.40, 36, 0.06, 0.03);
+      for (let sci = 0; sci < scPts.length; sci++) {
+        scPts[sci].x += 0.015 * Math.sin(sci * 2.3);
+        scPts[sci].y += 0.012 * Math.cos(sci * 1.7);
+      }
+      commitStroke(scPts, "#3c7fd6");
+      const scBall = drawings.find((d) => !d.preset && (d.kind === "roller" || d.kind === "blob"));
+      check("a small shaky circle becomes a ball", !!scBall);
+      buildLevel(LEVELS["ein-klotz"]);
+      commitStroke([
+        { x: 10, y: 6 }, { x: 10.72, y: 6.04 }, { x: 10.7, y: 6.74 }, { x: 10.02, y: 6.7 }, { x: 10, y: 6 },
+      ], "#8d5a34");
+      const scSq = drawings.find((d) => d.kind === "solid" && !d.preset);
+      check("a small square stays a polygon", !!scSq && scSq.meta.outline.local.length === 4 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse" || d.kind === "blob"));
+      buildLevel(LEVELS["ein-klotz"]);
+      // Dieselbe Form wie „irregular rock“, auf knapp unter einen Meter verkleinert.
+      const scRockSrc = [
+        { x: 10, y: 5 }, { x: 11.2, y: 4.6 }, { x: 12.5, y: 5.1 }, { x: 12.8, y: 6.3 },
+        { x: 11.9, y: 7.4 }, { x: 10.4, y: 7.1 }, { x: 9.6, y: 6.0 }, { x: 10, y: 5 },
+      ];
+      const scRock = scRockSrc.map((p) => ({ x: 16 + (p.x - 11.2) * 0.28, y: 8 + (p.y - 6) * 0.28 }));
+      commitStroke(scRock, "#8d5a34");
+      const scStone = drawings.find((d) => d.kind === "solid" && !d.preset);
+      check("a small rock stays a polygon", !!scStone && scStone.meta.outline.local.length >= 5 && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse" || d.kind === "blob"));
+    }
 
     buildLevel(LEVELS["ein-klotz"]);
     const circHexPts = [];
@@ -11772,6 +12446,393 @@ function runTests() {
       }
     }
 
+    // Seil liegt eine Ebene vor den Nagelwirten und stößt nicht mit ihnen zusammen.
+    {
+      function rfPair(contact) {
+        const ba = contact.getFixtureA().getBody();
+        const bb = contact.getFixtureB().getBody();
+        const fa = contact.getFixtureA();
+        const fb = contact.getFixtureB();
+        const ma = bodyMeta.get(ba);
+        const mb = bodyMeta.get(bb);
+        if (ma && ma.kind === "rope" && !(mb && mb.kind === "rope")) return { bead: ba, other: bb, fix: fb, ropeId: ma.ropeId };
+        if (mb && mb.kind === "rope" && !(ma && ma.kind === "rope")) return { bead: bb, other: ba, fix: fa, ropeId: mb.ropeId };
+        return null;
+      }
+      function rfHostHits(ropeDraw, hosts) {
+        const ids = new Set();
+        for (const h of hosts) if (h && h.solidId) ids.add(h.solidId);
+        let touch = 0;
+        let on = 0;
+        for (let c = world.getContactList(); c; c = c.getNext()) {
+          if (!c.isTouching()) continue;
+          const p = rfPair(c);
+          if (!p || p.ropeId !== ropeDraw.ropeId) continue;
+          const onBody = hosts.some((h) => h.body && h.body !== ground && p.other === h.body);
+          const onSolid = p.other === ground && ids.has(p.fix && p.fix._solidId);
+          if (!onBody && !onSolid) continue;
+          touch++;
+          if (c.isEnabled()) on++;
+        }
+        return { touch, on };
+      }
+      function rfFloorHits(ropeDraw) {
+        let on = 0;
+        for (let c = world.getContactList(); c; c = c.getNext()) {
+          if (!c.isTouching() || !c.isEnabled()) continue;
+          const p = rfPair(c);
+          if (!p || p.ropeId !== ropeDraw.ropeId || p.other !== ground) continue;
+          if (p.fix && p.fix._solidFloor) on++;
+        }
+        return on;
+      }
+      function rfLowest(ropeDraw) {
+        let best = null;
+        for (const b of ropeDraw.bodies) {
+          const p = b.getPosition();
+          if (!best || p.y < best.y) best = p;
+        }
+        return best;
+      }
+      const rfUneven = [0.008, 0.021, 0.013, 0.019, 0.011];
+
+      buildLevel(LEVELS["ein-klotz"]);
+      ball.setTransform(V(2, 1.66), 0);
+      ball.setLinearVelocity(V(0, 0));
+      const rfA = makeBox({ x: 8, y: 4.5, hw: 1.1, hh: 2.4 });
+      const rfB = makeBox({ x: 18, y: 4.5, hw: 1.1, hh: 2.4 });
+      rfA.setStatic();
+      rfB.setStatic();
+      const rfPa = rememberPin(8, 6.2, rfA, true);
+      const rfPb = rememberPin(18, 6.2, rfB, true);
+      const rfRope = spawnRope(rfPa, rfPb, [
+        { x: 8, y: 6.2 }, { x: 8, y: 3.2 }, { x: 13, y: 2.0 }, { x: 18, y: 3.2 }, { x: 18, y: 6.2 },
+      ]);
+      for (let i = 0; i < 150; i++) step(1 / 60);
+      for (let i = 0; i < 30; i++) step(rfUneven[i % rfUneven.length]);
+      const rfHits = rfRope ? rfHostHits(rfRope, [{ body: rfA }, { body: rfB }]) : { touch: 0, on: 1 };
+      let rfThrough = false;
+      let rfSag = false;
+      if (rfRope) {
+        for (let i = 1; i < Math.min(6, rfRope.bodies.length - 1); i++) {
+          const p = rfRope.bodies[i].getPosition();
+          if (p.x > 6.95 && p.x < 9.05 && p.y > 2.3 && p.y < 6.7) rfThrough = true;
+        }
+        for (const b of rfRope.bodies) {
+          const p = b.getPosition();
+          if (p.y < 2.2 && p.x > 9.5 && p.x < 16.5) rfSag = true;
+        }
+      }
+      lines.push("INFO rope-front bodies touch " + rfHits.touch + " enabled " + rfHits.on
+        + " through " + rfThrough + " sag " + rfSag);
+      check("a rope from nail to nail does not collide with either host", !!rfRope && rfHits.touch > 0 && rfHits.on === 0 && rfThrough);
+      check("a rope from nail to nail hangs below the nails", rfSag);
+      const rfLayers = bodyLayers();
+      const rfOrder = drawingsByLayer();
+      check("a rope is drawn one layer in front of both nail hosts", !!rfRope && drawLayer(rfRope, rfLayers) === 1
+        && rfOrder.findIndex((d) => d === rfRope) > rfOrder.findIndex((d) => d.body === rfA)
+        && rfOrder.findIndex((d) => d === rfRope) > rfOrder.findIndex((d) => d.body === rfB));
+      const rfHat = makeBox({ x: 8, y: 8.4, hw: 0.28, hh: 0.28, density: 0.5 });
+      let rfHatOn = false;
+      for (let i = 0; i < 90; i++) {
+        step(1 / 60);
+        for (let c = world.getContactList(); c; c = c.getNext()) {
+          if (!c.isTouching() || !c.isEnabled()) continue;
+          const ba = c.getFixtureA().getBody();
+          const bb = c.getFixtureB().getBody();
+          if ((ba === rfHat && bb === rfA) || (ba === rfA && bb === rfHat)) rfHatOn = true;
+        }
+      }
+      check("a nail host still collides with a third body", rfHatOn);
+
+      const rfNail = rememberPin(8.6, 5.0, rfA, true);
+      const rfBoard = makeBox({ x: 10.8, y: 5.0, hw: 2.4, hh: 0.22 });
+      const rfBoardDraw = drawings.find((d) => d.body === rfBoard);
+      const rfPinned = rfBoardDraw ? attachExistingPins(rfBoard, rfBoardDraw.meta) : 0;
+      const rfBoardPin = rememberPin(10.8, 5.0, rfBoard, true);
+      const rfFar = rememberPin(18, 5.0, rfB, true);
+      const rfRope2 = spawnRope(rfBoardPin, rfFar, [
+        { x: 10.8, y: 5.0 }, { x: 14.4, y: 3.2 }, { x: 18, y: 5.0 },
+      ]);
+      const rfLayers2 = bodyLayers();
+      const rfOrder2 = drawingsByLayer();
+      check("a rope on a nailed board is two layers in front of the column", rfPinned > 0 && !!rfRope2 && !!rfNail
+        && (rfLayers2.get(rfBoard) === 1) && drawLayer(rfRope2, rfLayers2) === 2
+        && rfOrder2.findIndex((d) => d === rfRope2) > rfOrder2.findIndex((d) => d.body === rfBoard)
+        && rfOrder2.findIndex((d) => d === rfRope2) > rfOrder2.findIndex((d) => d.body === rfA));
+
+      buildLevel(LEVELS["ein-klotz"]);
+      ball.setTransform(V(2, 1.66), 0);
+      ball.setLinearVelocity(V(0, 0));
+      addStaticSolid([{ x: 6, y: 4.8 }, { x: 8.6, y: 4.8 }, { x: 8.6, y: 8.2 }, { x: 6, y: 8.2 }], "#c9854a");
+      addStaticSolid([{ x: 16.4, y: 4.8 }, { x: 19, y: 4.8 }, { x: 19, y: 8.2 }, { x: 16.4, y: 8.2 }], "#c9854a");
+      const rfGa = rememberPin(7.3, 7.4, ground, true);
+      const rfGb = rememberPin(17.7, 7.4, ground, true);
+      const rfGroundRope = spawnRope(rfGa, rfGb, [
+        { x: 7.3, y: 7.4 }, { x: 7.3, y: 3.0 }, { x: 12.5, y: 1.6 }, { x: 17.7, y: 3.0 }, { x: 17.7, y: 7.4 },
+      ]);
+      for (let i = 0; i < 150; i++) step(1 / 60);
+      for (let i = 0; i < 30; i++) step(rfUneven[i % rfUneven.length]);
+      const rfGHits = rfGroundRope ? rfHostHits(rfGroundRope, [rfGa, rfGb]) : { touch: 0, on: 1 };
+      const rfGLow = rfGroundRope ? rfLowest(rfGroundRope) : null;
+      const rfGFloor = rfGroundRope ? rfFloorHits(rfGroundRope) : 0;
+      lines.push("INFO rope-front posts touch " + rfGHits.touch + " enabled " + rfGHits.on
+        + " floor " + rfGFloor + " low " + (rfGLow ? rfGLow.y.toFixed(2) : "none")
+        + " solid " + (rfGa ? rfGa.solidId : 0) + "/" + (rfGb ? rfGb.solidId : 0)
+        + " floorFlag " + (rfGa ? rfGa.solidFloor : "?"));
+      check("a rope between ground posts does not collide with those posts", !!rfGroundRope && rfGa.solidId > 0 && rfGb.solidId > 0
+        && rfGa.solidId !== rfGb.solidId && !rfGa.solidFloor && !rfGb.solidFloor
+        && rfGHits.touch > 0 && rfGHits.on === 0);
+      check("a rope between ground posts still lies on the floor", rfGFloor > 0 && !!rfGLow && rfGLow.y > 1.25 && rfGLow.y < 1.8);
+      const rfRock = makeBox({ x: 8.2, y: 10.2, hw: 0.22, hh: 0.22, density: 0.4 });
+      let rfRockOn = false;
+      for (let i = 0; i < 90; i++) {
+        step(1 / 60);
+        for (let c = world.getContactList(); c; c = c.getNext()) {
+          if (!c.isTouching() || !c.isEnabled()) continue;
+          const ba = c.getFixtureA().getBody();
+          const bb = c.getFixtureB().getBody();
+          const fix = ba === rfRock ? c.getFixtureB() : bb === rfRock ? c.getFixtureA() : null;
+          if (fix && fix._solidId === rfGa.solidId) rfRockOn = true;
+        }
+      }
+      check("a ground post still collides with a body that is not its rope", rfRockOn);
+      const rfPostText = encodeSceneTextSync(captureScene());
+      const rfPostLoad = loadSceneFromTextSync(rfPostText);
+      const rfBack = drawings.find((d) => d.kind === "rope");
+      for (let i = 0; i < 40; i++) step(1 / 60);
+      const rfBackHits = rfBack ? rfHostHits(rfBack, [rfBack.pinA, rfBack.pinB]) : { touch: 0, on: 1 };
+      const rfBackFloor = rfBack ? rfFloorHits(rfBack) : 0;
+      const rfBackLow = rfBack ? rfLowest(rfBack) : null;
+      lines.push("INFO rope-front import touch " + rfBackHits.touch + " enabled " + rfBackHits.on + " floor " + rfBackFloor
+        + " low " + (rfBackLow ? rfBackLow.y.toFixed(2) : "none"));
+      check("an imported rope still ignores its posts and lies on the floor", !!(rfPostLoad && rfPostLoad.ok) && !!rfBack
+        && rfBack.pinA && rfBack.pinA.solidId > 0 && !rfBack.pinA.solidFloor
+        && rfBackHits.touch > 0 && rfBackHits.on === 0 && rfBackFloor > 0
+        && !!rfBackLow && rfBackLow.y > 1.25 && rfBackLow.y < 1.8);
+    }
+
+    // Geburtsregel: über ein vorhandenes Seil gezeichnet entsteht der Körper dahinter.
+    {
+      function bhHits(body, ropeDraw) {
+        let touch = 0;
+        let on = 0;
+        if (!body || !ropeDraw) return { touch, on };
+        for (let c = world.getContactList(); c; c = c.getNext()) {
+          if (!c.isTouching()) continue;
+          const ba = c.getFixtureA().getBody();
+          const bb = c.getFixtureB().getBody();
+          const bead = ba === body ? bb : bb === body ? ba : null;
+          if (!bead) continue;
+          const meta = bodyMeta.get(bead);
+          if (!meta || meta.kind !== "rope" || meta.ropeId !== ropeDraw.ropeId) continue;
+          touch++;
+          if (c.isEnabled()) on++;
+        }
+        return { touch, on };
+      }
+      function bhSettle(n) {
+        const uneven = [0.008, 0.021, 0.013, 0.019, 0.011];
+        for (let i = 0; i < n; i++) step(1 / 60);
+        for (let i = 0; i < uneven.length * 3; i++) step(uneven[i % uneven.length]);
+      }
+      function bhPark() {
+        buildLevel(LEVELS["ein-klotz"]);
+        ball.setTransform(V(2, 1.66), 0);
+        ball.setLinearVelocity(V(0, 0));
+        ball.setAngularVelocity(0);
+      }
+      function bhHammock(x0, x1, y, sag) {
+        const postA = makeBox({ x: x0, y: y - 2.2, hw: 0.7, hh: 2.2 });
+        const postB = makeBox({ x: x1, y: y - 2.2, hw: 0.7, hh: 2.2 });
+        postA.setStatic();
+        postB.setStatic();
+        const pa = rememberPin(x0, y, postA, true);
+        const pb = rememberPin(x1, y, postB, true);
+        const midX = (x0 + x1) / 2;
+        return spawnRope(pa, pb, [
+          { x: x0, y: y },
+          { x: midX, y: y - sag },
+          { x: x1, y: y },
+        ]);
+      }
+      function bhWake(body, x, y) {
+        body.setTransform(V(x, y), 0);
+        body.setLinearVelocity(V(0, 0));
+        body.setAngularVelocity(0);
+        body.setAwake(true);
+      }
+
+      bhPark();
+      const bhRope = bhHammock(6, 20, 8, 0.8);
+      bhSettle(20);
+      const bhTri = spawnSolid([
+        { x: 14.2, y: 6.5 },
+        { x: 17.8, y: 6.5 },
+        { x: 16.0, y: 8.4 },
+      ], { density: 1.5 });
+      const bhTriIds = bhTri && bhTri.meta.behindRopeIds;
+      const bhOrder = drawingsByLayer();
+      check("a shape drawn over a rope is born behind that rope",
+        !!bhTri && bhTri.kind === "solid" && !!bhRope && !!bhTriIds && bhTriIds.indexOf(bhRope.ropeId) >= 0);
+      check("a shape born behind a rope is drawn before that rope",
+        !!bhTri && !!bhRope && bhOrder.indexOf(bhTri) >= 0 && bhOrder.indexOf(bhTri) < bhOrder.indexOf(bhRope));
+      for (let i = 0; i < 8; i++) step(1 / 60);
+      const bhEarly = bhHits(bhTri && bhTri.body, bhRope);
+      const bhEarlyY = bhTri ? bhTri.body.getPosition().y : 0;
+      check("a shape drawn over a rope does not collide while it still overlaps",
+        bhEarly.touch > 0 && bhEarly.on === 0 && bhEarlyY > 5);
+      bhSettle(140);
+      const bhTriY = bhTri ? bhTri.body.getPosition().y : 99;
+      const bhTriV = bhTri ? Math.hypot(bhTri.body.getLinearVelocity().x, bhTri.body.getLinearVelocity().y) : 99;
+      const bhTriHits = bhHits(bhTri && bhTri.body, bhRope);
+      lines.push("INFO birth-behind y " + bhTriY.toFixed(2) + " v " + bhTriV.toFixed(2)
+        + " touch " + bhTriHits.touch + " on " + bhTriHits.on + " early " + bhEarly.touch + "/" + bhEarly.on);
+      check("a shape drawn over a rope falls through onto the floor",
+        bhTriY > 1.15 && bhTriY < 2.8 && bhTriV < 1.5 && bhTriHits.on === 0);
+      const bhText = encodeSceneTextSync(captureScene());
+      const bhLoad = loadSceneFromTextSync(bhText);
+      const bhBack = drawings.find((d) => d.meta && d.meta.behindRopeIds && d.meta.behindRopeIds.length);
+      const bhBackRope = drawings.find((d) => d.kind === "rope");
+      check("born-behind ropes survive the scene slip", !!(bhLoad && bhLoad.ok) && !!bhBack && !!bhBackRope
+        && bhBack.meta.behindRopeIds.indexOf(bhBackRope.ropeId) >= 0);
+      if (bhBack && bhBackRope) {
+        bhWake(bhBack.body, 16, 7.3);
+        for (let i = 0; i < 8; i++) step(1 / 60);
+        const bhLift = bhHits(bhBack.body, bhBackRope);
+        check("a born-behind shape still ignores that rope after it is moved back onto it",
+          bhLift.touch > 0 && bhLift.on === 0 && bhBack.body.getPosition().y > 5);
+        bhSettle(140);
+        const bhAgainY = bhBack.body.getPosition().y;
+        const bhAgain = bhHits(bhBack.body, bhBackRope);
+        lines.push("INFO birth-again y " + bhAgainY.toFixed(2) + " touch " + bhAgain.touch + " on " + bhAgain.on);
+        check("a born-behind shape falls through the same rope again",
+          bhAgainY > 1.15 && bhAgainY < 2.8 && bhAgain.on === 0);
+      } else {
+        check("a born-behind shape still ignores that rope after it is moved back onto it", false);
+        check("a born-behind shape falls through the same rope again", false);
+      }
+
+      bhPark();
+      const bhRopeC = bhHammock(6, 20, 8, 0.8);
+      bhSettle(20);
+      const bhBox = spawnSolid([
+        { x: 14.6, y: 9.1 },
+        { x: 17.4, y: 9.1 },
+        { x: 17.4, y: 10.7 },
+        { x: 14.6, y: 10.7 },
+      ], { density: 1.5 });
+      check("a shape drawn clear of a rope is not born behind it",
+        !!bhBox && !(bhBox.meta.behindRopeIds && bhBox.meta.behindRopeIds.length));
+      bhSettle(160);
+      const bhBoxY = bhBox ? bhBox.body.getPosition().y : 0;
+      const bhBoxV = bhBox ? Math.hypot(bhBox.body.getLinearVelocity().x, bhBox.body.getLinearVelocity().y) : 99;
+      const bhBoxHits = bhHits(bhBox && bhBox.body, bhRopeC);
+      lines.push("INFO birth-catch y " + bhBoxY.toFixed(2) + " v " + bhBoxV.toFixed(2)
+        + " touch " + bhBoxHits.touch + " on " + bhBoxHits.on);
+      check("a shape drawn clear of a rope is caught by it",
+        bhBoxY > 6.2 && bhBoxY < 9.2 && bhBoxHits.on > 0);
+
+      bhPark();
+      const bhLow = bhHammock(5, 12, 5.6, 0.75);
+      const bhHigh = bhHammock(18, 26, 8.2, 0.3);
+      bhSettle(20);
+      const bhOnly = spawnSolid([
+        { x: 7.6, y: 4.3 },
+        { x: 9.4, y: 4.3 },
+        { x: 8.5, y: 5.9 },
+      ], { density: 1.2 });
+      const bhOnlyIds = bhOnly && bhOnly.meta.behindRopeIds;
+      check("a shape crossing one of two ropes is born behind only that rope",
+        !!bhOnly && !!bhLow && !!bhHigh && !!bhOnlyIds && bhOnlyIds.length === 1
+        && bhOnlyIds.indexOf(bhLow.ropeId) >= 0 && bhOnlyIds.indexOf(bhHigh.ropeId) < 0);
+      if (bhOnly && bhHigh && bhLow) {
+        bhWake(bhOnly.body, 22, 10.2);
+        bhSettle(150);
+        const bhHighY = bhOnly.body.getPosition().y;
+        const bhHighHits = bhHits(bhOnly.body, bhHigh);
+        const bhLowHits = bhHits(bhOnly.body, bhLow);
+        lines.push("INFO birth-other y " + bhHighY.toFixed(2)
+          + " high " + bhHighHits.touch + "/" + bhHighHits.on
+          + " low " + bhLowHits.touch + "/" + bhLowHits.on
+          + " ids " + bhOnly.meta.behindRopeIds.length);
+        check("the same shape is caught by a rope it was not drawn over",
+          bhHighY > 6.4 && bhHighHits.on > 0 && bhLowHits.on === 0
+          && bhOnly.meta.behindRopeIds.length === 1);
+        bhWake(bhOnly.body, 8.5, 5.05);
+        for (let i = 0; i < 8; i++) step(1 / 60);
+        const bhLowEarly = bhHits(bhOnly.body, bhLow);
+        check("moving onto the first rope still does not collide with it",
+          bhLowEarly.touch > 0 && bhLowEarly.on === 0);
+        bhSettle(140);
+        const bhLowY = bhOnly.body.getPosition().y;
+        const bhLowEnd = bhHits(bhOnly.body, bhLow);
+        lines.push("INFO birth-low-again y " + bhLowY.toFixed(2) + " on " + bhLowEnd.on);
+        check("moving onto the first rope lets the shape fall through it",
+          bhLowY > 1.15 && bhLowY < 2.8 && bhLowEnd.on === 0);
+      } else {
+        check("the same shape is caught by a rope it was not drawn over", false);
+        check("moving onto the first rope still does not collide with it", false);
+        check("moving onto the first rope lets the shape fall through it", false);
+      }
+
+      bhPark();
+      const bhOld = spawnSolid([
+        { x: 15.3, y: 7.55 },
+        { x: 16.7, y: 7.55 },
+        { x: 16.7, y: 8.7 },
+        { x: 15.3, y: 8.7 },
+      ], { density: 1.5 });
+      const bhLate = bhHammock(6, 20, 8, 0.55);
+      check("a rope drawn across an existing body does not put that body behind it",
+        !!bhOld && !!bhLate && !(bhOld.meta.behindRopeIds && bhOld.meta.behindRopeIds.length));
+      for (let i = 0; i < 8; i++) step(1 / 60);
+      const bhLateEarly = bhHits(bhOld && bhOld.body, bhLate);
+      bhSettle(140);
+      const bhOldY = bhOld ? bhOld.body.getPosition().y : 0;
+      const bhLateHits = bhHits(bhOld && bhOld.body, bhLate);
+      lines.push("INFO birth-late y " + bhOldY.toFixed(2)
+        + " early " + bhLateEarly.touch + "/" + bhLateEarly.on
+        + " end " + bhLateHits.touch + "/" + bhLateHits.on);
+      check("a rope drawn across an existing body still supports it",
+        bhLateEarly.on > 0 && bhOldY > 5.5 && bhLateHits.on > 0);
+
+      bhPark();
+      const bhCutRope = bhHammock(6, 20, 8, 0.8);
+      bhSettle(15);
+      const bhCut = spawnSolid([
+        { x: 14.2, y: 6.5 },
+        { x: 17.8, y: 6.5 },
+        { x: 16.0, y: 8.4 },
+      ], { density: 1.2 });
+      const bhMid = bhCutRope ? Math.floor(bhCutRope.bodies.length / 2) : 0;
+      const bhMidP = bhCutRope ? bhCutRope.bodies[bhMid].getPosition() : { x: 0, y: 0 };
+      const bhCutOk = !!(bhCutRope && bhCut && cutRopeAtBead({
+        draw: bhCutRope, index: bhMid, x: bhMidP.x, y: bhMidP.y,
+      }));
+      const bhHalves = drawings.filter((d) => d.kind === "rope");
+      const bhCutIds = (bhCut && bhCut.meta.behindRopeIds) || [];
+      check("cutting a rope keeps a born-behind body behind both halves",
+        bhCutOk && bhHalves.length === 2 && bhCutIds.length === 2
+        && bhHalves.every((d) => bhCutIds.indexOf(d.ropeId) >= 0));
+      bhSettle(140);
+      const bhCutY = bhCut ? bhCut.body.getPosition().y : 99;
+      const bhCutOn = bhHalves.reduce((n, d) => n + bhHits(bhCut && bhCut.body, d).on, 0);
+      lines.push("INFO birth-cut y " + bhCutY.toFixed(2) + " on " + bhCutOn + " halves " + bhHalves.length);
+      check("a born-behind body falls through both halves of a cut rope",
+        bhCutY > 1.15 && bhCutY < 2.8 && bhCutOn === 0);
+
+      bhPark();
+      const bhInkRope = bhHammock(6, 20, 8, 0.8);
+      bhSettle(10);
+      const bhWire = spawnWire([{ x: 16, y: 6.2 }, { x: 16, y: 8.2 }], {});
+      const bhRoll = spawnRoller(16, 7.2, 0.55);
+      check("a wire or ball drawn over a rope is born behind it",
+        !!bhWire && !!bhRoll && !!bhInkRope
+        && bhWire.meta.behindRopeIds && bhWire.meta.behindRopeIds.indexOf(bhInkRope.ropeId) >= 0
+        && bhRoll.meta.behindRopeIds && bhRoll.meta.behindRopeIds.indexOf(bhInkRope.ropeId) >= 0);
+    }
+
     // Ebenen per Nagel und Geist beim Ziehen (52-ebenen.js).
     {
       lastTap = 0;
@@ -12372,6 +13433,84 @@ function runTests() {
       if (pgDead) pullPin(pgNail);
       for (let i = 0; i < 10; i++) step(1 / 60);
       check("pulling the pulley nail turns the sides into plain ropes", pgDead && pgDead.dead && pulleyList().length === 0 && pgDead.sideA.chordJoint && pgDead.sideB.chordJoint && pgMade !== undefined);
+    }
+
+    {
+      // Drei Kringel-Kugeln in einem durchhängenden Seil. Ohne Bullet
+      // wachsen sie ineinander (gemessen etwa 0,5 m): die Perlen sind
+      // Bullets, der Durchschuss-Löser schaltet den Kontakt ab.
+      buildLevel(LEVELS.sandbox);
+      world.destroyBody(ball);
+      ball = null;
+      stars = [];
+      const sbA = makeBox({ x: 8, y: 5.8, hw: 0.35, hh: 2.2 });
+      const sbB = makeBox({ x: 18, y: 5.8, hw: 0.35, hh: 2.2 });
+      sbA.setStatic();
+      sbB.setStatic();
+      const sbPa = rememberPin(8, 8, sbA, true);
+      const sbPb = rememberPin(18, 8, sbB, true);
+      const sbRope = spawnRope(sbPa, sbPb, [
+        { x: 8, y: 8 }, { x: 13, y: 4.6 }, { x: 18, y: 8 },
+      ]);
+      for (let i = 0; i < 30; i++) step(1 / 60);
+      const sbDraws = [
+        spawnBlob(12.35, 6.5, 0.26),
+        spawnBlob(13.0, 6.7, 0.28),
+        spawnBlob(13.65, 6.5, 0.27),
+      ];
+      const sbRoll = spawnRoller(11.3, 6.9, 0.45);
+      const sbAll = sbDraws.concat([sbRoll]);
+      function sbRadius(draw) {
+        if (draw.r) return draw.r;
+        const c = draw.meta && draw.meta.circles && draw.meta.circles[0];
+        return c ? c.r : 0;
+      }
+      function sbGap(list) {
+        let worst = 99;
+        let low = 99;
+        for (let i = 0; i < list.length; i++) {
+          const a = list[i].body.getPosition();
+          const ra = sbRadius(list[i]);
+          if (a.y < low) low = a.y;
+          for (let j = i + 1; j < list.length; j++) {
+            const b = list[j].body.getPosition();
+            const g = Math.hypot(a.x - b.x, a.y - b.y) - ra - sbRadius(list[j]);
+            if (g < worst) worst = g;
+          }
+        }
+        return { worst, low };
+      }
+      check("a small drawn ball is a bullet like a large one", sbDraws.every((d) => d && d.body.isBullet()) && sbRoll.body.isBullet());
+      let sbWorst = 99;
+      for (let i = 0; i < 300; i++) {
+        step(1 / 60);
+        if (i >= 90) sbWorst = Math.min(sbWorst, sbGap(sbAll).worst);
+      }
+      const sbUneven = [0.008, 0.021, 0.013, 0.019, 0.011];
+      for (let i = 0; i < sbUneven.length * 3; i++) {
+        step(sbUneven[i % sbUneven.length]);
+        sbWorst = Math.min(sbWorst, sbGap(sbAll).worst);
+      }
+      const sbEnd = sbGap(sbAll);
+      lines.push("INFO small balls in rope gap " + sbEnd.worst.toFixed(3) + " worst " + sbWorst.toFixed(3) + " low " + sbEnd.low.toFixed(2) + " roll " + sbRoll.body.getPosition().y.toFixed(2));
+      check("small balls in a rope do not sink into each other", !!sbRope && sbEnd.worst > -0.05 && sbWorst > -0.08 && sbEnd.low > 3.2);
+
+      const sbText = encodeSceneTextSync(captureScene());
+      const sbDec = decodeSceneTextSync(sbText);
+      for (const rec of (sbDec.data && sbDec.data.bodies) || []) {
+        if (rec.drawKind === "blob") rec.bullet = false;
+      }
+      const sbLoad = loadSceneFromTextSync(JSON.stringify(sbDec.data));
+      const sbBack = drawings.filter((d) => d.kind === "blob" || d.kind === "roller");
+      check("an old zettel still makes small balls bullets", !!(sbDec && sbDec.ok && sbLoad && sbLoad.ok !== false && sbBack.filter((d) => d.kind === "blob").length === 3 && sbBack.every((d) => d.body.isBullet())));
+      let sbBackWorst = 99;
+      for (let i = 0; i < 120; i++) {
+        step(1 / 60);
+        sbBackWorst = Math.min(sbBackWorst, sbGap(sbBack).worst);
+      }
+      const sbBackEnd = sbGap(sbBack);
+      lines.push("INFO reloaded small balls gap " + sbBackEnd.worst.toFixed(3) + " worst " + sbBackWorst.toFixed(3) + " low " + sbBackEnd.low.toFixed(2));
+      check("reloaded small balls stay apart in the rope", sbBackWorst > -0.08 && sbBackEnd.worst > -0.05 && sbBackEnd.low > 3.2);
     }
 
     mountTunePanel();

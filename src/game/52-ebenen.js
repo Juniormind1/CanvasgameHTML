@@ -3,8 +3,13 @@
 // einem Nagel, dessen Wirt in Ebene n liegt, ist er Ebene n+1 und wird davor
 // gezeichnet. Direkt über einen Nagel verbundene Körper stoßen nie zusammen
 // (Nagel-Joints haben collideConnected: false, der pre-solve-Filter
-// `layerContactOff` sichert das zusätzlich ab). Seile zählen nicht als
-// Nagelverbindung: Sehne und Perlen kollidieren weiter wie bisher.
+// `layerContactOff` sichert das zusätzlich ab). Ein Seil an einem Nagel oder
+// Motor liegt eine Ebene davor und stößt nicht mit dem Nagelwirt zusammen
+// (`ropeOwnEndContact`). Die beiden Wirte stoßen weiter gegeneinander.
+// Überdeckt die fertige Form beim Zeichnen ein vorhandenes Seil, entsteht der
+// Körper hinter genau diesem Seil (`behindRopeIds`): er wird dahinter
+// gezeichnet und stößt nicht mit ihm zusammen. Neben dem Seil gezeichnet,
+// bleibt er auf derselben Stoßebene und wird vom Seil gefangen.
 // Ein Körper an der Maus stößt mit nichts zusammen. Überlappt er etwas, mit dem
 // er nach dem Loslassen zusammenstoßen würde, ist er ein Geist: halb
 // durchsichtig, und an der letzten freien Pose steht ein blasser Schatten.
@@ -76,23 +81,172 @@ function bodyLayers() {
   return layer;
 }
 
+// Seil: eine Ebene vor dem Gegenstand, in dem der Nagel oder Motor steckt.
+function ropeHostLayer(draw, layers) {
+  let host = 0;
+  let hung = false;
+  for (const pin of [draw.pinA, draw.pinB]) {
+    if (!pin) continue;
+    hung = true;
+    if (pin.body && pin.body !== ground) host = Math.max(host, layers.get(pin.body) || 0);
+  }
+  return hung ? host + 1 : 0;
+}
+
 function drawLayer(draw, layers) {
   if (!draw) return 0;
-  if (draw.kind === "rope" && draw.bodies && draw.bodies.length) {
-    let l = 0;
-    for (const b of draw.bodies) l = Math.max(l, layers.get(b) || 0);
-    return l;
-  }
+  if (draw.kind === "rope") return ropeHostLayer(draw, layers);
   return draw.body ? layers.get(draw.body) || 0 : 0;
 }
 
+function behindRopeIdsOf(draw) {
+  const ids = draw && draw.meta && draw.meta.behindRopeIds;
+  return ids && ids.length ? ids : null;
+}
+
+function drawingBehindRope(draw, rope) {
+  if (!draw || !rope || rope.kind !== "rope" || draw.kind === "rope") return false;
+  const ids = behindRopeIdsOf(draw);
+  return !!(ids && ids.indexOf(rope.ropeId) >= 0);
+}
+
+// Negativ, wenn a vor b gezeichnet werden muss, weil a hinter diesem Seil entstand.
+function ropeBehindOrder(a, b) {
+  if (drawingBehindRope(a, b)) return -1;
+  if (drawingBehindRope(b, a)) return 1;
+  return 0;
+}
+
 // Zeichenreihenfolge: nach Ebene, innerhalb einer Ebene wie bisher.
+// Ein hinter einem Seil geborener Körper kommt vor genau diesem Seil.
 function drawingsByLayer() {
   const layers = bodyLayers();
   return drawings
     .map((d, i) => ({ d, i, l: drawLayer(d, layers) }))
-    .sort((p, q) => p.l - q.l || p.i - q.i)
+    .sort((p, q) => ropeBehindOrder(p.d, q.d) || p.l - q.l || p.i - q.i)
     .map((p) => p.d);
+}
+
+function ropeSamplePoints(rope) {
+  const pts = [];
+  for (const body of (rope && rope.bodies) || []) {
+    if (!body || (typeof body.isValid === "function" && !body.isValid())) continue;
+    const p = body.getPosition();
+    pts.push({ x: p.x, y: p.y });
+  }
+  return pts;
+}
+
+function segCrosses(a, b, c, d) {
+  const side = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const d1 = side(c, d, a);
+  const d2 = side(c, d, b);
+  const d3 = side(a, b, c);
+  const d4 = side(a, b, d);
+  return ((d1 > 1e-8 && d2 < -1e-8) || (d1 < -1e-8 && d2 > 1e-8))
+    && ((d3 > 1e-8 && d4 < -1e-8) || (d3 < -1e-8 && d4 > 1e-8));
+}
+
+function segGap(a, b, c, d) {
+  if (segCrosses(a, b, c, d)) return 0;
+  return Math.min(
+    distPointSeg(a.x, a.y, c.x, c.y, d.x, d.y),
+    distPointSeg(b.x, b.y, c.x, c.y, d.x, d.y),
+    distPointSeg(c.x, c.y, a.x, a.y, b.x, b.y),
+    distPointSeg(d.x, d.y, a.x, a.y, b.x, b.y),
+  );
+}
+
+function ropeCrossesPoly(samples, poly) {
+  if (!poly || poly.length < 3) return false;
+  for (const p of samples) {
+    if (pointInPoly(p.x, p.y, poly)) return true;
+  }
+  for (let i = 0; i < samples.length - 1; i++) {
+    const a = samples[i];
+    const b = samples[i + 1];
+    for (let k = 0; k < poly.length; k++) {
+      if (segCrosses(a, b, poly[k], poly[(k + 1) % poly.length])) return true;
+    }
+  }
+  return false;
+}
+
+function ropeEntersCircle(samples, cx, cy, r) {
+  for (const p of samples) {
+    if (Math.hypot(p.x - cx, p.y - cy) < r) return true;
+  }
+  for (let i = 0; i < samples.length - 1; i++) {
+    const a = samples[i];
+    const b = samples[i + 1];
+    if (distPointSeg(cx, cy, a.x, a.y, b.x, b.y) < r) return true;
+  }
+  return false;
+}
+
+function ropeMeetsStroke(samples, stroke, reach) {
+  if (!stroke || stroke.length < 2) return false;
+  for (let i = 0; i < samples.length - 1; i++) {
+    for (let k = 0; k < stroke.length - 1; k++) {
+      if (segGap(samples[i], samples[i + 1], stroke[k], stroke[k + 1]) < reach) return true;
+    }
+  }
+  return false;
+}
+
+function bornOutlineWorld(body, local) {
+  const pts = [];
+  for (const p of local) {
+    const w = body.getWorldPoint(V(p.x, p.y));
+    pts.push({ x: w.x, y: w.y });
+  }
+  return pts;
+}
+
+// true, wenn die Seilmittellinie die fertige Form schneidet oder in ihr liegt.
+function bornOverRope(draw, rope) {
+  const samples = ropeSamplePoints(rope);
+  if (samples.length < 2 || !draw || !draw.body || !draw.meta) return false;
+  const meta = draw.meta;
+  const pos = draw.body.getPosition();
+  const ang = draw.body.getAngle();
+  const ca = Math.cos(ang);
+  const sa = Math.sin(ang);
+  if (meta.circles && meta.circles.length) {
+    for (const c of meta.circles) {
+      const cx = pos.x + c.x * ca - c.y * sa;
+      const cy = pos.y + c.x * sa + c.y * ca;
+      if (ropeEntersCircle(samples, cx, cy, c.r)) return true;
+    }
+    return false;
+  }
+  if (!meta.outline || !meta.outline.local || meta.outline.local.length < 2) return false;
+  const world = bornOutlineWorld(draw.body, meta.outline.local);
+  if (meta.outline.closed) return ropeCrossesPoly(samples, world);
+  return ropeMeetsStroke(samples, world, (meta.thick || THICK) * 0.5);
+}
+
+// Geburtsregel: überdeckt die fertige Form ein vorhandenes Seil, bleibt der
+// Körper hinter genau diesem Seil. Die Liste klebt am Paar.
+function markBornBehindRopes(draw) {
+  if (!draw || !draw.body || !draw.meta || draw.kind === "rope") return;
+  const ids = [];
+  for (const rope of drawings) {
+    if (!rope || rope.kind !== "rope" || rope.ropeId == null) continue;
+    if (bornOverRope(draw, rope) && ids.indexOf(rope.ropeId) < 0) ids.push(rope.ropeId);
+  }
+  if (!ids.length) return;
+  draw.meta.behindRopeIds = ids;
+}
+
+// Eine Seilhälfte nach dem Schnitt bleibt dasselbe Seil für die Geburtsregel.
+function carryRopeBehind(oldId, newId) {
+  if (oldId == null || newId == null || oldId === newId) return;
+  for (const d of drawings) {
+    const ids = d.meta && d.meta.behindRopeIds;
+    if (!ids || ids.indexOf(oldId) < 0 || ids.indexOf(newId) >= 0) continue;
+    ids.push(newId);
+  }
 }
 
 function poseOfBody(body) {

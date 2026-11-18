@@ -10,9 +10,49 @@ function doNudge(dir) {
   ball.applyLinearImpulse(V(dir * 8.2, 0.55), ball.getWorldCenter(), true);
 }
 
+let solidSeq = 1;
+
+function solidSpan(pts) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  // Breite Bodenplatte, auf der ein Seil liegen bleiben darf. Pfosten nicht.
+  return { floor: minY <= 0.05 && h <= 1.6 && w >= 8 };
+}
+
+// Planck hängt jede neue Fixture vorn an (m_fixtureList = fixture). `older`
+// ist der bisherige Kopf, die Schleife trifft also nur die gerade erzeugten.
+function stampSolidFixtures(body, older, solid) {
+  for (let f = body.getFixtureList(); f && f !== older; f = f.getNext()) {
+    f._solidId = solid.id;
+    f._solidFloor = solid.floor;
+  }
+}
+
+function solidAt(x, y) {
+  for (let i = geometry.length - 1; i >= 0; i--) {
+    const g = geometry[i];
+    if (!g.closed || !g.solidId) continue;
+    if (distToPoly(x, y, g.pts) <= 0.02) return g;
+  }
+  return null;
+}
+
 function addStaticSolid(pts, color) {
   const clean = ensureCCW(dedupe(pts));
   if (clean.length < 3) return;
+  const span = solidSpan(clean);
+  const solid = { id: solidSeq++, floor: span.floor };
+  const older = ground.getFixtureList();
   const opt = fixtureOpt({ density: 0, friction: 0.5, restitution: 0 });
   if (!addConvexFixture(ground, clean, opt)) {
     const localTris = triangulate(clean.map((p) => ({ x: p.x, y: p.y })));
@@ -24,7 +64,8 @@ function addStaticSolid(pts, color) {
     })();
     for (const tri of tris) addTriFixture(ground, tri, opt);
   }
-  geometry.push({ closed: true, pts: clean });
+  stampSolidFixtures(ground, older, solid);
+  geometry.push({ closed: true, pts: clean, solidId: solid.id, solidFloor: solid.floor });
   scenery.push({ kind: "poly", pts: clean, color, width: 0.16 });
 }
 
@@ -130,7 +171,7 @@ function attachPlayContacts(targetWorld) {
     contactQ.push([contact.getFixtureA().getBody(), contact.getFixtureB().getBody()]);
   });
   targetWorld.on("pre-solve", (contact) => {
-    if (layerContactOff(contact) || ropeOwnEndContact(contact)) {
+    if (layerContactOff(contact) || ropeOwnEndContact(contact) || ropeBirthBehindContact(contact)) {
       contact.setEnabled(false);
       return;
     }

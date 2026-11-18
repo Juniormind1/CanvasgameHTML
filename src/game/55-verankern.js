@@ -1,9 +1,13 @@
-// Verbinden: ein kurzer, fast gerader Zug von einem festen Körper (oder vom
-// Boden) in einen anderen festen Körper, der ihn berührt. Zwei freie Körper
-// werden starr zu einem Gegenstand (WeldJoint). Boden oder ein schon fester
-// Körper macht die ganze Gruppe statisch. Umgekehrt: Körper greifen und auf
-// der Basis loslassen. Trifft die Geste einen Körper, der nicht verbunden
-// werden kann, entsteht kein Strich; er wird gegriffen und folgt der Maus.
+// Verbinden: ein kurzer, fast gerader Zug von unten nach oben.
+// Vom Boden in einen aufliegenden festen Körper macht ihn statisch. Liegt ein
+// Körper auf einem anderen, verbindet derselbe Zug die beiden starr
+// (WeldJoint); die Gruppe bleibt beweglich. Seitliche Berührung verbindet
+// nicht, der Strich bleibt eine Zeichnung. Ein Zug von oben nach unten
+// verbindet nicht: der obere Körper wird verschoben, denn auf ihm ruht nichts.
+// Ein Körper, auf dem noch etwas ruht, lässt sich nicht ziehen. Loslassen auf
+// dem Boden verankert weiter. Trifft ein Zug vom Boden einen Körper ohne
+// Kontakt, entsteht kein Strich; der Körper wird gegriffen.
+// Der Verbindungsstrich sitzt fest an den beiden Gegenständen und wandert mit.
 // Rechtsklick auf den Verbindungsstrich löst. Rechtsklick auf einen
 // verbundenen Körper löscht ihn nicht.
 const ANCHOR_MAX_LEN = 1.5;     // m, Weglänge des Zugs
@@ -11,6 +15,7 @@ const ANCHOR_MIN_LEN = 0.15;    // m, Sehne; kürzer ist ein Klick
 const ANCHOR_STRAIGHT = 0.8;    // Sehne / Weglänge
 const ANCHOR_MAX_BOW = 0.2;     // m, größte Abweichung von der Sehne
 const ANCHOR_TOUCH = 0.05;      // m, Abstand, der noch als Berührung gilt
+const ANCHOR_REST_UP = 0.65;    // Auflage: Normale von unten nach oben, steiler als eine Seitenlage
 const ANCHOR_BASE_TOL = 0.15;   // m, Start so nah am Boden zählt als „auf dem Boden“
 const ANCHOR_TARGET_TOL = 0.06; // m, Ende so nah am Umriss zählt als „im Körper“
 const ANCHOR_LINK_HIT = 0.22;   // m, Rechtsklick-Abstand zum Verbindungsstrich
@@ -150,8 +155,12 @@ function solidAnchorDraw(body) {
   return d;
 }
 
-function bodyGap(a, b) {
+// Nächster Abstand und Richtung von a nach b (ny > 0: b liegt über a).
+function bodyApproach(a, b) {
   let best = Infinity;
+  let nx = 0;
+  let ny = 0;
+  if (!a || !b || a === b) return { distance: best, nx, ny };
   const xa = a.getTransform();
   const xb = b.getTransform();
   for (let fa = a.getFixtureList(); fa; fa = fa.getNext()) {
@@ -168,10 +177,53 @@ function bodyGap(a, b) {
       input.useRadii = true;
       const output = new planck.DistanceOutput();
       planck.Distance(output, new planck.SimplexCache(), input);
-      best = Math.min(best, output.distance);
+      if (output.distance >= best) continue;
+      best = output.distance;
+      const pa = output.pointA;
+      const pb = output.pointB;
+      let dx = pb.x - pa.x;
+      let dy = pb.y - pa.y;
+      let len = Math.hypot(dx, dy);
+      if (len < 1e-5) {
+        const ca = a.getPosition();
+        const cb = b.getPosition();
+        dx = cb.x - ca.x;
+        dy = cb.y - ca.y;
+        len = Math.hypot(dx, dy);
+      }
+      if (len > 1e-6) { nx = dx / len; ny = dy / len; }
     }
   }
-  return best;
+  return { distance: best, nx, ny };
+}
+
+function bodyGap(a, b) {
+  return bodyApproach(a, b).distance;
+}
+
+// upper liegt auf lower: sie berühren sich, und die Berührung kommt von oben.
+// Teile derselben starren Verbindung zählen nicht als Auflage.
+function restsOn(upper, lower) {
+  if (!upper || !lower || upper === lower || lower === ground) return false;
+  if (weldComponent(upper).indexOf(lower) >= 0) return false;
+  const app = bodyApproach(lower, upper);
+  return app.distance <= ANCHOR_TOUCH && app.ny >= ANCHOR_REST_UP;
+}
+
+function loadRestingOn(body) {
+  if (!body || body === ground) return false;
+  const group = weldComponent(body);
+  for (let i = 0; i < group.length; i++) {
+    const base = group[i];
+    for (const d of drawings) {
+      if (!d.body || group.indexOf(d.body) >= 0) continue;
+      if (d.kind === "rope" || d.kind === "wire") continue;
+      if (!d.body.isDynamic()) continue;
+      if (restsOn(d.body, base)) return true;
+    }
+    if (typeof ball !== "undefined" && ball && group.indexOf(ball) < 0 && ball.isDynamic() && restsOn(ball, base)) return true;
+  }
+  return false;
 }
 
 function anchorAllowed(draw, base, groupTouch) {
@@ -186,6 +238,8 @@ function anchorAllowed(draw, base, groupTouch) {
     return false;
   }
   if (!freeze && weldComponent(body).indexOf(base) >= 0) return false;
+  // Zwei freie oder ein fester Körper: nur verbinden, wenn der Zielkörper darauf ruht.
+  if (base !== ground && !restsOn(body, base)) return false;
   if (groupTouch) {
     const group = weldComponent(body);
     if (!group.some((b) => bodyGap(b, base) <= ANCHOR_TOUCH)) return false;
@@ -264,6 +318,35 @@ function thawWeldGroup(body) {
   }
 }
 
+// Enden am Gegenstand, nicht im Raum. Der Boden hat keine Lage und bleibt in Weltkoordinaten.
+function anchorLinkLocals(base, body, from, to) {
+  let localA = null;
+  let localB = null;
+  if (base && base !== ground && base.getLocalPoint) {
+    const p = base.getLocalPoint(V(from.x, from.y));
+    localA = { x: p.x, y: p.y };
+  }
+  if (body && body !== ground && body.getLocalPoint) {
+    const p = body.getLocalPoint(V(to.x, to.y));
+    localB = { x: p.x, y: p.y };
+  }
+  return { localA, localB };
+}
+
+function anchorLinkEnds(link) {
+  let a = link.a;
+  let b = link.b;
+  if (link.localA && link.base && link.base !== ground && link.base.getWorldPoint) {
+    const p = link.base.getWorldPoint(V(link.localA.x, link.localA.y));
+    a = { x: p.x, y: p.y };
+  }
+  if (link.localB && link.body && link.body !== ground && link.body.getWorldPoint) {
+    const p = link.body.getWorldPoint(V(link.localB.x, link.localB.y));
+    b = { x: p.x, y: p.y };
+  }
+  return { a, b };
+}
+
 function anchorBody(draw, base, from, to, groupTouch) {
   if (!anchorAllowed(draw, base, groupTouch)) return false;
   const body = draw.body;
@@ -274,10 +357,13 @@ function anchorBody(draw, base, from, to, groupTouch) {
   if (freeze) freezeWeldGroup(body);
   else joint = makeAnchorWeld(base, body);
   if (!freeze) dragFresh.delete(body);
+  const locals = anchorLinkLocals(base, body, from, to);
   anchors.push({
     body, base, draw,
     a: { x: from.x, y: from.y },
     b: { x: to.x, y: to.y },
+    localA: locals.localA,
+    localB: locals.localB,
     color: savedColor,
     savedColor,
     weld: !freeze,
@@ -337,7 +423,8 @@ function anchorLinkAt(x, y) {
   let best = null;
   let bestD = ANCHOR_LINK_HIT;
   for (const link of anchors) {
-    const d = distPointSeg(x, y, link.a.x, link.a.y, link.b.x, link.b.y);
+    const ends = anchorLinkEnds(link);
+    const d = distPointSeg(x, y, ends.a.x, ends.a.y, ends.b.x, ends.b.y);
     if (d <= bestD) { bestD = d; best = link; }
   }
   return best;
@@ -380,6 +467,12 @@ function tryAnchorGesture(trail) {
     releaseAnchor(target.body);
     return "anchor";
   }
+  // Seitliche Berührung ist kein Verbindungsstrich (der Strich bleibt eine Zeichnung).
+  // Kein Kontakt bleibt ein Fehlversuch, damit der Zielkörper gegriffen wird.
+  if (base !== ground && !restsOn(target.body, base)) {
+    if (bodyGap(target.body, base) > ANCHOR_TOUCH) return "miss";
+    return false;
+  }
   if (anchorBody(target, base, from, to)) return "anchor";
   return "miss";
 }
@@ -416,14 +509,15 @@ function tryAnchorDragEnd(body, grabPt, trail) {
   const draw = drawings.find((d) => d.body === body);
   if (!draw || insideDraw(draw, to.x, to.y, 0)) return false;
   const base = anchorBaseAt(to.x, to.y, body);
-  if (!base) return false;
+  if (!base || (base !== ground && base.isDynamic())) return false;
   return anchorBody(draw, base, to, grabPt);
 }
 
 function drawAnchorLinks() {
   for (const link of anchors) {
-    crayonPath([link.a, link.b], link.color, 0.1);
-    for (const p of [link.a, link.b]) {
+    const ends = anchorLinkEnds(link);
+    crayonPath([ends.a, ends.b], link.color, 0.1);
+    for (const p of [ends.a, ends.b]) {
       const s = worldToScreen(p.x, p.y);
       ctx.save();
       ctx.fillStyle = link.color;

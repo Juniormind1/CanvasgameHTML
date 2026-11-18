@@ -170,16 +170,64 @@ function dragGoalVelocity(dt) {
   return { x: vx, y: vy };
 }
 
+// Masse, Schwerpunkt und Trägheit der starren Gruppe um den Greifpunkt.
+// Nur der Körper in der Hand wäre an einer leichten Spitze viel zu leicht:
+// das schwere Gegenstück kreiselt dann um den Griff.
+function dragPivotAbout(body) {
+  const grab = body.getWorldPoint(V(playDrag.local.x, playDrag.local.y));
+  const group = weldComponent(body);
+  let mass = 0;
+  let cx = 0;
+  let cy = 0;
+  const parts = [];
+  for (const b of group) {
+    if (!b || !b.isDynamic()) continue;
+    const m = b.getMass();
+    if (!(m > 0)) continue;
+    const p = b.getPosition();
+    parts.push({ b, m, x: p.x, y: p.y });
+    mass += m;
+    cx += m * p.x;
+    cy += m * p.y;
+  }
+  if (!(mass > 0)) {
+    mass = Math.max(1e-6, body.getMass());
+    const com = body.getPosition();
+    const ox = com.x - grab.x;
+    const oy = com.y - grab.y;
+    return {
+      mass,
+      offx: ox,
+      offy: oy,
+      inertia: Math.max(1e-6, body.getInertia()) + mass * (ox * ox + oy * oy),
+    };
+  }
+  cx /= mass;
+  cy /= mass;
+  let inertia = 0;
+  for (const part of parts) {
+    const rx = part.x - grab.x;
+    const ry = part.y - grab.y;
+    inertia += part.b.getInertia() + part.m * (rx * rx + ry * ry);
+  }
+  return {
+    mass,
+    offx: cx - grab.x,
+    offy: cy - grab.y,
+    inertia: Math.max(1e-6, inertia),
+  };
+}
+
 function applyDragPivotImpulse(body, offx, offy, dt) {
   const goalV = dragGoalVelocity(dt);
   const lastV = playDrag.lastGoalV || { x: 0, y: 0 };
   const dvx = goalV.x - lastV.x;
   const dvy = goalV.y - lastV.y;
-  const mass = Math.max(1e-6, body.getMass());
-  const inertia = Math.max(1e-6, body.getInertia());
-  const pivotI = inertia + mass * (offx * offx + offy * offy);
-  const w = body.getAngularVelocity() + mass * (offy * dvx - offx * dvy) / pivotI;
+  const pivot = dragPivotAbout(body);
+  const w = body.getAngularVelocity() + pivot.mass * (pivot.offy * dvx - pivot.offx * dvy) / pivot.inertia;
   body.setAngularVelocity(w);
+  // Geschwindigkeit des gegriffenen Körpers weiter um seinen eigenen Schwerpunkt,
+  // damit der Greifpunkt selbst stehen bleibt.
   body.setLinearVelocity(V(-w * offy, w * offx));
   playDrag.lastGoalV = { x: goalV.x, y: goalV.y };
 }

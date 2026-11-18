@@ -439,14 +439,43 @@ function edgeBulge(a, b, stroke) {
   return best;
 }
 
+// Längere Seite des umschließenden Kastens. Darunter schrumpfen die
+// Zentimeter-Schwellen mit; ab einem Meter bleiben sie die bisherigen Werte.
+const SHAPE_TOL_SPAN = 1;
+
+function strokeSpan(pts) {
+  if (!pts || !pts.length) return SHAPE_TOL_SPAN;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of pts) {
+    if (!p) continue;
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  }
+  if (!isFinite(minX)) return SHAPE_TOL_SPAN;
+  return Math.max(maxX - minX, maxY - minY, 1e-3);
+}
+
 function edgesAreStraight(corners, stroke) {
   if (!corners || corners.length < 3) return false;
+  const ref = (stroke && stroke.length) ? stroke : corners;
+  const span = strokeSpan(ref);
+  // Unter einem Meter darf die Kante kürzer sein, im selben Anteil.
+  const minLen = span >= SHAPE_TOL_SPAN ? 0.12 : Math.max(0.04, span * 0.12);
+  // 16 cm wären bei einem kleinen Kreis mehr als die Bauchung einer Sehne
+  // (etwa 0,15 des Durchmessers). Der Boden sinkt mit dem Zug, bleibt aber
+  // unter dieser Bauchung, und 16 cm bleiben die Obergrenze.
+  const bulgeFloor = Math.min(0.16, span * 0.10);
   for (let i = 0; i < corners.length; i++) {
     const a = corners[i];
     const b = corners[(i + 1) % corners.length];
     const len = dist(a, b);
-    if (len < 0.12) return false;
-    if (edgeBulge(a, b, stroke) > Math.max(0.16, len * 0.16)) return false;
+    if (len < minLen) return false;
+    if (edgeBulge(a, b, stroke) > Math.max(bulgeFloor, len * 0.16)) return false;
   }
   return true;
 }
@@ -454,7 +483,9 @@ function edgesAreStraight(corners, stroke) {
 function cornersFromStroke(pts) {
   const ring = ensureCCW(dedupe(closedRing(pts) || pts));
   if (ring.length < 3) return [];
-  const eps = Math.max(tuneCode("simplify", 0.045), 0.05);
+  const absEps = Math.max(tuneCode("simplify", 0.045), 0.05);
+  const span = strokeSpan(ring);
+  const eps = span >= SHAPE_TOL_SPAN ? absEps : Math.max(0.01, absEps * span / SHAPE_TOL_SPAN);
   let simple = simplifyClosed(ring, eps);
   if (simple.length > 4) simple = pruneByTurn(simple, tuneCode("pruneTurn", 25));
   if (simple.length > 4 && simple.length <= 8) {
@@ -465,7 +496,8 @@ function cornersFromStroke(pts) {
   if ((simple.length < 3 || simple.length > 4) && (peaks.length === 3 || peaks.length === 4)) {
     simple = ensureCCW(peaks);
   } else if (simple.length > 4 && peaks.length >= 3 && peaks.length <= 4) {
-    const mixed = mergeCornerSets(simple, peaks, Math.max(0.18, ringLen(ring) * 0.04));
+    const mergeFloor = span >= SHAPE_TOL_SPAN ? 0.18 : Math.max(0.04, span * 0.10);
+    const mixed = mergeCornerSets(simple, peaks, Math.max(mergeFloor, ringLen(ring) * 0.04));
     const pruned = mixed.length > 4 ? pruneByTurn(mixed, tuneCode("pruneSoft", 42)) : mixed;
     if (pruned.length === 3 || pruned.length === 4) simple = ensureCCW(pruned);
   }
@@ -710,6 +742,9 @@ const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an k
 const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
 const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
 const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
+// Vereinfachen, Kanten-Bauchung und Eckenabstand sind unter SHAPE_TOL_SPAN
+// ein Anteil der Zuggröße, darüber die festen Zentimeter. Sonst wird ein
+// kleiner Kreis zum Viereck, weil seine Sehne weniger als 16 cm baucht.
 const CIRCLE_RIGHT_TOL = 10 * Math.PI / 180;  // Geodreieck: Toleranz für 90°
 const RIGHT_CORNER = 15 * Math.PI / 180;      // Ecke 75-105° wird exakt 90°, drehunabhängig
 const CIRCLE_MIN_R = 0.16;

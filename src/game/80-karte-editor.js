@@ -78,7 +78,7 @@ function renderHelp() {
     "Zwei Nägel in derselben Fläche machen sie starr.",
     "Vom Nagel weg ziehen: Seil, so lang wie der Strich, fest am Nagel. Endet der Zug auf einem anderen Nagel, hängt es dort; sonst bleibt das Ende frei. Eine Spitze unter 15°, die senkrecht trifft, zerschneidet es.",
     "Am Rand eines Gegenstands fasst du ihn und ziehst ihn. Lässt du ihn über einem Nagel los, heftet er sich dort drehbar fest; mehrere Nägel halten ihn gleichzeitig. In der Fläche wird gezeichnet; ein Klick oder ein kleiner Kreis setzt einen Nagel. Ein längerer Zug aus der Mitte greift nachträglich.",
-    "Ein kurzer gerader Strich von einem Gegenstand in einen anderen, der ihn berührt, macht beide zu einem Stück. Vom Boden aus wird das Stück fest. Rechtsklick auf den Strich löst.",
+    "Ein kurzer Strich von unten nach oben, vom tragenden Gegenstand in den, der auf ihm liegt, macht beide zu einem Stück. Den unteren ziehst du erst, wenn nichts mehr auf ihm ruht. Vom Boden aus wird das Stück fest. Rechtsklick auf den Strich löst.",
     "Nägel werden nicht verschoben. Einen selbst gesetzten Nagel zieht man mit Rechtsklick oder einem schnellen Doppeltipp auf ihn heraus.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",

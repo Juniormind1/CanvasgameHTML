@@ -487,30 +487,65 @@ function ropeTangentAtBead(draw, index, contact) {
   return { x: (bx - ax) / d, y: (by - ay) / d };
 }
 
-// Perlen stoßen nicht mit dem beweglichen Körper zusammen, an dem ihr eigenes
-// Seil festgenagelt ist. Sonst klemmen die 0,05-kg-Perlen unter einem schweren
-// Klotz: Er liegt auf ihnen statt auf dem Boden, die Kette zieht sie jeden
-// Schritt zurück, und der Klotz sammelt Geschwindigkeit, ohne sich zu bewegen.
+// Perlen liegen vor den Gegenständen, in denen die eigenen Endnägel stecken,
+// und stoßen nicht mit ihnen zusammen. Sonst hängt das Seil nicht von Nagel
+// zu Nagel durch, sondern bleibt an A und B hängen. Der Boden als Liegefläche
+// (breite, flache Platte) bleibt ein Hindernis. Levelpfosten sind eigene
+// Flächen desselben Bodenkörpers und zählen als Nagelwirt.
+function ropePinHosts(draw, body) {
+  if (!draw || !body) return false;
+  if (draw.pinA && draw.pinA.body === body) return true;
+  if (draw.pinB && draw.pinB.body === body) return true;
+  return false;
+}
+
 function ropeOwnEndContact(contact) {
-  const ba = contact.getFixtureA().getBody();
-  const bb = contact.getFixtureB().getBody();
+  const fa = contact.getFixtureA();
+  const fb = contact.getFixtureB();
+  const ba = fa.getBody();
+  const bb = fb.getBody();
   const ma = bodyMeta.get(ba);
   const mb = bodyMeta.get(bb);
   let beadMeta = null;
   let other = null;
+  let otherFix = null;
   if (ma && ma.kind === "rope" && !(mb && mb.kind === "rope")) {
     beadMeta = ma;
     other = bb;
+    otherFix = fb;
   } else if (mb && mb.kind === "rope" && !(ma && ma.kind === "rope")) {
     beadMeta = mb;
     other = ba;
+    otherFix = fa;
   }
-  if (!beadMeta || !other || !other.isDynamic()) return false;
+  if (!beadMeta || !other) return false;
   for (const d of drawings) {
     if (d.kind !== "rope" || d.ropeId !== beadMeta.ropeId) continue;
-    return !!((d.pinA && d.pinA.body === other) || (d.pinB && d.pinB.body === other));
+    if (other !== ground) return ropePinHosts(d, other);
+    const sid = otherFix && otherFix._solidId;
+    if (!sid) return false;
+    const skipA = d.pinA && d.pinA.body === ground && d.pinA.solidId === sid && !d.pinA.solidFloor;
+    const skipB = d.pinB && d.pinB.body === ground && d.pinB.solidId === sid && !d.pinB.solidFloor;
+    return !!(skipA || skipB);
   }
   return false;
+}
+
+// Körper, der über diesem Seil gezeichnet wurde, fällt dahinter durch.
+function ropeBirthBehindContact(contact) {
+  const ma = bodyMeta.get(contact.getFixtureA().getBody());
+  const mb = bodyMeta.get(contact.getFixtureB().getBody());
+  let ropeId = null;
+  let other = null;
+  if (ma && ma.kind === "rope" && !(mb && mb.kind === "rope")) {
+    ropeId = ma.ropeId;
+    other = mb;
+  } else if (mb && mb.kind === "rope" && !(ma && ma.kind === "rope")) {
+    ropeId = mb.ropeId;
+    other = ma;
+  }
+  if (ropeId == null || !other || !other.behindRopeIds) return false;
+  return other.behindRopeIds.indexOf(ropeId) >= 0;
 }
 
 function noteRopeCutContact(contact) {
@@ -630,6 +665,7 @@ function cutRopeAtBead(ev) {
   const rightPin = draw.pinB;
   draw.pinB = null;
   const rightId = ropeSeq++;
+  carryRopeBehind(draw.ropeId, rightId);
   for (const body of rightBodies) {
     const meta = bodyMeta.get(body);
     if (meta) meta.ropeId = rightId;

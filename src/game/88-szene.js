@@ -224,6 +224,7 @@ function exportBodyState(body, id, role) {
   if (meta.quadKind) rec.quadKind = meta.quadKind;
   if (meta.tag) rec.tag = meta.tag;
   if (meta.ropeId) rec.ropeId = meta.ropeId;
+  if (meta.behindRopeIds && meta.behindRopeIds.length) rec.behindRopeIds = meta.behindRopeIds.slice();
   return rec;
 }
 
@@ -422,17 +423,20 @@ function captureScene() {
     joints.push(rec);
   }
 
-  const anchorList = anchors.map((link) => ({
-    body: idOf.get(link.body),
-    base: idOf.has(link.base) ? idOf.get(link.base) : 0,
-    a: scenePt(link.a),
-    b: scenePt(link.b),
-    color: link.color || null,
-    savedColor: link.savedColor || null,
-    weld: !!link.weld,
-    freeze: !!link.freeze,
-    frozen: !!(link.weld && !link.joint),
-  })).filter((a) => a.body != null);
+  const anchorList = anchors.map((link) => {
+    const ends = anchorLinkEnds(link);
+    return {
+      body: idOf.get(link.body),
+      base: idOf.has(link.base) ? idOf.get(link.base) : 0,
+      a: scenePt(ends.a),
+      b: scenePt(ends.b),
+      color: link.color || null,
+      savedColor: link.savedColor || null,
+      weld: !!link.weld,
+      freeze: !!link.freeze,
+      frozen: !!(link.weld && !link.joint),
+    };
+  }).filter((a) => a.body != null);
 
   return {
     v: 1,
@@ -568,6 +572,7 @@ function restoreMeta(body, rec) {
   if (rec.quadKind) meta.quadKind = rec.quadKind;
   if (rec.tag) meta.tag = rec.tag;
   if (rec.ropeId) meta.ropeId = rec.ropeId;
+  if (rec.behindRopeIds && rec.behindRopeIds.length) meta.behindRopeIds = rec.behindRopeIds.slice();
   return track(body, meta);
 }
 
@@ -661,6 +666,11 @@ function applyScene(data, opt) {
       draw.r = rec.r || (rec.circles && rec.circles[0] && rec.circles[0].r);
     }
     drawings.push(draw);
+    // Kringel-Kugeln aus älteren Zetteln stehen ohne Bullet. Dieselbe
+    // Physik wie beim Zeichnen, sonst versinken sie im Seil.
+    if (body.isDynamic() && (drawKind === "blob" || drawKind === "roller" || drawKind === "ellipse")) {
+      body.setBullet(true);
+    }
     if (wantStatic && !body.isStatic()) {
       // Verankerung setzt gleich setStatic; hier nur merken, nicht vorab frieren,
       // außer der Körper ist ohne Anker als statisch gespeichert.
@@ -784,12 +794,17 @@ function applyScene(data, opt) {
       joint = makeAnchorWeld(base, body);
     }
     dragFresh.delete(body);
+    const a = scenePt(link.a);
+    const b = scenePt(link.b);
+    const locals = anchorLinkLocals(base, body, a, b);
     anchors.push({
       body,
       base,
       draw,
-      a: scenePt(link.a),
-      b: scenePt(link.b),
+      a,
+      b,
+      localA: locals.localA,
+      localB: locals.localB,
       color: link.color || draw.color,
       savedColor: link.savedColor || draw.color,
       weld,

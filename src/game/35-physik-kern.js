@@ -177,6 +177,7 @@ function hostAt(x, y) {
 
 function rememberPin(x, y, body, userMade) {
   const local = body.getLocalPoint(V(x, y));
+  const hostSolid = body === ground && typeof solidAt === "function" ? solidAt(x, y) : null;
   const pin = {
     x, y,
     local: { x: local.x, y: local.y },
@@ -185,6 +186,8 @@ function rememberPin(x, y, body, userMade) {
     joints: [],
     motor: 0,
     isMotor: false, // per Kringel zum Motornagel gemacht (Klick schaltet dann)
+    solidId: hostSolid ? hostSolid.solidId : 0,
+    solidFloor: !!(hostSolid && hostSolid.solidFloor),
   };
   pins.push(pin);
   return pin;
@@ -267,6 +270,7 @@ function spawnSolid(pts, opt) {
   const draw = { kind: "solid", body, meta, color: MAT.wood };
   drawings.push(draw);
   attachExistingPins(body, meta);
+  markBornBehindRopes(draw);
   noteShape(clean);
   return draw;
 }
@@ -349,15 +353,20 @@ function spawnWire(pts, opt) {
   const draw = { kind: "wire", body, meta, color: MAT.wire };
   drawings.push(draw);
   attachExistingPins(body, meta);
+  markBornBehindRopes(draw);
   noteShape(clean);
   return draw;
 }
 
 function spawnBlob(x, y, r) {
+  // Bullet wie die großen Kreise. Die Seilperlen sind selbst Bullets;
+  // ohne Bullet versinkt eine kleine Kugel in ihnen, und die Trennung
+  // schiebt sie durch das Seil.
   const body = world.createDynamicBody({
     position: V(x, y),
     linearDamping: 0.04,
     angularDamping: 0.04,
+    bullet: true,
   });
   body.createFixture(new planck.Circle(r), fixtureOpt({ density: 3.2, friction: 0.16, restitution: 0 }));
   const meta = track(body, {
@@ -368,6 +377,7 @@ function spawnBlob(x, y, r) {
   });
   const draw = { kind: "blob", body, meta, color: MAT.steel, x, y, r };
   drawings.push(draw);
+  markBornBehindRopes(draw);
   noteShape([{ x, y: y - r }, { x, y }]);
   return draw;
 }
@@ -419,6 +429,7 @@ function spawnEllipse(x, y, a, b, angle) {
   const draw = { kind: "ellipse", body, meta, color: MAT.steel, x, y, a, b, angle };
   drawings.push(draw);
   attachExistingPins(body, meta);
+  markBornBehindRopes(draw);
   noteShape([{ x: x - a, y }, { x, y: y - b }, { x: x + a, y }]);
   return draw;
 }
@@ -440,6 +451,7 @@ function spawnRoller(x, y, r) {
   const draw = { kind: "roller", body, meta, color: MAT.steel, x, y, r };
   drawings.push(draw);
   attachExistingPins(body, meta);
+  markBornBehindRopes(draw);
   noteShape([{ x: x - r, y }, { x, y: y - r }, { x: x + r, y }]);
   return draw;
 }
