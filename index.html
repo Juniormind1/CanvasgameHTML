@@ -3970,7 +3970,7 @@ function destroyDrawing(draw) {
     }
   } else if (draw.body) {
     const doomed = draw.body;
-    if (isAnchored(doomed)) releaseAnchor(doomed);
+    releaseBodyAnchors(doomed);
     for (const d of drawings) {
       if (d.kind === "rope" && ((d.pinA && d.pinA.body === doomed) || (d.pinB && d.pinB.body === doomed))) {
         if (d.pulley) dissolvePulley(d.pulley);
@@ -4080,7 +4080,7 @@ function eraseAt(x, y) {
         }
       }
     } else if (d.meta && containsMeta(d.meta, x, y)) {
-      if (d.body && isAnchored(d.body)) return false;
+      if (d.body && inAnchorLink(d.body)) return false;
       destroyDrawing(d);
       return true;
     }
@@ -4184,6 +4184,14 @@ function freeNailGroup(body) {
       if (seen.has(n.other)) continue;
       seen.add(n.other);
       group.push(n.other);
+    }
+    // Starr verbundene Gegenstände gehören zur selben Gruppe (55-verankern.js).
+    for (const other of weldNeighbors(group[i])) {
+      if (!other || other === ground) continue;
+      if (!other.isDynamic()) return null;
+      if (seen.has(other)) continue;
+      seen.add(other);
+      group.push(other);
     }
   }
   return group.length > 1 ? group : null;
@@ -4297,6 +4305,11 @@ function clampDragFollow(body) {
 function chaseDrag(dt) {
   if (!playDrag || !world || !playDrag.joint) return;
   const body = playDrag.body;
+  // Starr verbunden und irgendwo fest (Nagel, Boden): nicht teleportieren.
+  if (rigidDragHeld(body)) {
+    playDrag.joint.setTarget(V(playDrag.goal.x, playDrag.goal.y));
+    return;
+  }
   const nailed = constrainNailedGoal(body, playDrag.goal);
   if (nailed) {
     playDrag.joint.setTarget(V(nailed.x, nailed.y));
@@ -4307,6 +4320,7 @@ function chaseDrag(dt) {
   carryDragGroup(follow.clamped.x - pos0.x, follow.clamped.y - pos0.y);
   body.setTransform(V(follow.clamped.x, follow.clamped.y), body.getAngle());
   applyDragPivotImpulse(body, follow.offx, follow.offy, dt);
+  syncWeldGroup(body);
   body.setAwake(true);
   playDrag.joint.setTarget(V(follow.clamped.x - follow.offx, follow.clamped.y - follow.offy));
 }
@@ -4314,6 +4328,10 @@ function chaseDrag(dt) {
 function snapDrag(dt) {
   if (!playDrag || !playDrag.body) return;
   const body = playDrag.body;
+  if (rigidDragHeld(body)) {
+    if (playDrag.joint) playDrag.joint.setTarget(V(playDrag.goal.x, playDrag.goal.y));
+    return;
+  }
   const nailed = constrainNailedGoal(body, playDrag.goal);
   if (nailed) {
     const hinges = nailed.hinges;
@@ -4347,6 +4365,7 @@ function snapDrag(dt) {
   carryDragGroup(follow.clamped.x - pos0.x, follow.clamped.y - pos0.y);
   body.setTransform(V(follow.clamped.x, follow.clamped.y), body.getAngle());
   restDragAboutGrab(body, follow.offx, follow.offy);
+  syncWeldGroup(body);
   body.setAwake(true);
   playDrag.joint.setTarget(V(follow.clamped.x - follow.offx, follow.clamped.y - follow.offy));
   playDrag.prevGoal = { x: playDrag.goal.x, y: playDrag.goal.y };
@@ -4433,8 +4452,13 @@ function endDrag() {
   drag.body.setAwake(true);
   dragFresh.set(drag.body, 0);
   if (drag.group) {
+    const welded = weldComponent(drag.body);
     for (const b of drag.group) {
       if (b === drag.body || !bodyMeta.has(b)) continue;
+      if (welded.indexOf(b) >= 0) {
+        b.setLinearVelocity(V(0, 0));
+        b.setAngularVelocity(0);
+      }
       b.setAwake(true);
       dragFresh.set(b, 0);
     }
@@ -4751,14 +4775,14 @@ function restoreDragFree(drag) {
   body.setAwake(true);
   return true;
 }
-// Verankern: ein kurzer, fast gerader Zug vom Boden (oder einem verankerten
-// Körper) in einen festen Körper macht ihn statisch, als wäre er Teil des
-// Bodens. Umgekehrt geht es auch: Körper greifen und auf dem Boden loslassen.
-// Ketten beginnen immer am Boden. Trifft die Geste einen Körper, der nicht
-// verankert werden kann (er berührt die Basis nicht), entsteht kein Strich;
-// der Körper wird stattdessen gegriffen und folgt der Maus.
-// Rechtsklick auf den Verbindungsstrich löst den Körper und alles, was an
-// ihm hängt. Rechtsklick auf einen verankerten Körper selbst löscht ihn nicht.
+// Verbinden: ein kurzer, fast gerader Zug von einem festen Körper (oder vom
+// Boden) in einen anderen festen Körper, der ihn berührt. Zwei freie Körper
+// werden starr zu einem Gegenstand (WeldJoint). Boden oder ein schon fester
+// Körper macht die ganze Gruppe statisch. Umgekehrt: Körper greifen und auf
+// der Basis loslassen. Trifft die Geste einen Körper, der nicht verbunden
+// werden kann, entsteht kein Strich; er wird gegriffen und folgt der Maus.
+// Rechtsklick auf den Verbindungsstrich löst. Rechtsklick auf einen
+// verbundenen Körper löscht ihn nicht.
 const ANCHOR_MAX_LEN = 1.5;     // m, Weglänge des Zugs
 const ANCHOR_MIN_LEN = 0.15;    // m, Sehne; kürzer ist ein Klick
 const ANCHOR_STRAIGHT = 0.8;    // Sehne / Weglänge
@@ -4774,6 +4798,78 @@ function anchorOf(body) {
 
 function isAnchored(body) {
   return !!anchorOf(body);
+}
+
+// Ziel oder Basis einer Verbindung. Solche Körper löscht ein Rechtsklick nicht.
+function inAnchorLink(body) {
+  if (!body) return false;
+  return anchors.some((a) => a.body === body || (a.weld && a.base === body));
+}
+
+function weldNeighbors(body) {
+  const out = [];
+  if (!body) return out;
+  for (const link of anchors) {
+    if (!link.weld) continue;
+    if (link.body === body && link.base && link.base !== ground) out.push(link.base);
+    else if (link.base === body && link.body) out.push(link.body);
+  }
+  return out;
+}
+
+function weldComponent(body) {
+  const group = [];
+  const seen = new Set();
+  const queue = [body];
+  while (queue.length) {
+    const cur = queue.pop();
+    if (!cur || cur === ground || seen.has(cur)) continue;
+    seen.add(cur);
+    group.push(cur);
+    for (const other of weldNeighbors(cur)) queue.push(other);
+  }
+  return group;
+}
+
+// Frei gezogen wird nur eine lose Gruppe. Starr und irgendwo fest: Physik hält.
+function rigidDragHeld(body) {
+  if (!body || weldComponent(body).length < 2) return false;
+  return !freeNailGroup(body);
+}
+
+function syncWeldGroup(body) {
+  const group = weldComponent(body);
+  if (group.length < 2 || !body.isDynamic()) return;
+  const w = body.getAngularVelocity();
+  const v = body.getLinearVelocity();
+  const com = body.getPosition();
+  for (const b of group) {
+    if (b === body || !b.isDynamic()) continue;
+    const p = b.getPosition();
+    b.setAngularVelocity(w);
+    b.setLinearVelocity(V(v.x - w * (p.y - com.y), v.y + w * (p.x - com.x)));
+    b.setAwake(true);
+  }
+}
+
+function dropAnchorJoint(link) {
+  if (!link || !link.joint) return;
+  if (world && jointAlive(world, link.joint)) world.destroyJoint(link.joint);
+  link.joint = null;
+}
+
+function makeAnchorWeld(base, body) {
+  const wp = body.getPosition();
+  return world.createJoint(new planck.WeldJoint({
+    bodyA: base,
+    bodyB: body,
+    localAnchorA: base.getLocalPoint(wp),
+    localAnchorB: body.getLocalPoint(wp),
+    referenceAngle: body.getAngle() - base.getAngle(),
+    frequencyHz: 0,
+    dampingRatio: 0,
+    collideConnected: false,
+  }));
 }
 
 function anchorStrokeOk(trail) {
@@ -4804,17 +4900,31 @@ function anchorableAt(x, y) {
   return null;
 }
 
-// Boden oder verankerter Körper unter dem Punkt.
+// Fester Körper unter dem Punkt, sonst der Boden. Freie Körper zählen mit,
+// damit ein kurzer Strich zwei Gegenstände verbindet.
 function anchorBaseAt(x, y, except) {
+  // Strikt innen schlägt den Toleranzrand, damit der Nachbar an der Fuge
+  // den Startkörper nicht stiehlt. Der Boden schlägt den bloßen Rand.
+  let loose = null;
   for (let i = drawings.length - 1; i >= 0; i--) {
     const d = drawings[i];
-    if (!d.body || d.body === except || !isAnchored(d.body)) continue;
-    if (insideDraw(d, x, y, ANCHOR_BASE_TOL)) return d.body;
+    if (!d.body || d.body === except) continue;
+    if (d.kind !== "solid" || (d.meta && d.meta.round)) continue;
+    if (!d.body.isDynamic() && !isAnchored(d.body)) continue;
+    if (insideDraw(d, x, y, 0)) return d.body;
+    if (!loose && insideDraw(d, x, y, ANCHOR_BASE_TOL)) loose = d.body;
   }
   for (const g of geometry) {
     if (g.closed ? distToPoly(x, y, g.pts) <= ANCHOR_BASE_TOL : distToWire(x, y, g.pts) <= ANCHOR_BASE_TOL + 0.1) return ground;
   }
-  return null;
+  return loose;
+}
+
+function solidAnchorDraw(body) {
+  if (!body || body === ground) return null;
+  const d = drawings.find((draw) => draw.body === body);
+  if (!d || d.kind !== "solid" || (d.meta && d.meta.round)) return null;
+  return d;
 }
 
 function bodyGap(a, b) {
@@ -4841,13 +4951,24 @@ function bodyGap(a, b) {
   return best;
 }
 
-function anchorAllowed(draw, base) {
+function anchorAllowed(draw, base, groupTouch) {
   if (!world || world.isLocked() || !draw || !draw.body || !base) return false;
   const body = draw.body;
   if (draw.kind !== "solid" || (draw.meta && draw.meta.round)) return false;
   if (!body.isDynamic() || isAnchored(body) || base === body) return false;
-  if (base !== ground && !isAnchored(base)) return false;
-  if (bodyGap(body, base) > ANCHOR_TOUCH) return false;
+  const freeze = base === ground || !base.isDynamic();
+  if (freeze) {
+    if (base !== ground && !isAnchored(base)) return false;
+  } else if (!solidAnchorDraw(base)) {
+    return false;
+  }
+  if (!freeze && weldComponent(body).indexOf(base) >= 0) return false;
+  if (groupTouch) {
+    const group = weldComponent(body);
+    if (!group.some((b) => bodyGap(b, base) <= ANCHOR_TOUCH)) return false;
+  } else if (bodyGap(body, base) > ANCHOR_TOUCH) {
+    return false;
+  }
   return true;
 }
 
@@ -4880,35 +5001,113 @@ function anchorTintColor(base, at) {
   return groundColorAt(at.x, at.y);
 }
 
-function anchorBody(draw, base, from, to) {
-  if (!anchorAllowed(draw, base)) return false;
+function freezeWeldGroup(body) {
+  const group = weldComponent(body);
+  for (const link of anchors) {
+    if (!link.weld) continue;
+    if (group.indexOf(link.body) < 0 && group.indexOf(link.base) < 0) continue;
+    dropAnchorJoint(link);
+  }
+  for (const b of group) {
+    if (playDrag && playDrag.body === b) endDrag();
+    if (b.isDynamic()) b.setStatic();
+    dragFresh.delete(b);
+  }
+  return group;
+}
+
+function thawWeldGroup(body) {
+  const group = weldComponent(body);
+  for (const b of group) {
+    if (!bodyMeta.has(b)) continue;
+    const own = anchorOf(b);
+    if (own && own.freeze) continue;
+    if (!b.isDynamic()) {
+      b.setDynamic();
+      b.setAwake(true);
+    }
+  }
+  for (const link of anchors) {
+    if (!link.weld || link.joint) continue;
+    if (group.indexOf(link.body) < 0 || group.indexOf(link.base) < 0) continue;
+    if (!link.body.isDynamic() || !link.base.isDynamic()) continue;
+    link.joint = makeAnchorWeld(link.base, link.body);
+  }
+  for (let pass = 0; pass < 6; pass++) {
+    for (const link of anchors) {
+      if (!link.weld || group.indexOf(link.body) < 0) continue;
+      paintDraw(link.draw, anchorTintColor(link.base, link.a));
+    }
+  }
+}
+
+function anchorBody(draw, base, from, to, groupTouch) {
+  if (!anchorAllowed(draw, base, groupTouch)) return false;
   const body = draw.body;
   if (playDrag && playDrag.body === body) endDrag();
-  body.setStatic();
-  dragFresh.delete(body);
+  const freeze = base === ground || !base.isDynamic();
   const savedColor = draw.color;
+  let joint = null;
+  if (freeze) freezeWeldGroup(body);
+  else joint = makeAnchorWeld(base, body);
+  if (!freeze) dragFresh.delete(body);
   anchors.push({
     body, base, draw,
     a: { x: from.x, y: from.y },
     b: { x: to.x, y: to.y },
     color: savedColor,
     savedColor,
+    weld: !freeze,
+    freeze,
+    joint,
   });
-  paintDraw(draw, anchorTintColor(base, from));
+  const tint = anchorTintColor(base, from);
+  paintDraw(draw, tint);
+  if (freeze) {
+    for (const b of weldComponent(body)) {
+      const d = drawings.find((dr) => dr.body === b);
+      if (d) paintDraw(d, tint);
+    }
+  }
   return true;
+}
+
+// Die Gruppe berührt die feste Basis. Der Gelenk-Eintrag landet am Wurzelkörper,
+// der selbst noch keinen Anker hat.
+function freezeJoinedOn(member, base, from, to) {
+  if (!world || world.isLocked() || !member) return false;
+  if (base !== ground && (base.isDynamic() || !isAnchored(base))) return false;
+  const group = weldComponent(member);
+  if (!group.some((b) => bodyGap(b, base) <= ANCHOR_TOUCH)) return false;
+  const root = group.find((b) => !anchorOf(b));
+  const draw = root && solidAnchorDraw(root);
+  if (!draw) return false;
+  return anchorBody(draw, base, from, to, true);
 }
 
 function releaseAnchor(body) {
   const link = anchorOf(body);
   if (!link || !world || world.isLocked()) return false;
+  const wasFreeze = !!link.freeze;
+  dropAnchorJoint(link);
   anchors = anchors.filter((a) => a !== link);
   if (link.savedColor) paintDraw(link.draw, link.savedColor);
-  for (const dep of anchors.filter((a) => a.base === body)) releaseAnchor(dep.body);
-  if (bodyMeta.has(body)) {
+  if (wasFreeze) {
+    for (const dep of anchors.filter((a) => a.base === body && a.freeze)) releaseAnchor(dep.body);
+    if (bodyMeta.has(body)) thawWeldGroup(body);
+  } else if (bodyMeta.has(body) && !body.isDynamic()) {
     body.setDynamic();
     body.setAwake(true);
   }
   return true;
+}
+
+function releaseBodyAnchors(body) {
+  if (!body) return;
+  const pending = anchors.filter((a) => a.body === body || a.base === body);
+  for (const link of pending) {
+    if (anchors.indexOf(link) >= 0) releaseAnchor(link.body);
+  }
 }
 
 function anchorLinkAt(x, y) {
@@ -4947,6 +5146,14 @@ function tryAnchorGesture(trail) {
   const target = anchorableAt(to.x, to.y);
   if (!target || target.body === base) return false;
   if (isAnchored(target.body)) {
+    const link = anchorOf(target.body);
+    if (link && link.base === base) {
+      releaseAnchor(target.body);
+      return "anchor";
+    }
+    if (link && link.weld && (base === ground || !base.isDynamic())) {
+      return freezeJoinedOn(target.body, base, from, to) ? "anchor" : "miss";
+    }
     releaseAnchor(target.body);
     return "anchor";
   }
@@ -5627,6 +5834,15 @@ function drawPin(pin) {
     ctx.stroke();
     ctx.restore();
   }
+  if (!motor && !pin.isMotor) {
+    // Schlichter Nagel: kleiner, schwarz gefüllt. Kein Rad, kein Pfeil.
+    ctx.fillStyle = "#141414";
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.46, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
   ctx.strokeStyle = motor ? (motor > 0 ? "#1f7a4c" : "#8a3a22") : "#24324a";
   ctx.fillStyle = "#f4e6c6";
   ctx.lineWidth = motor ? 2.4 : 2;
@@ -5670,11 +5886,6 @@ function drawPin(pin) {
       ctx.moveTo(Math.cos(a) * r * 0.85, Math.sin(a) * r * 0.85);
       ctx.lineTo(-Math.cos(a) * r * 0.85, -Math.sin(a) * r * 0.85);
     }
-    ctx.stroke();
-  } else {
-    ctx.rotate(pinGlyphAngle(pin));
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 0.72, 0.4, Math.PI * 1.7);
     ctx.stroke();
   }
   ctx.restore();
@@ -7181,6 +7392,7 @@ function renderHelp() {
     "Zwei Nägel in derselben Fläche machen sie starr.",
     "Vom Nagel weg ziehen: Seil, so lang wie der Strich, fest am Nagel. Endet der Zug auf einem anderen Nagel, hängt es dort; sonst bleibt das Ende frei. Eine Spitze unter 15°, die senkrecht trifft, zerschneidet es.",
     "Am Rand eines Gegenstands fasst du ihn und ziehst ihn. Lässt du ihn über einem Nagel los, heftet er sich dort drehbar fest; mehrere Nägel halten ihn gleichzeitig. In der Fläche wird gezeichnet; ein Klick oder ein kleiner Kreis setzt einen Nagel. Ein längerer Zug aus der Mitte greift nachträglich.",
+    "Ein kurzer gerader Strich von einem Gegenstand in einen anderen, der ihn berührt, macht beide zu einem Stück. Vom Boden aus wird das Stück fest. Rechtsklick auf den Strich löst.",
     "Nägel werden nicht verschoben. Einen selbst gesetzten Nagel zieht man mit Rechtsklick oder einem schnellen Doppeltipp auf ihn heraus.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
     "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
@@ -8162,6 +8374,9 @@ function captureScene() {
     b: scenePt(link.b),
     color: link.color || null,
     savedColor: link.savedColor || null,
+    weld: !!link.weld,
+    freeze: !!link.freeze,
+    frozen: !!(link.weld && !link.joint),
   })).filter((a) => a.body != null);
 
   return {
@@ -8504,7 +8719,15 @@ function applyScene(data, opt) {
     const draw = drawingForBody(body);
     if (!draw) continue;
     if (playDrag && playDrag.body === body) endDrag();
-    if (body.isDynamic()) body.setStatic();
+    const weld = !!link.weld;
+    const freeze = !weld;
+    let joint = null;
+    if (freeze || link.frozen) {
+      if (body.isDynamic()) body.setStatic();
+      if (weld && base !== ground && base.isDynamic()) base.setStatic();
+    } else if (base !== ground && base.isDynamic() && body.isDynamic()) {
+      joint = makeAnchorWeld(base, body);
+    }
     dragFresh.delete(body);
     anchors.push({
       body,
@@ -8514,6 +8737,9 @@ function applyScene(data, opt) {
       b: scenePt(link.b),
       color: link.color || draw.color,
       savedColor: link.savedColor || draw.color,
+      weld,
+      freeze,
+      joint,
     });
     if (link.color) paintDraw(draw, link.color);
   }
@@ -9902,9 +10128,13 @@ function runTests() {
       const ancD = ancRect(29.1, ancC.body.getPosition().y + 0.45, 0.9, 0.6, "#ef8b2c");
       for (let i = 0; i < 90; i++) step(1 / 60);
       const ancTopC = ancC.body.getPosition().y + 0.4;
-      const ancFreeDirect = anchorBody(ancD, ancC.body, { x: 29.6, y: ancTopC - 0.1 }, { x: 29.6, y: ancTopC + 0.2 });
+      ancC.color = "#2244aa";
+      if (ancC.meta && ancC.meta.outline) ancC.meta.outline.color = "#2244aa";
       const ancFreeGesture = tryAnchorGesture([{ x: 29.6, y: ancTopC - 0.15 }, { x: 29.6, y: ancTopC + 0.25 }]);
-      check("chain between two free bodies is refused", !ancFreeDirect && !ancFreeGesture && ancD.body.isDynamic() && ancC.body.isDynamic());
+      const ancJoin = anchorOf(ancD.body);
+      check("short stroke between two touching bodies welds them", ancFreeGesture === "anchor" && !!ancJoin && ancJoin.weld && !!ancJoin.joint && ancJoin.base === ancC.body && ancD.body.isDynamic() && ancC.body.isDynamic() && ancD.color === "#2244aa");
+      releaseAnchor(ancD.body);
+      check("releasing the weld restores both bodies", !isAnchored(ancD.body) && ancD.color === MAT.wood && ancD.body.isDynamic() && ancC.body.isDynamic());
 
       const ancLong = finishPlayStroke([{ x: 22.5, y: 1.2 }, { x: 24, y: 1.45 }, { x: 25.4, y: 1.7 }]);
       check("long drag into a body still draws", ancLong && ancLong !== "anchor" && ancE.body.isDynamic());
@@ -10013,6 +10243,79 @@ function runTests() {
       const ancDepFreeScr = worldToScreen(ancDepFree.x - 0.3, ancDepFree.y);
       onPointerDown({ button: 2, clientX: ancDepFreeScr.x, clientY: ancDepFreeScr.y, pointerId: 45 });
       check("right click deletes the body after the link is gone", !drawings.includes(ancDep) && drawings.includes(ancKeep) && isAnchored(ancKeep.body));
+
+      // Zwei freie Körper: starr verbunden, als Ganzes gezogen, am Boden eingefroren, im Zettel erhalten.
+      buildLevel(LEVELS["ein-klotz"]);
+      const joinA = ancRect(8, 6, 1.4, 0.9, "#3c7fd6");
+      const joinB = ancRect(8.1, 6.92, 1.1, 0.7, "#d94b3a");
+      joinA.color = "#2244aa";
+      if (joinA.meta && joinA.meta.outline) joinA.meta.outline.color = "#2244aa";
+      const joinStroke = tryAnchorGesture([
+        { x: 8.5, y: 6.4 },
+        { x: 8.55, y: 6.85 },
+        { x: 8.6, y: 7.25 },
+      ]);
+      const joinLoc = joinA.body.getLocalPoint(joinB.body.getPosition());
+      const joinRel = joinB.body.getAngle() - joinA.body.getAngle();
+      joinA.body.setLinearVelocity(V(2.2, 0.6));
+      joinA.body.setAngularVelocity(0.7);
+      joinA.body.setAwake(true);
+      for (let i = 0; i < 36; i++) step(i % 3 === 0 ? 1 / 50 : i % 3 === 1 ? 1 / 70 : 1 / 60);
+      const joinLoc2 = joinA.body.getLocalPoint(joinB.body.getPosition());
+      const joinRel2 = joinB.body.getAngle() - joinA.body.getAngle();
+      const joinErr = Math.hypot(joinLoc2.x - joinLoc.x, joinLoc2.y - joinLoc.y);
+      lines.push("INFO weld drift " + joinErr.toFixed(4) + " ang " + Math.abs(joinRel2 - joinRel).toFixed(4));
+      check("welded bodies stay one object under uneven steps", joinStroke === "anchor" && anchorOf(joinB.body) && anchorOf(joinB.body).weld && joinB.color === "#2244aa" && joinErr < 0.03 && Math.abs(joinRel2 - joinRel) < 0.05 && joinA.body.isDynamic() && joinB.body.isDynamic());
+
+      joinA.body.setLinearVelocity(V(0, 0));
+      joinA.body.setAngularVelocity(0);
+      joinB.body.setLinearVelocity(V(0, 0));
+      joinB.body.setAngularVelocity(0);
+      const joinX0 = joinA.body.getPosition().x;
+      const joinBx0 = joinB.body.getPosition().x;
+      const joinGrab = beginDrag(joinX0, joinA.body.getPosition().y);
+      moveDrag(joinX0 + 1.6, joinA.body.getPosition().y + 0.3);
+      for (let i = 0; i < 24; i++) step(i % 2 ? 1 / 50 : 1 / 60);
+      const joinMoved = joinA.body.getPosition().x - joinX0;
+      const joinBMoved = joinB.body.getPosition().x - joinBx0;
+      const joinLoc3 = joinA.body.getLocalPoint(joinB.body.getPosition());
+      const joinDragErr = Math.hypot(joinLoc3.x - joinLoc.x, joinLoc3.y - joinLoc.y);
+      endDrag();
+      check("dragging one welded body drags the other", !!joinGrab && !!freeNailGroup(joinA.body) && joinMoved > 0.8 && joinBMoved > 0.6 && joinDragErr < 0.05);
+
+      const joinN = drawings.length;
+      const joinRoot = joinA.body.getPosition();
+      const joinRootScr = worldToScreen(joinRoot.x, joinRoot.y);
+      onPointerDown({ button: 2, clientX: joinRootScr.x, clientY: joinRootScr.y, pointerId: 61 });
+      check("right click on a welded body does not delete it", drawings.length === joinN && drawings.includes(joinA) && inAnchorLink(joinA.body) && inAnchorLink(joinB.body));
+
+      const joinC = ancRect(16, 6, 1.2, 0.8, "#3c7fd6");
+      const joinD = ancRect(17.55, 6, 1.0, 0.7, "#d94b3a");
+      const joinMiss = tryAnchorGesture([{ x: 16.4, y: 6.35 }, { x: 16.9, y: 6.4 }, { x: 17.7, y: 6.32 }]);
+      check("short stroke between separated bodies does not join them", joinMiss === "miss" && !anchorOf(joinD.body) && joinC.body.isDynamic() && joinD.body.isDynamic());
+
+      const joinE = ancRect(4, 1.45, 1.2, 0.8, "#3c7fd6");
+      const joinF = ancRect(5.18, 1.45, 1.0, 0.8, "#d94b3a");
+      joinE.color = "#2244aa";
+      if (joinE.meta && joinE.meta.outline) joinE.meta.outline.color = "#2244aa";
+      const joinSide = tryAnchorGesture([{ x: 4.4, y: 1.8 }, { x: 5.0, y: 1.85 }, { x: 5.6, y: 1.9 }]);
+      for (let i = 0; i < 50; i++) step(1 / 60);
+      const joinFp = joinF.body.getPosition();
+      const joinGround = tryAnchorGesture([{ x: joinFp.x, y: 1.2 }, { x: joinFp.x, y: joinFp.y }]);
+      check("anchoring one piece of a joined object freezes the whole object", joinSide === "anchor" && joinGround === "anchor" && joinE.body.isStatic() && joinF.body.isStatic() && anchorOf(joinE.body) && anchorOf(joinE.body).freeze && anchorOf(joinE.body).base === ground && anchorOf(joinF.body).weld && !anchorOf(joinF.body).joint && joinE.color === "#3f8f55" && joinF.color === "#3f8f55");
+      releaseAnchor(joinE.body);
+      const joinStill = anchorOf(joinF.body);
+      check("releasing the ground link keeps the joined object in one piece", joinE.body.isDynamic() && joinF.body.isDynamic() && !!joinStill && joinStill.weld && !!joinStill.joint && joinE.color === "#2244aa" && joinF.color === "#2244aa");
+
+      const joinBefore = anchors.filter((a) => a.weld).length;
+      const joinText = encodeSceneTextSync(captureScene());
+      const joinLoad = loadSceneFromTextSync(joinText);
+      let joinJoints = 0;
+      for (let j = world.getJointList(); j; j = j.getNext()) {
+        if (String(jointTypeName(j)).indexOf("weld") >= 0) joinJoints++;
+      }
+      const joinBack = anchors.filter((a) => a.weld && a.joint && jointAlive(world, a.joint) && a.body.isDynamic() && a.base.isDynamic());
+      check("welded bodies survive scene export and import", !!(joinLoad && joinLoad.ok) && joinBack.length === joinBefore && joinJoints === joinBefore);
     }
 
     function circRing(cx, cy, rx, ry, n, wob1, wob2) {

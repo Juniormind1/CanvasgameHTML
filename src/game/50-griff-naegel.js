@@ -83,6 +83,14 @@ function freeNailGroup(body) {
       seen.add(n.other);
       group.push(n.other);
     }
+    // Starr verbundene Gegenstände gehören zur selben Gruppe (55-verankern.js).
+    for (const other of weldNeighbors(group[i])) {
+      if (!other || other === ground) continue;
+      if (!other.isDynamic()) return null;
+      if (seen.has(other)) continue;
+      seen.add(other);
+      group.push(other);
+    }
   }
   return group.length > 1 ? group : null;
 }
@@ -195,6 +203,11 @@ function clampDragFollow(body) {
 function chaseDrag(dt) {
   if (!playDrag || !world || !playDrag.joint) return;
   const body = playDrag.body;
+  // Starr verbunden und irgendwo fest (Nagel, Boden): nicht teleportieren.
+  if (rigidDragHeld(body)) {
+    playDrag.joint.setTarget(V(playDrag.goal.x, playDrag.goal.y));
+    return;
+  }
   const nailed = constrainNailedGoal(body, playDrag.goal);
   if (nailed) {
     playDrag.joint.setTarget(V(nailed.x, nailed.y));
@@ -205,6 +218,7 @@ function chaseDrag(dt) {
   carryDragGroup(follow.clamped.x - pos0.x, follow.clamped.y - pos0.y);
   body.setTransform(V(follow.clamped.x, follow.clamped.y), body.getAngle());
   applyDragPivotImpulse(body, follow.offx, follow.offy, dt);
+  syncWeldGroup(body);
   body.setAwake(true);
   playDrag.joint.setTarget(V(follow.clamped.x - follow.offx, follow.clamped.y - follow.offy));
 }
@@ -212,6 +226,10 @@ function chaseDrag(dt) {
 function snapDrag(dt) {
   if (!playDrag || !playDrag.body) return;
   const body = playDrag.body;
+  if (rigidDragHeld(body)) {
+    if (playDrag.joint) playDrag.joint.setTarget(V(playDrag.goal.x, playDrag.goal.y));
+    return;
+  }
   const nailed = constrainNailedGoal(body, playDrag.goal);
   if (nailed) {
     const hinges = nailed.hinges;
@@ -245,6 +263,7 @@ function snapDrag(dt) {
   carryDragGroup(follow.clamped.x - pos0.x, follow.clamped.y - pos0.y);
   body.setTransform(V(follow.clamped.x, follow.clamped.y), body.getAngle());
   restDragAboutGrab(body, follow.offx, follow.offy);
+  syncWeldGroup(body);
   body.setAwake(true);
   playDrag.joint.setTarget(V(follow.clamped.x - follow.offx, follow.clamped.y - follow.offy));
   playDrag.prevGoal = { x: playDrag.goal.x, y: playDrag.goal.y };
@@ -331,8 +350,13 @@ function endDrag() {
   drag.body.setAwake(true);
   dragFresh.set(drag.body, 0);
   if (drag.group) {
+    const welded = weldComponent(drag.body);
     for (const b of drag.group) {
       if (b === drag.body || !bodyMeta.has(b)) continue;
+      if (welded.indexOf(b) >= 0) {
+        b.setLinearVelocity(V(0, 0));
+        b.setAngularVelocity(0);
+      }
       b.setAwake(true);
       dragFresh.set(b, 0);
     }

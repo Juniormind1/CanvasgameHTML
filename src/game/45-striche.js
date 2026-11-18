@@ -180,7 +180,7 @@ function destroyDrawing(draw) {
     }
   } else if (draw.body) {
     const doomed = draw.body;
-    if (isAnchored(doomed)) releaseAnchor(doomed);
+    releaseBodyAnchors(doomed);
     for (const d of drawings) {
       if (d.kind === "rope" && ((d.pinA && d.pinA.body === doomed) || (d.pinB && d.pinB.body === doomed))) {
         if (d.pulley) dissolvePulley(d.pulley);
@@ -290,7 +290,7 @@ function eraseAt(x, y) {
         }
       }
     } else if (d.meta && containsMeta(d.meta, x, y)) {
-      if (d.body && isAnchored(d.body)) return false;
+      if (d.body && inAnchorLink(d.body)) return false;
       destroyDrawing(d);
       return true;
     }

@@ -429,6 +429,9 @@ function captureScene() {
     b: scenePt(link.b),
     color: link.color || null,
     savedColor: link.savedColor || null,
+    weld: !!link.weld,
+    freeze: !!link.freeze,
+    frozen: !!(link.weld && !link.joint),
   })).filter((a) => a.body != null);
 
   return {
@@ -771,7 +774,15 @@ function applyScene(data, opt) {
     const draw = drawingForBody(body);
     if (!draw) continue;
     if (playDrag && playDrag.body === body) endDrag();
-    if (body.isDynamic()) body.setStatic();
+    const weld = !!link.weld;
+    const freeze = !weld;
+    let joint = null;
+    if (freeze || link.frozen) {
+      if (body.isDynamic()) body.setStatic();
+      if (weld && base !== ground && base.isDynamic()) base.setStatic();
+    } else if (base !== ground && base.isDynamic() && body.isDynamic()) {
+      joint = makeAnchorWeld(base, body);
+    }
     dragFresh.delete(body);
     anchors.push({
       body,
@@ -781,6 +792,9 @@ function applyScene(data, opt) {
       b: scenePt(link.b),
       color: link.color || draw.color,
       savedColor: link.savedColor || draw.color,
+      weld,
+      freeze,
+      joint,
     });
     if (link.color) paintDraw(draw, link.color);
   }

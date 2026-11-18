@@ -957,9 +957,13 @@ function runTests() {
       const ancD = ancRect(29.1, ancC.body.getPosition().y + 0.45, 0.9, 0.6, "#ef8b2c");
       for (let i = 0; i < 90; i++) step(1 / 60);
       const ancTopC = ancC.body.getPosition().y + 0.4;
-      const ancFreeDirect = anchorBody(ancD, ancC.body, { x: 29.6, y: ancTopC - 0.1 }, { x: 29.6, y: ancTopC + 0.2 });
+      ancC.color = "#2244aa";
+      if (ancC.meta && ancC.meta.outline) ancC.meta.outline.color = "#2244aa";
       const ancFreeGesture = tryAnchorGesture([{ x: 29.6, y: ancTopC - 0.15 }, { x: 29.6, y: ancTopC + 0.25 }]);
-      check("chain between two free bodies is refused", !ancFreeDirect && !ancFreeGesture && ancD.body.isDynamic() && ancC.body.isDynamic());
+      const ancJoin = anchorOf(ancD.body);
+      check("short stroke between two touching bodies welds them", ancFreeGesture === "anchor" && !!ancJoin && ancJoin.weld && !!ancJoin.joint && ancJoin.base === ancC.body && ancD.body.isDynamic() && ancC.body.isDynamic() && ancD.color === "#2244aa");
+      releaseAnchor(ancD.body);
+      check("releasing the weld restores both bodies", !isAnchored(ancD.body) && ancD.color === MAT.wood && ancD.body.isDynamic() && ancC.body.isDynamic());
 
       const ancLong = finishPlayStroke([{ x: 22.5, y: 1.2 }, { x: 24, y: 1.45 }, { x: 25.4, y: 1.7 }]);
       check("long drag into a body still draws", ancLong && ancLong !== "anchor" && ancE.body.isDynamic());
@@ -1068,6 +1072,79 @@ function runTests() {
       const ancDepFreeScr = worldToScreen(ancDepFree.x - 0.3, ancDepFree.y);
       onPointerDown({ button: 2, clientX: ancDepFreeScr.x, clientY: ancDepFreeScr.y, pointerId: 45 });
       check("right click deletes the body after the link is gone", !drawings.includes(ancDep) && drawings.includes(ancKeep) && isAnchored(ancKeep.body));
+
+      // Zwei freie Körper: starr verbunden, als Ganzes gezogen, am Boden eingefroren, im Zettel erhalten.
+      buildLevel(LEVELS["ein-klotz"]);
+      const joinA = ancRect(8, 6, 1.4, 0.9, "#3c7fd6");
+      const joinB = ancRect(8.1, 6.92, 1.1, 0.7, "#d94b3a");
+      joinA.color = "#2244aa";
+      if (joinA.meta && joinA.meta.outline) joinA.meta.outline.color = "#2244aa";
+      const joinStroke = tryAnchorGesture([
+        { x: 8.5, y: 6.4 },
+        { x: 8.55, y: 6.85 },
+        { x: 8.6, y: 7.25 },
+      ]);
+      const joinLoc = joinA.body.getLocalPoint(joinB.body.getPosition());
+      const joinRel = joinB.body.getAngle() - joinA.body.getAngle();
+      joinA.body.setLinearVelocity(V(2.2, 0.6));
+      joinA.body.setAngularVelocity(0.7);
+      joinA.body.setAwake(true);
+      for (let i = 0; i < 36; i++) step(i % 3 === 0 ? 1 / 50 : i % 3 === 1 ? 1 / 70 : 1 / 60);
+      const joinLoc2 = joinA.body.getLocalPoint(joinB.body.getPosition());
+      const joinRel2 = joinB.body.getAngle() - joinA.body.getAngle();
+      const joinErr = Math.hypot(joinLoc2.x - joinLoc.x, joinLoc2.y - joinLoc.y);
+      lines.push("INFO weld drift " + joinErr.toFixed(4) + " ang " + Math.abs(joinRel2 - joinRel).toFixed(4));
+      check("welded bodies stay one object under uneven steps", joinStroke === "anchor" && anchorOf(joinB.body) && anchorOf(joinB.body).weld && joinB.color === "#2244aa" && joinErr < 0.03 && Math.abs(joinRel2 - joinRel) < 0.05 && joinA.body.isDynamic() && joinB.body.isDynamic());
+
+      joinA.body.setLinearVelocity(V(0, 0));
+      joinA.body.setAngularVelocity(0);
+      joinB.body.setLinearVelocity(V(0, 0));
+      joinB.body.setAngularVelocity(0);
+      const joinX0 = joinA.body.getPosition().x;
+      const joinBx0 = joinB.body.getPosition().x;
+      const joinGrab = beginDrag(joinX0, joinA.body.getPosition().y);
+      moveDrag(joinX0 + 1.6, joinA.body.getPosition().y + 0.3);
+      for (let i = 0; i < 24; i++) step(i % 2 ? 1 / 50 : 1 / 60);
+      const joinMoved = joinA.body.getPosition().x - joinX0;
+      const joinBMoved = joinB.body.getPosition().x - joinBx0;
+      const joinLoc3 = joinA.body.getLocalPoint(joinB.body.getPosition());
+      const joinDragErr = Math.hypot(joinLoc3.x - joinLoc.x, joinLoc3.y - joinLoc.y);
+      endDrag();
+      check("dragging one welded body drags the other", !!joinGrab && !!freeNailGroup(joinA.body) && joinMoved > 0.8 && joinBMoved > 0.6 && joinDragErr < 0.05);
+
+      const joinN = drawings.length;
+      const joinRoot = joinA.body.getPosition();
+      const joinRootScr = worldToScreen(joinRoot.x, joinRoot.y);
+      onPointerDown({ button: 2, clientX: joinRootScr.x, clientY: joinRootScr.y, pointerId: 61 });
+      check("right click on a welded body does not delete it", drawings.length === joinN && drawings.includes(joinA) && inAnchorLink(joinA.body) && inAnchorLink(joinB.body));
+
+      const joinC = ancRect(16, 6, 1.2, 0.8, "#3c7fd6");
+      const joinD = ancRect(17.55, 6, 1.0, 0.7, "#d94b3a");
+      const joinMiss = tryAnchorGesture([{ x: 16.4, y: 6.35 }, { x: 16.9, y: 6.4 }, { x: 17.7, y: 6.32 }]);
+      check("short stroke between separated bodies does not join them", joinMiss === "miss" && !anchorOf(joinD.body) && joinC.body.isDynamic() && joinD.body.isDynamic());
+
+      const joinE = ancRect(4, 1.45, 1.2, 0.8, "#3c7fd6");
+      const joinF = ancRect(5.18, 1.45, 1.0, 0.8, "#d94b3a");
+      joinE.color = "#2244aa";
+      if (joinE.meta && joinE.meta.outline) joinE.meta.outline.color = "#2244aa";
+      const joinSide = tryAnchorGesture([{ x: 4.4, y: 1.8 }, { x: 5.0, y: 1.85 }, { x: 5.6, y: 1.9 }]);
+      for (let i = 0; i < 50; i++) step(1 / 60);
+      const joinFp = joinF.body.getPosition();
+      const joinGround = tryAnchorGesture([{ x: joinFp.x, y: 1.2 }, { x: joinFp.x, y: joinFp.y }]);
+      check("anchoring one piece of a joined object freezes the whole object", joinSide === "anchor" && joinGround === "anchor" && joinE.body.isStatic() && joinF.body.isStatic() && anchorOf(joinE.body) && anchorOf(joinE.body).freeze && anchorOf(joinE.body).base === ground && anchorOf(joinF.body).weld && !anchorOf(joinF.body).joint && joinE.color === "#3f8f55" && joinF.color === "#3f8f55");
+      releaseAnchor(joinE.body);
+      const joinStill = anchorOf(joinF.body);
+      check("releasing the ground link keeps the joined object in one piece", joinE.body.isDynamic() && joinF.body.isDynamic() && !!joinStill && joinStill.weld && !!joinStill.joint && joinE.color === "#2244aa" && joinF.color === "#2244aa");
+
+      const joinBefore = anchors.filter((a) => a.weld).length;
+      const joinText = encodeSceneTextSync(captureScene());
+      const joinLoad = loadSceneFromTextSync(joinText);
+      let joinJoints = 0;
+      for (let j = world.getJointList(); j; j = j.getNext()) {
+        if (String(jointTypeName(j)).indexOf("weld") >= 0) joinJoints++;
+      }
+      const joinBack = anchors.filter((a) => a.weld && a.joint && jointAlive(world, a.joint) && a.body.isDynamic() && a.base.isDynamic());
+      check("welded bodies survive scene export and import", !!(joinLoad && joinLoad.ok) && joinBack.length === joinBefore && joinJoints === joinBefore);
     }
 
     function circRing(cx, cy, rx, ry, n, wob1, wob2) {

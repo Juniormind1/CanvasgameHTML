@@ -335,6 +335,15 @@ function drawPin(pin) {
     ctx.stroke();
     ctx.restore();
   }
+  if (!motor && !pin.isMotor) {
+    // Schlichter Nagel: kleiner, schwarz gefüllt. Kein Rad, kein Pfeil.
+    ctx.fillStyle = "#141414";
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.46, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
   ctx.strokeStyle = motor ? (motor > 0 ? "#1f7a4c" : "#8a3a22") : "#24324a";
   ctx.fillStyle = "#f4e6c6";
   ctx.lineWidth = motor ? 2.4 : 2;
@@ -378,11 +387,6 @@ function drawPin(pin) {
       ctx.moveTo(Math.cos(a) * r * 0.85, Math.sin(a) * r * 0.85);
       ctx.lineTo(-Math.cos(a) * r * 0.85, -Math.sin(a) * r * 0.85);
     }
-    ctx.stroke();
-  } else {
-    ctx.rotate(pinGlyphAngle(pin));
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 0.72, 0.4, Math.PI * 1.7);
     ctx.stroke();
   }
   ctx.restore();
