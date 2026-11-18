@@ -2141,6 +2141,18 @@ function runTests() {
       clickNail(nailPlain, 77 + k);
     }
     check("clicking a plain nail never makes it a motor", !nailPlain.isMotor && nailPlain.motor === 0 && pins.indexOf(nailPlain) >= 0);
+    const spinWas = simTime;
+    simTime = 4;
+    check("a plain nail mark stands still", pinGlyphAngle(nailPlain) === 0);
+    nailPlain.isMotor = true;
+    nailPlain.rollAngle = 0.4;
+    check("a stopped motor mark follows the rope", Math.abs(pinGlyphAngle(nailPlain) + 0.4) < 1e-9);
+    nailPlain.motor = 1;
+    check("a running motor mark turns with time", Math.abs(pinGlyphAngle(nailPlain) + simTime * NAIL_MOTOR_SPEED) < 1e-9);
+    nailPlain.motor = 0;
+    nailPlain.isMotor = false;
+    nailPlain.rollAngle = 0;
+    simTime = spinWas;
 
     function strokeFromTo(x0, y0, x1, y1, pointerId) {
       const a = worldToScreen(x0, y0);

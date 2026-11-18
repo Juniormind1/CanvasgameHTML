@@ -301,6 +301,15 @@ function drawStar(meta) {
   ctx.restore();
 }
 
+// Schlichter Nagel: 0. Laufender Motor: Pfeil dreht mit der Physik.
+// Stehender Motornagel: Speichen drehen nur mit dem Seil (rollAngle).
+function pinGlyphAngle(pin) {
+  const motor = pin.motor || 0;
+  if (motor) return -motor * simTime * NAIL_MOTOR_SPEED;
+  if (pin.isMotor) return -(pin.rollAngle || 0);
+  return 0;
+}
+
 function drawPin(pin) {
   const p = pinWorld(pin);
   const s = worldToScreen(p.x, p.y);
@@ -336,7 +345,7 @@ function drawPin(pin) {
   if (motor) {
     // Bildschirm-y zeigt nach unten: Motor +1 (links, gegen den Uhrzeigersinn
     // in der Welt) dreht auf dem Bildschirm mit negativem Canvas-Winkel.
-    ctx.rotate(-motor * simTime * NAIL_MOTOR_SPEED);
+    ctx.rotate(pinGlyphAngle(pin));
     const ar = r * 0.82;
     ctx.beginPath();
     ctx.arc(0, 0, ar, -0.95, 0.95);
@@ -361,7 +370,7 @@ function drawPin(pin) {
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.rotate(-(pin.rollAngle || 0));
+    ctx.rotate(pinGlyphAngle(pin));
     ctx.lineWidth = 1.6;
     ctx.beginPath();
     for (let k = 0; k < 3; k++) {
@@ -371,7 +380,7 @@ function drawPin(pin) {
     }
     ctx.stroke();
   } else {
-    ctx.rotate(simTime * 2);
+    ctx.rotate(pinGlyphAngle(pin));
     ctx.beginPath();
     ctx.arc(0, 0, r * 0.72, 0.4, Math.PI * 1.7);
     ctx.stroke();
