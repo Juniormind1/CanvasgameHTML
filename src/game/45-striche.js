@@ -152,7 +152,7 @@ function commitStrokeApply(drawnPts, rawInk) {
   if (!closed) {
     const a = nearestPin(pts[0].x, pts[0].y, 0.55) || nearestPin(ink[0].x, ink[0].y, 0.55);
     const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55) || nearestPin(ink[ink.length - 1].x, ink[ink.length - 1].y, 0.55);
-    if (a && b && a !== b) return spawnRope(a, b, ink);
+    if (a && b && a !== b) return spawnRopeVia(a, b, ink);
     // Zug, der auf einem Nagel beginnt: Seil, auch wenn das andere Ende frei bleibt.
     const fromNail = nearestPin(ink[0].x, ink[0].y, NAIL_HIT) || nearestPin(pts[0].x, pts[0].y, NAIL_HIT);
     if (fromNail) {
@@ -172,6 +172,7 @@ function commitStrokeApply(drawnPts, rawInk) {
 function destroyDrawing(draw) {
   if (!draw || !world) return;
   if (draw.kind === "rope") {
+    if (draw.pulley) dissolvePulley(draw.pulley);
     dropRopeChord(draw);
     for (const body of draw.bodies) {
       bodyMeta.delete(body);
@@ -181,7 +182,10 @@ function destroyDrawing(draw) {
     const doomed = draw.body;
     if (isAnchored(doomed)) releaseAnchor(doomed);
     for (const d of drawings) {
-      if (d.kind === "rope" && ((d.pinA && d.pinA.body === doomed) || (d.pinB && d.pinB.body === doomed))) dropRopeChord(d);
+      if (d.kind === "rope" && ((d.pinA && d.pinA.body === doomed) || (d.pinB && d.pinB.body === doomed))) {
+        if (d.pulley) dissolvePulley(d.pulley);
+        dropRopeChord(d);
+      }
     }
     pins = pins.filter((pin) => {
       if (pin.body !== doomed) return true;
@@ -198,6 +202,7 @@ function pullPin(pin) {
   if (!world || world.isLocked() || !pin || !pin.userMade) return false;
   const i = pins.indexOf(pin);
   if (i < 0) return false;
+  dissolvePulleysAt(pin);
   for (const j of pin.joints) {
     if (j) world.destroyJoint(j);
   }
@@ -266,6 +271,7 @@ function eraseAt(x, y) {
     if (!pin.userMade) continue;
     const p = pinWorld(pin);
     if (Math.hypot(p.x - x, p.y - y) < 0.4) {
+      dissolvePulleysAt(pin);
       for (const j of pin.joints) {
         if (j) world.destroyJoint(j);
       }

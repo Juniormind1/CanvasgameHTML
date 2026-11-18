@@ -198,7 +198,7 @@ function tightenRopeDraw(draw, passes) {
   }
   // Mit Sehne trägt der Löser die Last; die Perlen folgen dem Endkörper,
   // statt ihn ohne Rücksicht auf Kontakte zu verschieben.
-  const chordLive = !!draw.chordJoint;
+  const chordLive = !!draw.chordJoint || !!draw.pulley;
   function endMass(pin) {
     if (!pin) return -1;
     if (draw.fixedPins || chordLive) return 0;
@@ -420,7 +420,7 @@ function tightenRopes(list) {
   for (const draw of src) {
     if (draw && draw.kind === "rope") {
       tightenRopeDraw(draw);
-      limitRopeChord(draw);
+      if (!draw.pulley) limitRopeChord(draw);
       scaleRopeToRest(draw);
     }
   }
@@ -592,6 +592,7 @@ function ropeShouldCut(ev) {
 function cutRopeAtBead(ev) {
   const draw = ev.draw;
   if (!draw || !world) return false;
+  if (draw.pulley) dissolvePulley(draw.pulley);
   const bodies = draw.bodies;
   const i = ev.index;
   if (i < 0 || bodies.length < 3) return false;
@@ -815,8 +816,10 @@ function pinReelsRope(pin) {
 function reelRopes(dt) {
   if (!world || !(dt > 0)) return;
   const prm = winchParams();
+  pulleyPreStep(dt);
   for (const draw of drawings.slice()) {
     if (draw.kind !== "rope" || !draw.bodies || !draw.segJoints) continue;
+    if (draw.pulley) continue; // Umlenkung: Treibscheibe in pulleyPreStep
     if (draw.drawnLength == null) draw.drawnLength = draw.restLength;
     draw.winch = null;
     for (const end of ["A", "B"]) {

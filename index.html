@@ -1402,6 +1402,7 @@ const WINCH_SPOOL_R = 0.3;                    // m, wirksamer Spulenradius am Mo
 const WINCH_MIN_LEN = 0.3;                    // m, kürzer spult die Winde nicht
 const WINCH_MAX_FACTOR = 3;                   // höchstens so viel mal die gezeichnete Länge
 const WINCH_TORQUE = 150;                     // N·m, größter Zug = Moment / Spulenradius
+const NAIL_ROPE_FRICTION = 0.3;               // Reibwert Seil über schlichtem Nagel (Seilreibung e^(mu·Winkel))
 const TUNE_SPEC = [
   { group: "Kreis", key: "maxCv", label: "Radiusstreuung", min: 0.02, max: 0.30, step: 0.005, def: CIRCLE_MAX_CV, fmt: (v) => (v * 100).toFixed(1) + " %" },
   { group: "Kreis", key: "samples", label: "Abtastpunkte", min: 16, max: 128, step: 8, def: CIRCLE_SAMPLES, int: true },
@@ -1438,6 +1439,7 @@ const TUNE_SPEC = [
   { group: "Seilwinde", key: "winchMin", label: "Min. Seillänge", min: 0.1, max: 2.0, step: 0.05, def: WINCH_MIN_LEN, fmt: (v) => Number(v).toFixed(2) + " m" },
   { group: "Seilwinde", key: "winchMaxFactor", label: "Max. Länge", min: 1, max: 6, step: 0.25, def: WINCH_MAX_FACTOR, fmt: (v) => Number(v).toFixed(2) + " × gezeichnet" },
   { group: "Seilwinde", key: "winchTorque", label: "Windenmoment", min: 10, max: 2000, step: 10, def: WINCH_TORQUE, fmt: (v) => Number(v).toFixed(0) + " N·m" },
+  { group: "Seilwinde", key: "nailFriction", label: "Nagelreibung", min: 0, max: 1.5, step: 0.05, def: NAIL_ROPE_FRICTION, fmt: (v) => "μ " + Number(v).toFixed(2) + " (×" + Math.exp(Number(v) * Math.PI).toFixed(2) + " bei 180°)" },
   { group: "Griff", key: "dragFreq", label: "Griff-Steifigkeit", min: 1, max: 12, step: 0.5, def: DRAG_FREQ, fmt: (v) => Number(v).toFixed(1) + " Hz" },
   { group: "Griff", key: "dragDamp", label: "Griff-Dämpfung", min: 0.2, max: 1.5, step: 0.05, def: DRAG_DAMPING, fmt: (v) => Number(v).toFixed(2) },
   { group: "Griff", key: "dragForceG", label: "Max. Kraft / Gewicht", min: 2, max: 20, step: 0.5, def: DRAG_FORCE_G, fmt: (v) => Number(v).toFixed(1) + " × mg" },
@@ -2710,7 +2712,7 @@ function tightenRopeDraw(draw, passes) {
   }
   // Mit Sehne trägt der Löser die Last; die Perlen folgen dem Endkörper,
   // statt ihn ohne Rücksicht auf Kontakte zu verschieben.
-  const chordLive = !!draw.chordJoint;
+  const chordLive = !!draw.chordJoint || !!draw.pulley;
   function endMass(pin) {
     if (!pin) return -1;
     if (draw.fixedPins || chordLive) return 0;
@@ -2932,7 +2934,7 @@ function tightenRopes(list) {
   for (const draw of src) {
     if (draw && draw.kind === "rope") {
       tightenRopeDraw(draw);
-      limitRopeChord(draw);
+      if (!draw.pulley) limitRopeChord(draw);
       scaleRopeToRest(draw);
     }
   }
@@ -3104,6 +3106,7 @@ function ropeShouldCut(ev) {
 function cutRopeAtBead(ev) {
   const draw = ev.draw;
   if (!draw || !world) return false;
+  if (draw.pulley) dissolvePulley(draw.pulley);
   const bodies = draw.bodies;
   const i = ev.index;
   if (i < 0 || bodies.length < 3) return false;
@@ -3327,8 +3330,10 @@ function pinReelsRope(pin) {
 function reelRopes(dt) {
   if (!world || !(dt > 0)) return;
   const prm = winchParams();
+  pulleyPreStep(dt);
   for (const draw of drawings.slice()) {
     if (draw.kind !== "rope" || !draw.bodies || !draw.segJoints) continue;
+    if (draw.pulley) continue; // Umlenkung: Treibscheibe in pulleyPreStep
     if (draw.drawnLength == null) draw.drawnLength = draw.restLength;
     draw.winch = null;
     for (const end of ["A", "B"]) {
@@ -3349,6 +3354,438 @@ function reelRopes(dt) {
       draw.winch = { state, tension, pin };
       if (state === "in" || state === "out") reelRopeEnd(draw, end, want);
     }
+  }
+}
+// ---------------------------------------------------------------------------
+// Umlenkrolle: Ein Seil, das von Nagel A über einen Nagel P zu Nagel B
+// gezeichnet wird, läuft über P. P muss fest sitzen (Boden, statischer oder
+// verankerter Körper). Das Seil besteht dann aus zwei Perlenketten (A–P und
+// P–B, nur fürs Bild und für Stöße) und einem eigenen Joint zwischen den
+// beiden Lastkörpern: lA + lB <= L (L = gezeichnete Seillänge), das Seil kann
+// also über P von einer Seite auf die andere rutschen.
+//
+// Reibung nach der Seilreibungsformel (Euler-Eytelwein): Rutschen beginnt erst,
+// wenn T_hoch / T_tief > e^(mu·Umschlingungswinkel).
+// - Schlichter Nagel: mu = Tune "Nagelreibung" (Standard 0,3; bei 180° also
+//   Faktor 2,57: 2 kg gegen 1 kg hält).
+// - Motornagel im Stillstand: mu = 0, verlustfreie Umlenkrolle.
+// - Laufender Motornagel: Treibscheibe. Das Seil läuft mit Windentempo von der
+//   einen auf die andere Seite (beide Seiten sind dann eigene Seile mit
+//   Länge s bzw. L - s); zu viel Zugunterschied bringt sie zum Stehen.
+const PULLEY_MARGIN = 0.04;   // m, Perlenketten etwas länger als die Seilstrecke
+
+function pulleyMu(pin) {
+  if (pin && pin.isMotor) return 0;
+  return Math.max(0, tuneCode("nailFriction", NAIL_ROPE_FRICTION));
+}
+
+function pulleyList() {
+  const out = [];
+  for (const d of drawings) {
+    if (d.kind === "rope" && d.pulley && out.indexOf(d.pulley) < 0) out.push(d.pulley);
+  }
+  return out;
+}
+
+// Nagel, über den ein Zug von a nach b läuft: fester Nagel nah am Zug,
+// nicht an dessen Enden. Liefert { pin, k } (k = nächster Zugpunkt) oder null.
+function ropePulleyPin(ink, a, b) {
+  if (!ink || ink.length < 5 || !a || !b) return null;
+  if (a.body === b.body) return null;
+  if (!a.body.isDynamic() && !b.body.isDynamic()) return null;
+  const cum = [0];
+  for (let i = 1; i < ink.length; i++) cum.push(cum[i - 1] + dist(ink[i - 1], ink[i]));
+  const total = cum[cum.length - 1];
+  let best = null;
+  for (const pin of pins) {
+    if (pin === a || pin === b || !pin.body || pin.body.isDynamic()) continue;
+    const p = pinWorld(pin);
+    for (let i = 1; i < ink.length - 1; i++) {
+      if (cum[i] < 0.25 || total - cum[i] < 0.25) continue;
+      const d = Math.hypot(ink[i].x - p.x, ink[i].y - p.y);
+      if (d < NAIL_HIT && (!best || d < best.d)) best = { pin, k: i, d };
+    }
+  }
+  return best;
+}
+
+function pulleyAnchor(body, local, c, a) {
+  const lc = body.m_sweep.localCenter;
+  const lx = local.x - lc.x;
+  const ly = local.y - lc.y;
+  const cs = Math.cos(a);
+  const sn = Math.sin(a);
+  const rx = cs * lx - sn * ly;
+  const ry = sn * lx + cs * ly;
+  return { rx, ry, px: c.x + rx, py: c.y + ry };
+}
+
+// Lage beider Seiten aus den Löserpositionen.
+function pulleyFrame(j, useSolver) {
+  const d = j.cg;
+  const A = j.m_bodyA;
+  const B = j.m_bodyB;
+  const P = pinWorld(d.pin);
+  const ca = useSolver ? A.c_position.c : A.getWorldCenter();
+  const aa = useSolver ? A.c_position.a : A.getAngle();
+  const cb = useSolver ? B.c_position.c : B.getWorldCenter();
+  const ab = useSolver ? B.c_position.a : B.getAngle();
+  const gA = pulleyAnchor(A, j.m_localAnchorA, ca, aa);
+  const gB = pulleyAnchor(B, j.m_localAnchorB, cb, ab);
+  let uAx = gA.px - P.x;
+  let uAy = gA.py - P.y;
+  let uBx = gB.px - P.x;
+  let uBy = gB.py - P.y;
+  const lA = Math.hypot(uAx, uAy);
+  const lB = Math.hypot(uBx, uBy);
+  if (lA > 1e-4) { uAx /= lA; uAy /= lA; } else { uAx = 0; uAy = 0; }
+  if (lB > 1e-4) { uBx /= lB; uBy /= lB; } else { uBx = 0; uBy = 0; }
+  const cA = gA.rx * uAy - gA.ry * uAx;
+  const cB = gB.rx * uBy - gB.ry * uBx;
+  return {
+    gA, gB, lA, lB, uAx, uAy, uBx, uBy,
+    mA: A.m_invMass + A.m_invI * cA * cA,
+    mB: B.m_invMass + B.m_invI * cB * cB,
+  };
+}
+
+// Impulse (Seilzug × dt) auf beide Seiten: zieht den Körper zum Nagel hin.
+function pulleyPush(j, f, impA, impB) {
+  const A = j.m_bodyA;
+  const B = j.m_bodyB;
+  if (impA) {
+    const px = -impA * f.uAx;
+    const py = -impA * f.uAy;
+    const v = A.c_velocity.v;
+    v.x += A.m_invMass * px;
+    v.y += A.m_invMass * py;
+    A.c_velocity.w += A.m_invI * (f.gA.rx * py - f.gA.ry * px);
+  }
+  if (impB) {
+    const px = -impB * f.uBx;
+    const py = -impB * f.uBy;
+    const v = B.c_velocity.v;
+    v.x += B.m_invMass * px;
+    v.y += B.m_invMass * py;
+    B.c_velocity.w += B.m_invI * (f.gB.rx * py - f.gB.ry * px);
+  }
+}
+
+// Geschwindigkeit, mit der sich die Seiten verlängern (>0 = weg vom Nagel).
+function pulleyRates(j, f) {
+  const A = j.m_bodyA;
+  const B = j.m_bodyB;
+  const va = A.c_velocity.v;
+  const wa = A.c_velocity.w;
+  const vb = B.c_velocity.v;
+  const wb = B.c_velocity.w;
+  const ra = f.uAx * (va.x - wa * f.gA.ry) + f.uAy * (va.y + wa * f.gA.rx);
+  const rb = f.uBx * (vb.x - wb * f.gB.ry) + f.uBy * (vb.y + wb * f.gB.rx);
+  return { ra, rb };
+}
+
+function pulleyInitVelocity(step) {
+  const d = this.cg;
+  const f = pulleyFrame(this, true);
+  d.f = f;
+  d.invDt = step.inv_dt;
+  const mode = d.drive ? "drive" : "slide";
+  if (mode !== d.solveMode) {
+    d.iA = 0;
+    d.iB = 0;
+    d.iN = 0;
+    d.iF = 0;
+    d.solveMode = mode;
+  }
+  // Umschlingungswinkel: 180° minus Winkel zwischen den beiden Seiten.
+  const cosAB = Math.max(-1, Math.min(1, f.uAx * f.uBx + f.uAy * f.uBy));
+  d.wrap = Math.PI - Math.acos(cosAB);
+  const E = Math.exp(d.mu * d.wrap);
+  d.k = (E - 1) / (E + 1);
+  if (step.warmStarting) {
+    const r = step.dtRatio;
+    d.iA *= r; d.iB *= r; d.iN *= r; d.iF *= r;
+    if (mode === "drive") pulleyPush(this, f, d.iA, d.iB);
+    else pulleyPush(this, f, d.iN + d.iF, d.iN - d.iF);
+  } else {
+    d.iA = 0; d.iB = 0; d.iN = 0; d.iF = 0;
+  }
+}
+
+function pulleySolveVelocity(step) {
+  const d = this.cg;
+  const f = d.f;
+  if (!f) return;
+  if (d.solveMode === "drive") {
+    // Zwei eigene Seile: lA <= s, lB <= L - s; s läuft mit d.sdot.
+    let r = pulleyRates(this, f);
+    if (f.mA > 0) {
+      let cd = r.ra - d.sdot;
+      const C = f.lA - d.s;
+      if (C < 0) cd += C * d.invDt;
+      const old = d.iA;
+      d.iA = Math.max(0, old + cd / f.mA);
+      pulleyPush(this, f, d.iA - old, 0);
+    }
+    r = pulleyRates(this, f);
+    if (f.mB > 0) {
+      let cd = r.rb + d.sdot;
+      const C = f.lB - (d.L - d.s);
+      if (C < 0) cd += C * d.invDt;
+      const old = d.iB;
+      d.iB = Math.max(0, old + cd / f.mB);
+      pulleyPush(this, f, 0, d.iB - old);
+    }
+    return;
+  }
+  const K = f.mA + f.mB;
+  if (!(K > 0)) return;
+  // Reibung zuerst (wie bei Kontakten), begrenzt durch den Seilzug.
+  if (d.k > 0) {
+    const r = pulleyRates(this, f);
+    const cf = r.ra - r.rb;
+    const old = d.iF;
+    const max = d.k * d.iN;
+    d.iF = Math.max(-max, Math.min(max, old + cf / K));
+    const dl = d.iF - old;
+    if (dl) pulleyPush(this, f, dl, -dl);
+  }
+  const r = pulleyRates(this, f);
+  let cn = r.ra + r.rb;
+  const C = f.lA + f.lB - d.L;
+  if (C < 0) cn += C * d.invDt;
+  const old = d.iN;
+  d.iN = Math.max(0, old + cn / K);
+  const dl = d.iN - old;
+  if (dl) pulleyPush(this, f, dl, dl);
+}
+
+function pulleyShift(body, g, ux, uy, imp) {
+  const px = -imp * ux;
+  const py = -imp * uy;
+  const c = body.c_position.c;
+  c.x += body.m_invMass * px;
+  c.y += body.m_invMass * py;
+  body.c_position.a += body.m_invI * (g.rx * py - g.ry * px);
+}
+
+function pulleySolvePosition(step) {
+  const d = this.cg;
+  const f = pulleyFrame(this, true);
+  const slop = 0.005;
+  const maxFix = 0.2;
+  if (d.solveMode === "drive") {
+    const eA = f.lA - d.s;
+    const eB = f.lB - (d.L - d.s);
+    if (eA > slop && f.mA > 0) pulleyShift(this.m_bodyA, f.gA, f.uAx, f.uAy, Math.min(eA - slop, maxFix) / f.mA);
+    if (eB > slop && f.mB > 0) pulleyShift(this.m_bodyB, f.gB, f.uBx, f.uBy, Math.min(eB - slop, maxFix) / f.mB);
+    return Math.max(eA, eB) < 3 * slop;
+  }
+  const C = f.lA + f.lB - d.L;
+  const K = f.mA + f.mB;
+  if (C <= slop || !(K > 0)) return true;
+  const imp = Math.min(C - slop, maxFix) / K;
+  pulleyShift(this.m_bodyA, f.gA, f.uAx, f.uAy, imp);
+  pulleyShift(this.m_bodyB, f.gB, f.uBx, f.uBy, imp);
+  return C < 3 * slop;
+}
+
+// Seilzug in N: die stärker gezogene Seite.
+function pulleyTensions(pul) {
+  const inv = pul.invDt || 60;
+  if (pul.solveMode === "drive") return { a: pul.iA * inv, b: pul.iB * inv };
+  return { a: (pul.iN + pul.iF) * inv, b: (pul.iN - pul.iF) * inv };
+}
+
+// Knick des Seils am Nagel: rechts herum (Uhrzeigersinn) = +1.
+function pulleyWrapSign(pinA, pin, pinB) {
+  const a = pinWorld(pinA);
+  const p = pinWorld(pin);
+  const b = pinWorld(pinB);
+  const turn = (p.x - a.x) * (b.y - p.y) - (p.y - a.y) * (b.x - p.x);
+  return turn > 0 ? -1 : 1;
+}
+
+function createPulleyJoint(targetWorld, pul) {
+  const P = pinWorld(pul.pin);
+  const a = pinWorld(pul.pinA);
+  const b = pinWorld(pul.pinB);
+  const j = new planck.PulleyJoint({ collideConnected: true }, pul.pinA.body, pul.pinB.body,
+    V(P.x, P.y), V(P.x, P.y), V(a.x, a.y), V(b.x, b.y), 1);
+  j.m_localAnchorA = V(pul.pinA.local.x, pul.pinA.local.y);
+  j.m_localAnchorB = V(pul.pinB.local.x, pul.pinB.local.y);
+  j.cg = pul;
+  j.initVelocityConstraints = pulleyInitVelocity;
+  j.solveVelocityConstraints = pulleySolveVelocity;
+  j.solvePositionConstraints = pulleySolvePosition;
+  j.getReactionForce = function (invDt) {
+    const t = pulleyTensions(pul);
+    return V(Math.max(t.a, t.b), 0);
+  };
+  j.getReactionTorque = function () { return 0; };
+  return targetWorld.createJoint(j);
+}
+
+// Baut das Seil A–P–B. sideA/sideB sind gewöhnliche Seilzeichnungen ohne
+// Sehne und ohne Spannjoint; die Last trägt der Umlenk-Joint.
+function makePulley(targetWorld, sideA, sideB, pin, length, opt) {
+  for (const side of [sideA, sideB]) {
+    if (side.chordJoint && jointAlive(targetWorld, side.chordJoint)) targetWorld.destroyJoint(side.chordJoint);
+    side.chordJoint = null;
+    if (side.spanJoint && jointAlive(targetWorld, side.spanJoint)) targetWorld.destroyJoint(side.spanJoint);
+    side.spanJoint = null;
+    // Die Perlen hängen nicht an den Nägeln, sie werden nur an sie gesetzt
+    // (tightenRopeDraw): sonst zöge die träge Kette mit an der Last.
+    for (const ej of side.endJoints || []) {
+      if (ej && jointAlive(targetWorld, ej)) targetWorld.destroyJoint(ej);
+    }
+    side.endJoints = [null, null];
+  }
+  const pul = {
+    pin,
+    pinA: sideA.pinA,
+    pinB: sideB.pinB,
+    sideA,
+    sideB,
+    L: length,
+    s: (opt && opt.s != null) ? opt.s : sideA.restLength,
+    wrapSign: (opt && opt.wrapSign) ? opt.wrapSign : pulleyWrapSign(sideA.pinA, pin, sideB.pinB),
+    drive: false,
+    sdot: 0,
+    mu: pulleyMu(pin),
+    iA: 0, iB: 0, iN: 0, iF: 0,
+    solveMode: null,
+    state: "slide",
+    joint: null,
+  };
+  sideA.pulley = pul;
+  sideB.pulley = pul;
+  pul.joint = createPulleyJoint(targetWorld, pul);
+  return pul;
+}
+
+function spawnPulleyRope(a, via, b, ink) {
+  if (!world || !via) return null;
+  const P = pinWorld(via.pin);
+  const k = via.k;
+  const ink1 = ink.slice(0, k).concat([{ x: P.x, y: P.y }]);
+  const ink2 = [{ x: P.x, y: P.y }].concat(ink.slice(k + 1));
+  if (ink1.length < 2 || ink2.length < 2) return null;
+  const sideA = buildRope(world, a, via.pin, ink1, track);
+  if (!sideA) return null;
+  const sideB = buildRope(world, via.pin, b, ink2, track);
+  if (!sideB) {
+    drawings.push(sideA);
+    destroyDrawing(sideA);
+    return null;
+  }
+  drawings.push(sideA, sideB);
+  const pul = makePulley(world, sideA, sideB, via.pin, sideA.restLength + sideB.restLength);
+  stats.shapes += 1;
+  stats.ropes += 1;
+  return pul ? sideA : null;
+}
+
+// Seil von a nach b: läuft es über einen festen Nagel, wird es eine Umlenkung.
+function spawnRopeVia(a, b, ink) {
+  const via = ropePulleyPin(ink, a, b);
+  if (via) {
+    const r = spawnPulleyRope(a, via, b, ink);
+    if (r) return r;
+  }
+  return spawnRope(a, b, ink);
+}
+
+// Umlenkung auflösen (Seil geschnitten, Nagel gezogen, Körper gelöscht): die
+// Seiten werden gewöhnliche Seile mit eigener Sehne.
+function dissolvePulley(pul) {
+  if (!pul || pul.dead) return;
+  pul.dead = true;
+  if (pul.joint && world && jointAlive(world, pul.joint)) world.destroyJoint(pul.joint);
+  pul.joint = null;
+  for (const side of [pul.sideA, pul.sideB]) {
+    if (!side || side.pulley !== pul) continue;
+    side.pulley = null;
+    if (!world || drawings.indexOf(side) < 0 || !side.bodies || side.bodies.length < 2) continue;
+    const ends = side.endJoints || [null, null];
+    if (!ends[0] && !ends[1]) side.endJoints = attachRopePins(world, side.pinA, side.pinB, side.bodies);
+    if (!side.chordJoint && side.pinA && side.pinB) {
+      side.chordJoint = createRopeChord(world, side.pinA, side.pinB, side.restLength);
+    }
+  }
+}
+
+function dissolvePulleysAt(pin) {
+  for (const pul of pulleyList()) {
+    if (pul.pin === pin || pul.pinA === pin || pul.pinB === pin) dissolvePulley(pul);
+  }
+}
+
+// Vor jedem world.step: Modus (Rolle/Treibscheibe), Seillage s, Perlenketten.
+function pulleyPreStep(dt) {
+  for (const pul of pulleyList()) {
+    if (!pul.joint || !jointAlive(world, pul.joint) || pins.indexOf(pul.pin) < 0) {
+      dissolvePulley(pul);
+      continue;
+    }
+    const f = pulleyFrame(pul.joint, false);
+    pul.mu = pulleyMu(pul.pin);
+    const slack = Math.max(0, pul.L - f.lA - f.lB);
+    // Umschlingungssinn (beim Zeichnen festgelegt): +1 = von A im
+    // Uhrzeigersinn über den Nagel nach B. Dreht die Rolle rechtsrum (Motor
+    // -1), läuft das Seil dann von A nach B: Seite A wird kürzer.
+    const side = pul.wrapSign || 1;
+    const sPrev = pul.s;
+    const motor = pul.pin.motor || 0;
+    if (motor) {
+      const prm = winchParams();
+      if (!pul.drive) {
+        pul.s = Math.max(0, Math.min(pul.L, f.lA + slack / 2));
+        pul.drive = true;
+      }
+      // sdot > 0: Seite A wird länger.
+      let sdot = side * motor * prm.speed;
+      const minLen = prm.minLen;
+      if (sdot < 0 && pul.s + sdot * dt < minLen) sdot = Math.min(0, (minLen - pul.s) / dt);
+      if (sdot > 0 && pul.s + sdot * dt > pul.L - minLen) sdot = Math.max(0, (pul.L - minLen - pul.s) / dt);
+      const t = pulleyTensions(pul);
+      const against = sdot < 0 ? t.a - t.b : t.b - t.a;
+      pul.state = Math.abs(sdot) < 1e-6 ? "limit" : (against > prm.maxPull ? "stall" : "drive");
+      if (pul.state !== "drive") sdot = 0;
+      pul.sdot = sdot;
+      pul.s += sdot * dt;
+    } else {
+      pul.drive = false;
+      pul.sdot = 0;
+      pul.state = "slide";
+      pul.s = Math.max(f.lA, Math.min(pul.L - f.lB, pul.s));
+      if (f.lA + f.lB >= pul.L) pul.s = f.lA;
+    }
+    // Rad der Umlenkrolle dreht mit dem Seil (Bildradius 0,16 m).
+    pul.pin.rollAngle = (pul.pin.rollAngle || 0) + (pul.s - sPrev) * side / 0.16;
+    // Perlenketten nur so lang, dass sie den Lastkörper nie halten.
+    const va = pul.pinA.body.isDynamic() ? velocityAt(pul.pinA.body, f.gA.px, f.gA.py) : { x: 0, y: 0 };
+    const vb = pul.pinB.body.isDynamic() ? velocityAt(pul.pinB.body, f.gB.px, f.gB.py) : { x: 0, y: 0 };
+    const m = PULLEY_MARGIN + 3 * dt * Math.max(Math.hypot(va.x, va.y), Math.hypot(vb.x, vb.y));
+    let wantA;
+    let wantB;
+    if (pul.drive) {
+      wantA = Math.max(pul.s, f.lA) + m;
+      wantB = Math.max(pul.L - pul.s, f.lB) + m;
+    } else {
+      const tot = pul.L + 2 * m;
+      const lo = f.lA + m;
+      const hi = tot - (f.lB + m);
+      if (lo > hi) {
+        wantA = lo;
+        wantB = f.lB + m;
+      } else {
+        wantA = Math.max(lo, Math.min(hi, pul.sideA.restLength));
+        wantB = tot - wantA;
+      }
+    }
+    if (Math.abs(wantA - pul.sideA.restLength) > 1e-4 && pul.sideA.bodies.length >= 2) reelRopeEnd(pul.sideA, "B", wantA - pul.sideA.restLength);
+    if (Math.abs(wantB - pul.sideB.restLength) > 1e-4 && pul.sideB.bodies.length >= 2) reelRopeEnd(pul.sideB, "A", wantB - pul.sideB.restLength);
   }
 }
 function resample(pts, spacing) {
@@ -3505,7 +3942,7 @@ function commitStrokeApply(drawnPts, rawInk) {
   if (!closed) {
     const a = nearestPin(pts[0].x, pts[0].y, 0.55) || nearestPin(ink[0].x, ink[0].y, 0.55);
     const b = nearestPin(pts[pts.length - 1].x, pts[pts.length - 1].y, 0.55) || nearestPin(ink[ink.length - 1].x, ink[ink.length - 1].y, 0.55);
-    if (a && b && a !== b) return spawnRope(a, b, ink);
+    if (a && b && a !== b) return spawnRopeVia(a, b, ink);
     // Zug, der auf einem Nagel beginnt: Seil, auch wenn das andere Ende frei bleibt.
     const fromNail = nearestPin(ink[0].x, ink[0].y, NAIL_HIT) || nearestPin(pts[0].x, pts[0].y, NAIL_HIT);
     if (fromNail) {
@@ -3525,6 +3962,7 @@ function commitStrokeApply(drawnPts, rawInk) {
 function destroyDrawing(draw) {
   if (!draw || !world) return;
   if (draw.kind === "rope") {
+    if (draw.pulley) dissolvePulley(draw.pulley);
     dropRopeChord(draw);
     for (const body of draw.bodies) {
       bodyMeta.delete(body);
@@ -3534,7 +3972,10 @@ function destroyDrawing(draw) {
     const doomed = draw.body;
     if (isAnchored(doomed)) releaseAnchor(doomed);
     for (const d of drawings) {
-      if (d.kind === "rope" && ((d.pinA && d.pinA.body === doomed) || (d.pinB && d.pinB.body === doomed))) dropRopeChord(d);
+      if (d.kind === "rope" && ((d.pinA && d.pinA.body === doomed) || (d.pinB && d.pinB.body === doomed))) {
+        if (d.pulley) dissolvePulley(d.pulley);
+        dropRopeChord(d);
+      }
     }
     pins = pins.filter((pin) => {
       if (pin.body !== doomed) return true;
@@ -3551,6 +3992,7 @@ function pullPin(pin) {
   if (!world || world.isLocked() || !pin || !pin.userMade) return false;
   const i = pins.indexOf(pin);
   if (i < 0) return false;
+  dissolvePulleysAt(pin);
   for (const j of pin.joints) {
     if (j) world.destroyJoint(j);
   }
@@ -3619,6 +4061,7 @@ function eraseAt(x, y) {
     if (!pin.userMade) continue;
     const p = pinWorld(pin);
     if (Math.hypot(p.x - x, p.y - y) < 0.4) {
+      dissolvePulleysAt(pin);
       for (const j of pin.joints) {
         if (j) world.destroyJoint(j);
       }
@@ -7650,8 +8093,22 @@ function captureScene() {
   });
 
   const ropes = [];
+  const pulleyIds = new Map();
   for (const d of drawings) {
     if (d.kind !== "rope") continue;
+    let pulleyRec = null;
+    const pul = d.pulley;
+    if (pul && pinIdOf.has(pul.pin)) {
+      if (!pulleyIds.has(pul)) pulleyIds.set(pul, pulleyIds.size + 1);
+      pulleyRec = {
+        group: pulleyIds.get(pul),
+        side: pul.sideA === d ? "A" : "B",
+        pin: pinIdOf.get(pul.pin),
+        length: pul.L,
+        s: pul.s,
+        wrap: pul.wrapSign || 1,
+      };
+    }
     const beads = (d.bodies || []).map((b) => idOf.get(b)).filter((id) => id != null);
     const segs = (d.segJoints || []).map((j) => ({
       length: j && j.length != null ? j.length : (j && j.dist && typeof j.dist.getLength === "function" ? j.dist.getLength() : ROPE_SPACING),
@@ -7666,6 +8123,7 @@ function captureScene() {
       pinA: d.pinA && pinIdOf.has(d.pinA) ? pinIdOf.get(d.pinA) : null,
       pinB: d.pinB && pinIdOf.has(d.pinB) ? pinIdOf.get(d.pinB) : null,
       fixedPins: !!d.fixedPins,
+      pulley: pulleyRec,
     });
   }
 
@@ -7974,6 +8432,7 @@ function applyScene(data, opt) {
     applyNailMotor(pin);
   }
 
+  const pulleyGroups = {};
   for (const rp of data.ropes || []) {
     const bodies = (rp.beads || []).map((id) => ids[id]).filter(Boolean);
     if (bodies.length < 2) continue;
@@ -8015,6 +8474,17 @@ function applyScene(data, opt) {
       pinB: pinB || null,
       fixedPins: !!rp.fixedPins,
     });
+    if (rp.pulley && rp.pulley.group != null) {
+      const g = pulleyGroups[rp.pulley.group] || (pulleyGroups[rp.pulley.group] = { rec: rp.pulley });
+      g[rp.pulley.side === "A" ? "A" : "B"] = drawings[drawings.length - 1];
+    }
+  }
+  // Umlenkungen wieder zusammensetzen (42-umlenkrolle.js).
+  for (const key of Object.keys(pulleyGroups)) {
+    const g = pulleyGroups[key];
+    const pin = pinById[g.rec.pin];
+    if (!g.A || !g.B || !pin || !g.A.pinA || !g.B.pinB || g.A.pinA.body === g.B.pinB.body) continue;
+    makePulley(world, g.A, g.B, pin, g.rec.length || (g.A.restLength + g.B.restLength), { s: g.rec.s, wrapSign: g.rec.wrap });
   }
 
   for (const link of data.anchors || []) {
@@ -11462,6 +11932,121 @@ function runTests() {
       const ckPinsK = pins.length;
       doodleAround(25, 0.9, 0.16, true, 113);
       check("a doodle away from nails still sets a nail", pins.length === ckPinsK + 1 && pins[pins.length - 1].motor === 0);
+    }
+
+    {
+      // Umlenkrolle: Seil von Last 1 über einen festen Nagel zu Last 2.
+      const puG = Math.abs(world.getGravity().y) || 10;
+      const puRig = (isMotor, mHeavy, mLight) => {
+        buildLevel(LEVELS["ein-klotz"]);
+        lastTap = 0;
+        const top = 11;
+        const nail = rememberPin(16, top, ground, true);
+        nail.isMotor = isMotor;
+        const hw = 0.25;
+        const heavy = makeBox({ x: 15.4, y: 6 - hw, hw, hh: hw, density: mHeavy / (4 * hw * hw) });
+        const light = makeBox({ x: 16.6, y: 6 - hw, hw, hh: hw, density: mLight / (4 * hw * hw) });
+        heavy.setLinearDamping(0);
+        light.setLinearDamping(0);
+        const ph = rememberPin(15.4, 6, heavy, true);
+        const pl = rememberPin(16.6, 6, light, true);
+        const ink = [];
+        for (let k = 0; k <= 10; k++) ink.push({ x: 15.4 + 0.6 * k / 10, y: 6 + (top - 6) * k / 10 });
+        for (let k = 1; k <= 10; k++) ink.push({ x: 16 + 0.6 * k / 10, y: top - (top - 6) * k / 10 });
+        const rope = spawnRopeVia(ph, pl, ink);
+        return { nail, heavy, light, rope, pul: rope && rope.pulley };
+      };
+      const puRun = (rig, sec) => {
+        const y0 = rig.heavy.getPosition().y;
+        const l0 = rig.light.getPosition().y;
+        const v0 = rig.heavy.getLinearVelocity().y;
+        let err = 0;
+        for (let i = 0; i < sec * 60; i++) {
+          step(1 / 60);
+          const f = pulleyFrame(rig.pul.joint, false);
+          err = Math.max(err, f.lA + f.lB - rig.pul.L);
+        }
+        const dy = y0 - rig.heavy.getPosition().y;
+        const up = rig.light.getPosition().y - l0;
+        return { dy, up, a: (v0 - rig.heavy.getLinearVelocity().y) / sec, err };
+      };
+      const puFree = puRig(true, 20, 10);
+      check("a rope drawn over a fixed nail runs over it as a pulley", !!puFree.pul && pulleyList().length === 1 && puFree.pul.pin === puFree.nail && !puFree.rope.chordJoint);
+      const puFreeR = puRun(puFree, 0.5);
+      lines.push("INFO pulley (motor nail, stop) 20 vs 10 kg: a = " + puFreeR.a.toFixed(2) + " m/s^2 (g/3 = " + (puG / 3).toFixed(2) + "), light +" + puFreeR.up.toFixed(3) + " m, overstretch " + puFreeR.err.toFixed(4) + " m");
+      check("over a stopped motor nail 2:1 accelerates at about g/3", Math.abs(puFreeR.a - puG / 3) < 0.12 * puG / 3 && puFreeR.up > 0.5 && puFreeR.err < 0.03);
+
+      const puNail = puRig(false, 20, 10);
+      for (let i = 0; i < 20; i++) step(1 / 60);
+      const puNailL0 = pulleyFrame(puNail.pul.joint, false).lA;
+      const puNailR = puRun(puNail, 0.5);
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      const puNailSlip = pulleyFrame(puNail.pul.joint, false).lA - puNailL0;
+      lines.push("INFO pulley plain nail 2:1 slip after 1.5 s: " + puNailSlip.toFixed(4) + " m");
+      lines.push("INFO pulley (plain nail, mu " + pulleyMu(puNail.nail).toFixed(2) + ") 20 vs 10 kg: heavy down " + puNailR.dy.toFixed(3) + " m in 0.5 s");
+      check("over a plain nail 2:1 is held by rope friction", Math.abs(puNailR.dy) < 0.03 && Math.abs(puNailSlip) < 0.03);
+
+      const puNail3 = puRig(false, 30, 10);
+      const puNail3R = puRun(puNail3, 0.5);
+      const puE = Math.exp(pulleyMu(puNail3.nail) * (puNail3.pul.wrap || Math.PI));
+      const puWant3 = puG * (3 - puE) / (3 + puE);
+      lines.push("INFO pulley (plain nail) 30 vs 10 kg: a = " + puNail3R.a.toFixed(2) + " m/s^2 (capstan " + puWant3.toFixed(2) + ", frictionless " + (puG / 2).toFixed(2) + ")");
+      check("over a plain nail 3:1 slides clearly slower than frictionless", puNail3R.a > 0.3 && puNail3R.a < 0.4 * puG / 2 && Math.abs(puNail3R.a - puWant3) < 0.35 * puWant3 + 0.3);
+
+      // Laufender Motornagel als Treibscheibe: das Seil läuft mit Windentempo.
+      const puDrive = puRig(true, 4, 2);
+      puDrive.nail.motor = -1;
+      applyNailMotor(puDrive.nail);
+      const puDf0 = pulleyFrame(puDrive.pul.joint, false);
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      const puDf1 = pulleyFrame(puDrive.pul.joint, false);
+      const puDh = puDf0.lA - puDf1.lA; // > 0: Seite der schweren Last kürzer
+      const puDl = puDf0.lB - puDf1.lB;
+      const puSpeed = winchParams().speed;
+      lines.push("INFO pulley drive (motor right): heavy side " + (-puDh).toFixed(3) + " m, light side " + (-puDl).toFixed(3) + " m in 1 s (winch speed " + puSpeed.toFixed(2) + " m/s), state " + puDrive.pul.state);
+      check("a running motor nail drives the rope over it at winch speed", puDrive.pul.state === "drive" && Math.abs(Math.abs(puDh) - puSpeed) < 0.25 * puSpeed && Math.abs(puDh + puDl) < 0.1);
+      puDrive.nail.motor = 0;
+      applyNailMotor(puDrive.nail);
+      const puStopL = pulleyFrame(puDrive.pul.joint, false).lA;
+      for (let i = 0; i < 20; i++) step(1 / 60);
+      const puAfter = pulleyFrame(puDrive.pul.joint, false).lA - puStopL;
+      check("stopping the motor turns it back into a free pulley", puDrive.pul.state === "slide" && puAfter > 0.1);
+
+      // Zettel: Motornagel und Umlenkung kommen wieder.
+      const puRig2 = puRig(true, 20, 10);
+      for (let i = 0; i < 20; i++) step(1 / 60);
+      const puText = encodeSceneTextSync(captureScene());
+      const puLoad = loadSceneFromTextSync(puText);
+      const puPul = pulleyList();
+      const puNailBack = puPul[0] && puPul[0].pin;
+      check("a Zettel keeps the pulley and the motor nail", puLoad && puLoad.ok !== false && puPul.length === 1 && puNailBack && puNailBack.isMotor && puNailBack.motor === 0 && Math.abs(puPul[0].L - puRig2.pul.L) < 1e-6);
+      let puBackErr = 0;
+      const puBackY = puPul[0] ? puPul[0].pinA.body.getPosition().y : 0;
+      for (let i = 0; i < 15; i++) {
+        step(1 / 60);
+        const f = pulleyFrame(puPul[0].joint, false);
+        puBackErr = Math.max(puBackErr, f.lA + f.lB - puPul[0].L);
+      }
+      check("a reloaded pulley still runs", puPul[0] && puBackErr < 0.03 && puPul[0].pinA.body.getPosition().y < puBackY - 0.1);
+
+      // Geste: Seil vom Nagel über einen Bodennagel zu einem Klotz.
+      buildLevel(LEVELS["ein-klotz"]);
+      lastTap = 0;
+      const pgNail = rememberPin(16, 10, ground, true);
+      const pgA = makeBox({ x: 12, y: 5, hw: 0.4, hh: 0.4, density: 2 });
+      const pgB = makeBox({ x: 20, y: 5, hw: 0.4, hh: 0.4, density: 2 });
+      const pgPa = rememberPin(12, 5.4, pgA, true);
+      const pgPb = rememberPin(20, 5.4, pgB, true);
+      const pgInk = [];
+      for (let k = 0; k <= 16; k++) pgInk.push({ x: 12 + 4 * k / 16, y: 5.4 + 4.6 * k / 16 });
+      for (let k = 1; k <= 16; k++) pgInk.push({ x: 16 + 4 * k / 16, y: 10 - 4.6 * k / 16 });
+      const pgMade = commitStroke(pgInk, MAT.hemp);
+      check("drawing a rope from nail over a ground nail to a nail makes a pulley", pulleyList().length === 1 && pulleyList()[0].pin === pgNail && pulleyList()[0].pinA === pgPa && pulleyList()[0].pinB === pgPb);
+      for (let i = 0; i < 30; i++) step(1 / 60);
+      const pgDead = pulleyList()[0];
+      if (pgDead) pullPin(pgNail);
+      for (let i = 0; i < 10; i++) step(1 / 60);
+      check("pulling the pulley nail turns the sides into plain ropes", pgDead && pgDead.dead && pulleyList().length === 0 && pgDead.sideA.chordJoint && pgDead.sideB.chordJoint && pgMade !== undefined);
     }
 
     mountTunePanel();

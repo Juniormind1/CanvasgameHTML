@@ -370,8 +370,22 @@ function captureScene() {
   });
 
   const ropes = [];
+  const pulleyIds = new Map();
   for (const d of drawings) {
     if (d.kind !== "rope") continue;
+    let pulleyRec = null;
+    const pul = d.pulley;
+    if (pul && pinIdOf.has(pul.pin)) {
+      if (!pulleyIds.has(pul)) pulleyIds.set(pul, pulleyIds.size + 1);
+      pulleyRec = {
+        group: pulleyIds.get(pul),
+        side: pul.sideA === d ? "A" : "B",
+        pin: pinIdOf.get(pul.pin),
+        length: pul.L,
+        s: pul.s,
+        wrap: pul.wrapSign || 1,
+      };
+    }
     const beads = (d.bodies || []).map((b) => idOf.get(b)).filter((id) => id != null);
     const segs = (d.segJoints || []).map((j) => ({
       length: j && j.length != null ? j.length : (j && j.dist && typeof j.dist.getLength === "function" ? j.dist.getLength() : ROPE_SPACING),
@@ -386,6 +400,7 @@ function captureScene() {
       pinA: d.pinA && pinIdOf.has(d.pinA) ? pinIdOf.get(d.pinA) : null,
       pinB: d.pinB && pinIdOf.has(d.pinB) ? pinIdOf.get(d.pinB) : null,
       fixedPins: !!d.fixedPins,
+      pulley: pulleyRec,
     });
   }
 
@@ -694,6 +709,7 @@ function applyScene(data, opt) {
     applyNailMotor(pin);
   }
 
+  const pulleyGroups = {};
   for (const rp of data.ropes || []) {
     const bodies = (rp.beads || []).map((id) => ids[id]).filter(Boolean);
     if (bodies.length < 2) continue;
@@ -735,6 +751,17 @@ function applyScene(data, opt) {
       pinB: pinB || null,
       fixedPins: !!rp.fixedPins,
     });
+    if (rp.pulley && rp.pulley.group != null) {
+      const g = pulleyGroups[rp.pulley.group] || (pulleyGroups[rp.pulley.group] = { rec: rp.pulley });
+      g[rp.pulley.side === "A" ? "A" : "B"] = drawings[drawings.length - 1];
+    }
+  }
+  // Umlenkungen wieder zusammensetzen (42-umlenkrolle.js).
+  for (const key of Object.keys(pulleyGroups)) {
+    const g = pulleyGroups[key];
+    const pin = pinById[g.rec.pin];
+    if (!g.A || !g.B || !pin || !g.A.pinA || !g.B.pinB || g.A.pinA.body === g.B.pinB.body) continue;
+    makePulley(world, g.A, g.B, pin, g.rec.length || (g.A.restLength + g.B.restLength), { s: g.rec.s, wrapSign: g.rec.wrap });
   }
 
   for (const link of data.anchors || []) {
