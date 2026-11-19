@@ -9,6 +9,9 @@ function renderMap() {
   }
   label("Sterne " + starCount() + " / " + ORDER.length, frame.margin, frame.starY, 18, "#8a5a20");
   if (mapDemo === "trebuchet") drawTrebuchet();
+  else if (mapDemo === "onager") drawOnager();
+  else if (mapDemo === "wave") drawWave();
+  else if (mapDemo === "double") drawDouble();
   else drawCradle();
   const owned = starCount();
   ISLANDS.forEach((island, i) => {
@@ -81,7 +84,7 @@ function renderHelp() {
     "Ein kurzer Strich von unten nach oben, vom tragenden Gegenstand in den, der auf ihm liegt, macht beide zu einem Stück. Den unteren ziehst du erst, wenn nichts mehr auf ihm ruht. Vom Boden aus wird das Stück fest. Rechtsklick auf den Strich löst.",
     "Nägel werden nicht verschoben. Einen selbst gesetzten Nagel zieht man mit Rechtsklick oder einem schnellen Doppeltipp auf ihn heraus.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
-    "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
+    "Auf der Karte: Pendel, Tribok, Onager, Pendelwelle oder Doppelpendel. Der Name wechselt. Beim Pendel eine äußere Kugel ziehen.",
     "Klick auf die Spielkugel: kleiner Schubs. Rechtsklick radiert das Deine; ein Doppeltipp radiert nur Nägel und Seile.",
     "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
     "Elegant: genau ein Gegenstand, ohne die Kugel anzuklicken. Nägel zählen nicht.",
@@ -103,6 +106,9 @@ function showMap() {
   confetti = [];
   ensureCradle();
   if (mapDemo === "trebuchet") ensureTrebuchet();
+  else if (mapDemo === "onager") ensureOnager();
+  else if (mapDemo === "wave") ensureWave();
+  else if (mapDemo === "double") ensureDouble();
 }
 
 function freshDoc() {

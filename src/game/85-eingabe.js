@@ -55,16 +55,42 @@ function onPointerDown(e) {
       pointer = { id: e.pointerId, ui: true };
       return;
     }
-    if (mapDemo === "trebuchet" && mapDemoBandHit(e.clientX, e.clientY)) {
-      onTrebuchetClick();
-      pointer = { id: e.pointerId, ui: true };
-      return;
+    if (mapDemoBandHit(e.clientX, e.clientY)) {
+      if (mapDemo === "trebuchet") {
+        onTrebuchetClick();
+        pointer = { id: e.pointerId, ui: true };
+        return;
+      }
+      if (mapDemo === "onager") {
+        onOnagerClick();
+        pointer = { id: e.pointerId, ui: true };
+        return;
+      }
+      if (mapDemo === "wave") {
+        onWaveClick();
+        pointer = { id: e.pointerId, ui: true };
+        return;
+      }
+      if (mapDemo === "double") {
+        const bob = doubleBobAt(e.clientX, e.clientY);
+        if (bob && beginDoubleDrag(bob)) {
+          doubleDrag.goal = screenToDouble(e.clientX, e.clientY);
+          pointer = { id: e.pointerId, double: true };
+          try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+          return;
+        }
+        onDoubleClick();
+        pointer = { id: e.pointerId, ui: true };
+        return;
+      }
     }
-    const rec = cradleBallAt(e.clientX, e.clientY);
-    if (rec && beginCradleDrag(rec)) {
-      cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
-      pointer = { id: e.pointerId, cradle: true };
-      canvas.setPointerCapture(e.pointerId);
+    if (mapDemo === "cradle") {
+      const rec = cradleBallAt(e.clientX, e.clientY);
+      if (rec && beginCradleDrag(rec)) {
+        cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
+        pointer = { id: e.pointerId, cradle: true };
+        canvas.setPointerCapture(e.pointerId);
+      }
     }
     return;
   }
@@ -224,6 +250,10 @@ function onPointerMove(e) {
     cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
     return;
   }
+  if (pointer.double) {
+    doubleDrag.goal = screenToDouble(e.clientX, e.clientY);
+    return;
+  }
   const w = screenToWorld(e.clientX, e.clientY);
   pointer.wx = w.x;
   pointer.wy = w.y;
@@ -276,6 +306,10 @@ function onPointerUp(e) {
   }
   if (current.cradle) {
     endCradleDrag();
+    return;
+  }
+  if (current.double) {
+    endDoubleDrag();
     return;
   }
   if (current.pan || current.ui || current.tap) return;

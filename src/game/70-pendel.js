@@ -115,7 +115,7 @@ function cradleLayout() {
   const span = cradleBalls[cradleBalls.length - 1].anchorX - cradleBalls[0].anchorX;
   const worldW = span + (r + len * 0.92) * 2;
   const worldH = len + r * 2 + 0.18;
-  const head = 36;
+  const head = mapDemoMetrics(band).head;
   const scale = Math.max(8, Math.min((band.w - 12) / worldW, (band.h - head - 10) / worldH));
   return {
     frame,
@@ -255,7 +255,7 @@ function drawCradle() {
   ctx.strokeStyle = "#5c4632";
   ctx.lineWidth = 2;
   ctx.stroke();
-  label("Zieh eine äußere Kugel zur Seite", band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
+  label("Zieh eine äußere Kugel zur Seite", band.x + 12, band.y + 3, 13, "#5c4632");
   const first = cradleBalls[0];
   const last = cradleBalls[cradleBalls.length - 1];
   const a0 = cradleToScreen(first.anchorX, first.anchorY, lay);

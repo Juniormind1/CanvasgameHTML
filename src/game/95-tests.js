@@ -1064,6 +1064,114 @@ function runTests() {
     check("trebuchet sling stays within 102 percent of its length", trebLive <= 1.02);
     check("trebuchet does not explode", trebOk);
 
+    setMapDemo("onager");
+    for (let onaI = 0; onaI < 20; onaI++) stepOnager(1 / 60);
+    check("onager stays cocked with the ball in the cup", !!onager && !onager.released && onager.inCup && Math.abs(onager.arm.getAngle() - ONAGER_COCKED) < 0.08);
+    releaseOnager();
+    for (let onaI = 0; onaI < 180; onaI++) stepOnager(1 / 60);
+    const onaKick = onager && onager.kick ? onager.kick : { vx: 0, vy: 0, ang: 0 };
+    const onaFly = onager ? onager.startX - onager.minX : 0;
+    lines.push("INFO onager fly " + onaFly.toFixed(2)
+      + " kick " + onaKick.vx.toFixed(2) + "," + onaKick.vy.toFixed(2)
+      + " ang " + onaKick.ang.toFixed(2) + " w " + (onaKick.w || 0).toFixed(2)
+      + " left " + !!(onager && onager.left)
+      + " arm " + (onager ? onager.arm.getAngle().toFixed(2) : "0"));
+    check("onager arm hits the crossbeam", !!onager && onager.arm.getAngle() > ONAGER_STOP - 0.08);
+    check("onager ball leaves the cup at the kick", !!onager && onager.left);
+    check("onager throws left and up", onaKick.vx < -8 && onaKick.vy > 2);
+    check("onager ball travels", onaFly > 12);
+    check("onager does not explode", !!onager && !onager.exploded && onagerFinite(onager.ball));
+    onOnagerClick();
+    check("onager click recocks", !!onager && !onager.released && onager.inCup && Math.abs(onager.arm.getAngle() - ONAGER_COCKED) < 0.12);
+
+    setMapDemo("wave");
+    const wvS = Math.sin(WAVE_AMP / 2);
+    const wvK = wvS * wvS;
+    const wvFactor = 1 + wvK / 4 + (9 / 64) * wvK * wvK;
+    const wvSteps = Math.round(WAVE_CYCLE * wvFactor * 60);
+    const wvHalf = Math.round(wvSteps / 2);
+    let wvSpread = 0;
+    let wvBest = 1e9;
+    for (let wvI = 0; wvI < wvSteps + 18; wvI++) {
+      stepWave(1 / 60);
+      if (!pendWave) break;
+      let wvMin = 1e9;
+      let wvMax = -1e9;
+      let wvErr = 0;
+      for (let wvB = 0; wvB < pendWave.bobs.length; wvB++) {
+        const wvAng = pendWave.bobs[wvB].body.getAngle();
+        if (wvAng < wvMin) wvMin = wvAng;
+        if (wvAng > wvMax) wvMax = wvAng;
+        wvErr = Math.max(wvErr, Math.abs(wvAng - WAVE_AMP));
+      }
+      if (wvI === wvHalf) wvSpread = wvMax - wvMin;
+      if (wvI >= wvSteps - 12) wvBest = Math.min(wvBest, wvErr);
+    }
+    lines.push("INFO wave spread " + wvSpread.toFixed(3) + " revive " + wvBest.toFixed(3)
+      + " steps " + wvSteps
+      + " L " + (pendWave ? pendWave.bobs[0].len.toFixed(3) + ".." + pendWave.shortest.toFixed(3) : "?"));
+    check("pendulum wave opens into a wave", wvSpread > 0.45);
+    check("pendulum wave returns together", wvBest < 0.22);
+    check("pendulum wave does not explode", !!pendWave && !pendWave.exploded);
+    for (let wvI = 0; wvI < 45; wvI++) stepWave(1 / 60);
+    const wvMid = pendWave.bobs[0].body.getAngle();
+    onWaveClick();
+    check("pendulum wave click resets", !!pendWave
+      && Math.abs(pendWave.bobs[0].body.getAngle() - WAVE_AMP) < 0.02
+      && Math.abs(wvMid - WAVE_AMP) > 0.08);
+
+    setMapDemo("double");
+    const dpTip0 = doubleBobPoint("lower");
+    const dpE0 = doubleEnergy();
+    let dpMoved = 0;
+    let dpMaxA = 0;
+    for (let dpI = 0; dpI < 180; dpI++) {
+      stepDouble(1 / 60);
+      const dpTip = doubleBobPoint("lower");
+      dpMoved = Math.max(dpMoved, Math.hypot(dpTip.x - dpTip0.x, dpTip.y - dpTip0.y));
+      dpMaxA = Math.max(dpMaxA, Math.abs(doublePend.lower.getAngle()));
+    }
+    const dpE1 = doubleEnergy();
+    const dpVend = doublePend.lower.getLinearVelocity();
+    const dpSpeed = Math.hypot(dpVend.x, dpVend.y);
+    lines.push("INFO double move " + dpMoved.toFixed(2) + " E " + dpE0.toFixed(2) + " -> " + dpE1.toFixed(2)
+      + " v " + dpSpeed.toFixed(2) + " maxA " + dpMaxA.toFixed(2)
+      + " trail " + (doublePend ? doublePend.trail.length : 0));
+    check("double pendulum swings", dpMoved > 0.6 && dpMaxA > 2.2);
+    check("double pendulum keeps moving", dpSpeed > 0.8);
+    // Hänge-Ruhe liegt bei etwa -40 J. Der Löser verliert an dieser Kette einige Joule.
+    check("double pendulum energy stays bounded", dpE1 < dpE0 + 6 && dpE1 > dpE0 - 22);
+    check("double pendulum does not explode", doubleFinite() && !!doublePend && !doublePend.exploded);
+    check("double pendulum draws a trail", !!doublePend && doublePend.trail.length > 20);
+    resetDouble();
+    for (let dpI = 0; dpI < 300; dpI++) stepDouble(1 / 60);
+    const dpBase = doubleBobPoint("lower");
+    resetDouble();
+    poseDouble(DP_A1 + 0.012, DP_A2);
+    for (let dpI = 0; dpI < 300; dpI++) stepDouble(1 / 60);
+    const dpNear = doubleBobPoint("lower");
+    const dpSplit = Math.hypot(dpNear.x - dpBase.x, dpNear.y - dpBase.y);
+    resetDouble();
+    for (let dpI = 0; dpI < 300; dpI++) stepDouble(1 / 60);
+    const dpAgain = doubleBobPoint("lower");
+    const dpSame = Math.hypot(dpAgain.x - dpBase.x, dpAgain.y - dpBase.y);
+    lines.push("INFO double split " + dpSplit.toFixed(3) + " same " + dpSame.toFixed(5));
+    check("double pendulum is chaotic", dpSplit > 0.2);
+    check("double pendulum repeats from the same start", dpSame < 0.02);
+    resetDouble();
+    check("double drag grabs the lower ball", beginDoubleDrag("lower"));
+    const dpFrom = doubleBobPoint("lower");
+    for (let dpI = 0; dpI < 40; dpI++) {
+      doubleDrag.goal = { x: dpFrom.x + 0.6, y: dpFrom.y + 0.2 };
+      stepDouble(1 / 60);
+    }
+    const dpPulled = doubleBobPoint("lower");
+    endDoubleDrag();
+    lines.push("INFO double drag " + Math.hypot(dpPulled.x - dpFrom.x, dpPulled.y - dpFrom.y).toFixed(3));
+    check("double drag moves the lower ball", Math.hypot(dpPulled.x - dpFrom.x, dpPulled.y - dpFrom.y) > 0.15);
+    check("double drag stays finite", doubleFinite());
+    setMapDemo("cradle");
+
     {
       // Verankern: kurzer gerader Zug von unten nach oben, Boden oder Auflage.
       buildLevel(LEVELS["ein-klotz"]);

@@ -29,10 +29,31 @@ const TREB_CAT_ROPE = 0x0004;
 const TREB_CAT_POUCH = 0x0008;
 const TREB_CAT_BALL = 0x0010;
 
+const MAP_DEMOS = [
+  { id: "cradle", name: "Pendel" },
+  { id: "trebuchet", name: "Tribok" },
+  { id: "onager", name: "Onager" },
+  { id: "wave", name: "Pendelwelle" },
+  { id: "double", name: "Doppelpendel" },
+];
+
 function setMapDemo(kind) {
-  mapDemo = kind === "trebuchet" ? "trebuchet" : "cradle";
+  const next = MAP_DEMOS.some((d) => d.id === kind) ? kind : "cradle";
+  if (next !== "cradle") endCradleDrag();
+  if (next !== "double") endDoubleDrag();
+  mapDemo = next;
   if (mapDemo === "trebuchet") ensureTrebuchet();
-  else endCradleDrag();
+  else if (mapDemo === "onager") ensureOnager();
+  else if (mapDemo === "wave") ensureWave();
+  else if (mapDemo === "double") ensureDouble();
+}
+
+function stepMapDemo(dt) {
+  if (mapDemo === "trebuchet") stepTrebuchet(dt);
+  else if (mapDemo === "onager") stepOnager(dt);
+  else if (mapDemo === "wave") stepWave(dt);
+  else if (mapDemo === "double") stepDouble(dt);
+  else stepCradle(dt);
 }
 
 function mapDemoBandHit(sx, sy) {
@@ -40,12 +61,44 @@ function mapDemoBandHit(sx, sy) {
   return sx >= band.x && sx <= band.x + band.w && sy >= band.y && sy <= band.y + band.h;
 }
 
+function mapDemoMetrics(band) {
+  const size = band.w < 430 ? 12 : 13;
+  const gap = 10;
+  const pad = 4;
+  const hintH = 16;
+  ctx.save();
+  ctx.font = size + "px 'Segoe Print', 'Comic Sans MS', cursive";
+  const widths = MAP_DEMOS.map((d) => ctx.measureText(d.name).width);
+  ctx.restore();
+  const maxW = Math.max(100, band.w - 12);
+  const rows = [];
+  let row = [];
+  let used = 0;
+  for (let i = 0; i < MAP_DEMOS.length; i++) {
+    const w = widths[i] + pad * 2;
+    const add = (row.length ? gap : 0) + w;
+    if (row.length && used + add > maxW) {
+      rows.push(row);
+      row = [];
+      used = 0;
+    }
+    const x0 = row.length ? used + gap : 0;
+    row.push({ i, x0, w });
+    used = x0 + w;
+  }
+  if (row.length) rows.push(row);
+  const rowH = size + 5;
+  const namesTop = 3 + hintH + 1;
+  const head = namesTop + rows.length * rowH + 4;
+  return { size, gap, pad, rows, rowH, head, namesTop };
+}
+
 function mapDemoToggleAt(sx, sy) {
-  const band = mapFrame().cradle;
-  if (sy < band.y || sy > band.y + 28 || sx < band.x + band.w - 160 || sx > band.x + band.w - 8) return null;
-  const mid = band.x + band.w - 84;
-  if (sx < mid) return "cradle";
-  return "trebuchet";
+  for (let i = mapDemoHits.length - 1; i >= 0; i--) {
+    const hit = mapDemoHits[i];
+    if (sx >= hit.x && sx <= hit.x + hit.w && sy >= hit.y && sy <= hit.y + hit.h) return hit.id;
+  }
+  return null;
 }
 
 function trebPin(body, lx, ly) {
@@ -625,7 +678,8 @@ function trebuchetLayout() {
   const band = frame.cradle;
   const worldW = TREB_VIEW_W;
   const worldH = TREB_VIEW_H;
-  const scale = Math.max(5, Math.min((band.w - 16) / worldW, (band.h - 36) / worldH));
+  const head = mapDemoMetrics(band).head;
+  const scale = Math.max(5, Math.min((band.w - 16) / worldW, (band.h - head - 8) / worldH));
   return {
     frame,
     band,
@@ -670,10 +724,36 @@ function trebBoxPts(body, hx, hy, ox, oy, ang) {
 }
 
 function drawMapDemoToggle(band) {
-  const x = band.x + band.w - 156;
-  const y = band.y + 5;
-  label("Pendel", x + 4, y, 14, mapDemo === "cradle" ? "#3a2a1c" : "#8a7b64");
-  label("Tribok", x + 78, y, 14, mapDemo === "trebuchet" ? "#3a2a1c" : "#8a7b64");
+  const metrics = mapDemoMetrics(band);
+  mapDemoHits = [];
+  metrics.rows.forEach((row, ri) => {
+    const y = band.y + metrics.namesTop + ri * metrics.rowH;
+    const last = row[row.length - 1];
+    let x = band.x + band.w - 8 - (last.x0 + last.w);
+    row.forEach((cell) => {
+      const demo = MAP_DEMOS[cell.i];
+      const hx = x + cell.x0;
+      label(demo.name, hx + metrics.pad, y, metrics.size, mapDemo === demo.id ? "#3a2a1c" : "#8a7b64");
+      mapDemoHits.push({ id: demo.id, x: hx, y, w: cell.w, h: metrics.rowH });
+    });
+  });
+}
+
+function paintSteelBall(sx, sy, rad, ang) {
+  ctx.beginPath();
+  ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+  ctx.fillStyle = MAT.steel;
+  ctx.fill();
+  ctx.strokeStyle = MAT.steelDark;
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  drawSteelMark(sx, sy, rad, ang, false);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+  ctx.clip();
+  fillSteelHighlight(sx - rad * 0.32, sy - rad * 0.35, rad);
+  ctx.restore();
 }
 
 function drawTrebStrand(strand, lay) {
@@ -728,7 +808,7 @@ function drawTrebuchet() {
   ctx.lineWidth = 2;
   ctx.stroke();
   const hint = !treb || !treb.released ? "Klick: Haltepin lösen" : "Klick: neu spannen";
-  label(hint, band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
+  label(hint, band.x + 12, band.y + 3, 13, "#5c4632");
   if (!treb) {
     drawMapDemoToggle(band);
     return;

@@ -70,7 +70,7 @@ function boot() {
         engageGrab(at);
       }
       if (mode === "play" && !scenePaused) advanceFixed(playClock, dt, step);
-      else if (mode === "map") advanceFixed(mapClock, dt, mapDemo === "trebuchet" ? stepTrebuchet : stepCradle);
+      else if (mode === "map") advanceFixed(mapClock, dt, stepMapDemo);
       render();
       requestAnimationFrame(frame);
     }
@@ -258,6 +258,26 @@ function boot() {
       showMap();
       setMapDemo("trebuchet");
       if (treb) treb.frozen = true;
+    } else if (id === "onager") {
+      showMap();
+      setMapDemo("onager");
+      if (onager) onager.frozen = true;
+    } else if (id === "onager-wurf") {
+      showMap();
+      setMapDemo("onager");
+      releaseOnager();
+      for (let i = 0; i < 70; i++) stepOnager(1 / 60);
+      if (onager) onager.frozen = true;
+    } else if (id === "pendelwelle") {
+      showMap();
+      setMapDemo("wave");
+      for (let i = 0; i < Math.round(WAVE_CYCLE * 0.28 * 60); i++) stepWave(1 / 60);
+      if (pendWave) pendWave.frozen = true;
+    } else if (id === "doppelpendel") {
+      showMap();
+      setMapDemo("double");
+      for (let i = 0; i < 90; i++) stepDouble(1 / 60);
+      if (doublePend) doublePend.frozen = true;
     } else if (LEVELS[id]) buildLevel(LEVELS[id]);
     else showMap();
   } else showMap();

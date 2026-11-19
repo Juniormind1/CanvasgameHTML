@@ -140,6 +140,15 @@ let cradleDrag = null;
 let trebWorld = null;
 let trebGround = null;
 let treb = null;
+let onagerWorld = null;
+let onager = null;
+let pendWaveWorld = null;
+let pendWave = null;
+let doubleWorld = null;
+let doubleGround = null;
+let doublePend = null;
+let doubleDrag = null;
+let mapDemoHits = [];
 let mapDemo = "cradle";
 let anchors = [];
 let scenePaused = false;
@@ -7034,7 +7043,7 @@ function cradleLayout() {
   const span = cradleBalls[cradleBalls.length - 1].anchorX - cradleBalls[0].anchorX;
   const worldW = span + (r + len * 0.92) * 2;
   const worldH = len + r * 2 + 0.18;
-  const head = 36;
+  const head = mapDemoMetrics(band).head;
   const scale = Math.max(8, Math.min((band.w - 12) / worldW, (band.h - head - 10) / worldH));
   return {
     frame,
@@ -7174,7 +7183,7 @@ function drawCradle() {
   ctx.strokeStyle = "#5c4632";
   ctx.lineWidth = 2;
   ctx.stroke();
-  label("Zieh eine äußere Kugel zur Seite", band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
+  label("Zieh eine äußere Kugel zur Seite", band.x + 12, band.y + 3, 13, "#5c4632");
   const first = cradleBalls[0];
   const last = cradleBalls[cradleBalls.length - 1];
   const a0 = cradleToScreen(first.anchorX, first.anchorY, lay);
@@ -7246,10 +7255,31 @@ const TREB_CAT_ROPE = 0x0004;
 const TREB_CAT_POUCH = 0x0008;
 const TREB_CAT_BALL = 0x0010;
 
+const MAP_DEMOS = [
+  { id: "cradle", name: "Pendel" },
+  { id: "trebuchet", name: "Tribok" },
+  { id: "onager", name: "Onager" },
+  { id: "wave", name: "Pendelwelle" },
+  { id: "double", name: "Doppelpendel" },
+];
+
 function setMapDemo(kind) {
-  mapDemo = kind === "trebuchet" ? "trebuchet" : "cradle";
+  const next = MAP_DEMOS.some((d) => d.id === kind) ? kind : "cradle";
+  if (next !== "cradle") endCradleDrag();
+  if (next !== "double") endDoubleDrag();
+  mapDemo = next;
   if (mapDemo === "trebuchet") ensureTrebuchet();
-  else endCradleDrag();
+  else if (mapDemo === "onager") ensureOnager();
+  else if (mapDemo === "wave") ensureWave();
+  else if (mapDemo === "double") ensureDouble();
+}
+
+function stepMapDemo(dt) {
+  if (mapDemo === "trebuchet") stepTrebuchet(dt);
+  else if (mapDemo === "onager") stepOnager(dt);
+  else if (mapDemo === "wave") stepWave(dt);
+  else if (mapDemo === "double") stepDouble(dt);
+  else stepCradle(dt);
 }
 
 function mapDemoBandHit(sx, sy) {
@@ -7257,12 +7287,44 @@ function mapDemoBandHit(sx, sy) {
   return sx >= band.x && sx <= band.x + band.w && sy >= band.y && sy <= band.y + band.h;
 }
 
+function mapDemoMetrics(band) {
+  const size = band.w < 430 ? 12 : 13;
+  const gap = 10;
+  const pad = 4;
+  const hintH = 16;
+  ctx.save();
+  ctx.font = size + "px 'Segoe Print', 'Comic Sans MS', cursive";
+  const widths = MAP_DEMOS.map((d) => ctx.measureText(d.name).width);
+  ctx.restore();
+  const maxW = Math.max(100, band.w - 12);
+  const rows = [];
+  let row = [];
+  let used = 0;
+  for (let i = 0; i < MAP_DEMOS.length; i++) {
+    const w = widths[i] + pad * 2;
+    const add = (row.length ? gap : 0) + w;
+    if (row.length && used + add > maxW) {
+      rows.push(row);
+      row = [];
+      used = 0;
+    }
+    const x0 = row.length ? used + gap : 0;
+    row.push({ i, x0, w });
+    used = x0 + w;
+  }
+  if (row.length) rows.push(row);
+  const rowH = size + 5;
+  const namesTop = 3 + hintH + 1;
+  const head = namesTop + rows.length * rowH + 4;
+  return { size, gap, pad, rows, rowH, head, namesTop };
+}
+
 function mapDemoToggleAt(sx, sy) {
-  const band = mapFrame().cradle;
-  if (sy < band.y || sy > band.y + 28 || sx < band.x + band.w - 160 || sx > band.x + band.w - 8) return null;
-  const mid = band.x + band.w - 84;
-  if (sx < mid) return "cradle";
-  return "trebuchet";
+  for (let i = mapDemoHits.length - 1; i >= 0; i--) {
+    const hit = mapDemoHits[i];
+    if (sx >= hit.x && sx <= hit.x + hit.w && sy >= hit.y && sy <= hit.y + hit.h) return hit.id;
+  }
+  return null;
 }
 
 function trebPin(body, lx, ly) {
@@ -7842,7 +7904,8 @@ function trebuchetLayout() {
   const band = frame.cradle;
   const worldW = TREB_VIEW_W;
   const worldH = TREB_VIEW_H;
-  const scale = Math.max(5, Math.min((band.w - 16) / worldW, (band.h - 36) / worldH));
+  const head = mapDemoMetrics(band).head;
+  const scale = Math.max(5, Math.min((band.w - 16) / worldW, (band.h - head - 8) / worldH));
   return {
     frame,
     band,
@@ -7887,10 +7950,36 @@ function trebBoxPts(body, hx, hy, ox, oy, ang) {
 }
 
 function drawMapDemoToggle(band) {
-  const x = band.x + band.w - 156;
-  const y = band.y + 5;
-  label("Pendel", x + 4, y, 14, mapDemo === "cradle" ? "#3a2a1c" : "#8a7b64");
-  label("Tribok", x + 78, y, 14, mapDemo === "trebuchet" ? "#3a2a1c" : "#8a7b64");
+  const metrics = mapDemoMetrics(band);
+  mapDemoHits = [];
+  metrics.rows.forEach((row, ri) => {
+    const y = band.y + metrics.namesTop + ri * metrics.rowH;
+    const last = row[row.length - 1];
+    let x = band.x + band.w - 8 - (last.x0 + last.w);
+    row.forEach((cell) => {
+      const demo = MAP_DEMOS[cell.i];
+      const hx = x + cell.x0;
+      label(demo.name, hx + metrics.pad, y, metrics.size, mapDemo === demo.id ? "#3a2a1c" : "#8a7b64");
+      mapDemoHits.push({ id: demo.id, x: hx, y, w: cell.w, h: metrics.rowH });
+    });
+  });
+}
+
+function paintSteelBall(sx, sy, rad, ang) {
+  ctx.beginPath();
+  ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+  ctx.fillStyle = MAT.steel;
+  ctx.fill();
+  ctx.strokeStyle = MAT.steelDark;
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  drawSteelMark(sx, sy, rad, ang, false);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(sx, sy, rad, 0, Math.PI * 2);
+  ctx.clip();
+  fillSteelHighlight(sx - rad * 0.32, sy - rad * 0.35, rad);
+  ctx.restore();
 }
 
 function drawTrebStrand(strand, lay) {
@@ -7945,7 +8034,7 @@ function drawTrebuchet() {
   ctx.lineWidth = 2;
   ctx.stroke();
   const hint = !treb || !treb.released ? "Klick: Haltepin lösen" : "Klick: neu spannen";
-  label(hint, band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
+  label(hint, band.x + 12, band.y + 3, 13, "#5c4632");
   if (!treb) {
     drawMapDemoToggle(band);
     return;
@@ -8051,6 +8140,752 @@ function drawTrebuchet() {
   drawMapDemoToggle(band);
 }
 
+// Onager: ein Arm im gedrehten Hanfbündel, Lederschale, Querbalken.
+// Die Sehne ist ein Drehmoment am vorhandenen Drehgelenk, nur in dieser Welt.
+// Ruhelage liegt hinter dem Balken, das Revolute-Limit ist der Anschlag.
+const ONAGER_PIVOT_Y = 1.62;
+const ONAGER_ARM_LEN = 2.25;
+const ONAGER_ARM_H = 0.1;
+const ONAGER_COCKED = -0.4;
+const ONAGER_STOP = 1.0;
+const ONAGER_REST = 1.72;
+const ONAGER_K = 170;
+const ONAGER_C = 4;
+const ONAGER_C_STOP = 48;
+const ONAGER_HOLD_DELAY = 0.85;
+const ONAGER_BALL_R = 0.2;
+const ONAGER_VIEW_W = 9.2;
+const ONAGER_VIEW_H = 4.8;
+const ONAGER_VIEW_RIGHT = 3.15;
+const ONAGER_CUP_X = 2.12;
+const ONAGER_CUP_Y = 0.2;
+const ONAGER_CUP_W = 0.3;
+const ONAGER_CUP_H = 0.055;
+const ONA_GROUND = 0x0001;
+const ONA_ARM = 0x0002;
+const ONA_BALL = 0x0004;
+const ONA_LEATHER = "#7a4a2e";
+const ONA_LEATHER_DARK = "#5a3220";
+
+function onagerBallLocal() {
+  return {
+    x: ONAGER_CUP_X - 0.02,
+    y: ONAGER_CUP_Y + ONAGER_CUP_H + ONAGER_BALL_R - 0.012,
+  };
+}
+
+function onagerFinite(body) {
+  if (!body) return false;
+  const p = body.getPosition();
+  const v = body.getLinearVelocity();
+  return [p.x, p.y, v.x, v.y, body.getAngle(), body.getAngularVelocity()].every(Number.isFinite);
+}
+
+function onaArmFix(density) {
+  return {
+    density: density,
+    friction: 0.85,
+    restitution: 0,
+    filterCategoryBits: ONA_ARM,
+    filterMaskBits: ONA_BALL,
+  };
+}
+
+function resetOnager() {
+  onagerWorld = null;
+  onager = null;
+  ensureOnager();
+}
+
+function ensureOnager() {
+  if (onagerWorld && onager) return;
+  onagerWorld = new planck.World(V(0, -24));
+  const ground = onagerWorld.createBody();
+  ground.createFixture(new planck.Edge(V(-80, 0), V(20, 0)), {
+    friction: 0.6,
+    restitution: 0.05,
+    filterCategoryBits: ONA_GROUND,
+    filterMaskBits: ONA_BALL,
+  });
+  const frame = onagerWorld.createBody({ position: V(0, 0) });
+  const arm = onagerWorld.createDynamicBody({
+    position: V(0, ONAGER_PIVOT_Y),
+    angle: ONAGER_COCKED,
+    bullet: true,
+    linearDamping: 0.02,
+    angularDamping: 0.03,
+    allowSleep: false,
+  });
+  arm.createFixture(new planck.Box(ONAGER_ARM_LEN / 2, ONAGER_ARM_H, V(ONAGER_ARM_LEN / 2, 0), 0), onaArmFix(2.1));
+  arm.createFixture(new planck.Box(ONAGER_CUP_W, ONAGER_CUP_H, V(ONAGER_CUP_X, ONAGER_CUP_Y), 0), onaArmFix(1.4));
+  arm.createFixture(new planck.Box(0.045, 0.13, V(ONAGER_CUP_X + ONAGER_CUP_W - 0.02, ONAGER_CUP_Y + 0.1), 0), onaArmFix(1.2));
+  arm.createFixture(new planck.Box(0.04, 0.08, V(ONAGER_CUP_X - ONAGER_CUP_W + 0.02, ONAGER_CUP_Y + 0.07), 0), onaArmFix(1.2));
+  onagerWorld.createJoint(new planck.RevoluteJoint({
+    bodyA: frame,
+    bodyB: arm,
+    localAnchorA: V(0, ONAGER_PIVOT_Y),
+    localAnchorB: V(0, 0),
+    referenceAngle: 0,
+    enableLimit: true,
+    lowerAngle: ONAGER_COCKED - 0.05,
+    upperAngle: ONAGER_STOP,
+    collideConnected: false,
+  }));
+  const holdJoint = onagerWorld.createJoint(new planck.WeldJoint({
+    bodyA: frame,
+    bodyB: arm,
+    localAnchorA: V(0, ONAGER_PIVOT_Y),
+    localAnchorB: V(0, 0),
+    referenceAngle: ONAGER_COCKED,
+    collideConnected: false,
+  }));
+  const home = onagerBallLocal();
+  const at = arm.getWorldPoint(V(home.x, home.y));
+  const ball = onagerWorld.createDynamicBody({
+    position: V(at.x, at.y),
+    bullet: true,
+    linearDamping: 0.01,
+    angularDamping: 0.02,
+    allowSleep: false,
+  });
+  ball.createFixture(new planck.Circle(ONAGER_BALL_R), {
+    density: 2.4,
+    friction: 0.35,
+    restitution: 0.04,
+    filterCategoryBits: ONA_BALL,
+    filterMaskBits: ONA_ARM | ONA_GROUND,
+  });
+  onager = {
+    frame,
+    arm,
+    ball,
+    holdJoint,
+    released: false,
+    inCup: true,
+    left: false,
+    kick: null,
+    holdTimer: 0,
+    frozen: false,
+    exploded: false,
+    minX: at.x,
+    startX: at.x,
+  };
+  for (let i = 0; i < 12; i++) onagerWorld.step(1 / 60, 16, 10);
+  ball.setLinearVelocity(V(0, 0));
+  ball.setAngularVelocity(0);
+  arm.setLinearVelocity(V(0, 0));
+  arm.setAngularVelocity(0);
+  const settled = ball.getPosition();
+  const local = arm.getLocalPoint(settled);
+  onager.minX = settled.x;
+  onager.startX = settled.x;
+  onager.inCup = Math.hypot(local.x - home.x, local.y - home.y) < ONAGER_BALL_R + 0.28
+    && local.y < home.y + ONAGER_BALL_R;
+}
+
+function releaseOnager() {
+  if (!onager || !onagerWorld || onager.released) return;
+  if (onagerWorld.isLocked && onagerWorld.isLocked()) return;
+  if (onager.holdJoint) {
+    onagerWorld.destroyJoint(onager.holdJoint);
+    onager.holdJoint = null;
+  }
+  onager.released = true;
+  onager.arm.setAwake(true);
+  onager.ball.setAwake(true);
+  const p = onager.ball.getPosition();
+  onager.startX = p.x;
+  onager.minX = p.x;
+}
+
+function onOnagerClick() {
+  ensureOnager();
+  if (!onager) return;
+  if (!onager.released) releaseOnager();
+  else resetOnager();
+}
+
+function stepOnager(dt) {
+  if (!onagerWorld || !onager || onager.frozen) return;
+  if (!onager.released) {
+    onager.holdTimer += dt;
+    if (onager.holdTimer >= ONAGER_HOLD_DELAY) releaseOnager();
+  }
+  if (onager.released && onager.arm) {
+    const ang = onager.arm.getAngle();
+    const w = onager.arm.getAngularVelocity();
+    const damp = ang > ONAGER_STOP - 0.04 && w < 0 ? ONAGER_C_STOP : ONAGER_C;
+    onager.arm.applyTorque(-ONAGER_K * (ang - ONAGER_REST) - damp * w, true);
+  }
+  onagerWorld.step(dt, 18, 12);
+  if (!onager.ball || !onager.arm || !onagerFinite(onager.ball) || !onagerFinite(onager.arm)) {
+    onager.exploded = true;
+    return;
+  }
+  const p = onager.ball.getPosition();
+  const v = onager.ball.getLinearVelocity();
+  if (Math.hypot(v.x, v.y) > 80 || Math.abs(p.x) > 60 || Math.abs(p.y) > 40) onager.exploded = true;
+  onager.minX = Math.min(onager.minX, p.x);
+  const home = onagerBallLocal();
+  const local = onager.arm.getLocalPoint(p);
+  const inside = Math.hypot(local.x - home.x, local.y - home.y) < ONAGER_BALL_R + 0.22
+    && local.y < home.y + ONAGER_BALL_R * 0.85;
+  if (!onager.released) onager.inCup = inside;
+  else if (onager.inCup && !inside && !onager.left) {
+    onager.left = true;
+    onager.kick = { vx: v.x, vy: v.y, ang: onager.arm.getAngle(), w: onager.arm.getAngularVelocity(), x: p.x, y: p.y };
+  }
+}
+
+function onagerLayout() {
+  ensureOnager();
+  const frame = mapFrame();
+  const band = frame.cradle;
+  const head = mapDemoMetrics(band).head;
+  const scale = Math.max(6, Math.min((band.w - 16) / ONAGER_VIEW_W, (band.h - head - 8) / ONAGER_VIEW_H));
+  return {
+    band,
+    scale,
+    originX: band.x + band.w - 10 - ONAGER_VIEW_RIGHT * scale,
+    originY: band.y + band.h - 8,
+  };
+}
+
+function onagerToScreen(x, y, lay) {
+  const box = lay || onagerLayout();
+  return { x: box.originX + x * box.scale, y: box.originY - y * box.scale };
+}
+
+function onaBoxPts(body, hx, hy, ox, oy, ang) {
+  const ca = Math.cos(ang || 0);
+  const sa = Math.sin(ang || 0);
+  return [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]].map(([x, y]) => {
+    const lx = ox + x * ca - y * sa;
+    const ly = oy + x * sa + y * ca;
+    const p = body.getWorldPoint(V(lx, ly));
+    return { x: p.x, y: p.y };
+  });
+}
+
+function onaFill(pts, lay, fill, stroke) {
+  if (!pts || pts.length < 2) return;
+  ctx.beginPath();
+  const s0 = onagerToScreen(pts[0].x, pts[0].y, lay);
+  ctx.moveTo(s0.x, s0.y);
+  for (let i = 1; i < pts.length; i++) {
+    const s = onagerToScreen(pts[i].x, pts[i].y, lay);
+    ctx.lineTo(s.x, s.y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke || "#5c4632";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function onagerBeamWorld() {
+  const t = ONAGER_ARM_LEN * 0.74;
+  const face = ONAGER_ARM_H + 0.11;
+  const c = Math.cos(ONAGER_STOP);
+  const s = Math.sin(ONAGER_STOP);
+  return { x: t * c - face * s, y: ONAGER_PIVOT_Y + t * s + face * c, ang: ONAGER_STOP };
+}
+
+function drawOnager() {
+  const lay = onagerLayout();
+  const band = lay.band;
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.fillStyle = "rgba(255,252,240,0.55)";
+  ctx.fill();
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  const hint = !onager || !onager.released ? "Klick: Arm lösen" : "Klick: neu spannen";
+  label(hint, band.x + 12, band.y + 3, 13, "#5c4632");
+  if (!onager) {
+    drawMapDemoToggle(band);
+    return;
+  }
+  ctx.save();
+  ctx.beginPath();
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.clip();
+  const g0 = onagerToScreen(-(ONAGER_VIEW_W - ONAGER_VIEW_RIGHT), 0, lay);
+  const g1 = onagerToScreen(ONAGER_VIEW_RIGHT + 0.4, 0, lay);
+  ctx.strokeStyle = "#d7c39a";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(g0.x, g0.y);
+  ctx.lineTo(g1.x, g1.y);
+  ctx.stroke();
+  const frame = onager.frame;
+  onaFill(onaBoxPts(frame, 1.55, 0.13, 1.05, 0.13, 0), lay, MAT.wood, "#5c4632");
+  onaFill(onaBoxPts(frame, 0.11, 0.85, 2.45, 0.95, 0), lay, MAT.wood, "#5c4632");
+  onaFill(onaBoxPts(frame, 0.1, 1.05, -0.28, 1.15, 0), lay, MAT.wood, "#5c4632");
+  onaFill(onaBoxPts(frame, 0.09, 0.85, 1.15, 1.35, -0.55), lay, MAT.wood, "#5c4632");
+  const beam = onagerBeamWorld();
+  onaFill(onaBoxPts(frame, 0.7, 0.1, beam.x, beam.y, beam.ang), lay, MAT.wood, "#5c4632");
+  const pivot = onagerToScreen(0, ONAGER_PIVOT_Y, lay);
+  const bundle = Math.max(7, 0.34 * lay.scale);
+  ctx.fillStyle = MAT.hemp;
+  ctx.beginPath();
+  ctx.arc(pivot.x, pivot.y, bundle, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#8d7348";
+  ctx.lineWidth = Math.max(1.2, bundle * 0.12);
+  for (let i = 1; i <= 3; i++) {
+    ctx.beginPath();
+    ctx.arc(pivot.x, pivot.y, bundle * (0.28 + i * 0.18), 0.4, 5.2);
+    ctx.stroke();
+  }
+  onaFill(onaBoxPts(onager.arm, ONAGER_ARM_LEN / 2, ONAGER_ARM_H, ONAGER_ARM_LEN / 2, 0, 0), lay, MAT.wood, "#5c4632");
+  onaFill(onaBoxPts(onager.arm, ONAGER_CUP_W, ONAGER_CUP_H, ONAGER_CUP_X, ONAGER_CUP_Y, 0), lay, ONA_LEATHER, ONA_LEATHER_DARK);
+  onaFill(onaBoxPts(onager.arm, 0.045, 0.13, ONAGER_CUP_X + ONAGER_CUP_W - 0.02, ONAGER_CUP_Y + 0.1, 0), lay, ONA_LEATHER, ONA_LEATHER_DARK);
+  onaFill(onaBoxPts(onager.arm, 0.04, 0.08, ONAGER_CUP_X - ONAGER_CUP_W + 0.02, ONAGER_CUP_Y + 0.07, 0), lay, ONA_LEATHER, ONA_LEATHER_DARK);
+  if (onager.holdJoint) {
+    const pin = onager.arm.getWorldPoint(V(ONAGER_ARM_LEN * 0.42, 0));
+    const s = onagerToScreen(pin.x, pin.y, lay);
+    ctx.fillStyle = MAT.steel;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, Math.max(3, 0.07 * lay.scale), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const bp = onager.ball.getPosition();
+  const bs = onagerToScreen(bp.x, bp.y, lay);
+  paintSteelBall(bs.x, bs.y, Math.max(4, ONAGER_BALL_R * lay.scale), onager.ball.getAngle());
+  ctx.fillStyle = "#5c4632";
+  ctx.beginPath();
+  ctx.arc(pivot.x, pivot.y, Math.max(3, 0.08 * lay.scale), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  drawMapDemoToggle(band);
+}
+// Pendelwelle: ungekoppelte Pendel, deren Längen so gewählt sind, dass das
+// längste WAVE_N0 Schwingungen und jedes nächste eine mehr in WAVE_CYCLE schafft.
+// g = 24. Die Kugelträgheit steckt in der Länge. Sie stoßen nicht: wie in
+// parallelen Ebenen, von vorn gesehen.
+const WAVE_COUNT = 10;
+const WAVE_N0 = 7;
+const WAVE_CYCLE = 13;
+const WAVE_AMP = 0.42;
+const WAVE_R = 0.12;
+const WAVE_GAP = 0.3;
+
+function waveLength(n) {
+  const ideal = 24 * Math.pow(WAVE_CYCLE / (Math.PI * 2 * n), 2);
+  const disc = ideal * ideal - 2 * WAVE_R * WAVE_R;
+  if (disc <= 0) return ideal;
+  return 0.5 * (ideal + Math.sqrt(disc));
+}
+
+function resetWave() {
+  pendWaveWorld = null;
+  pendWave = null;
+  ensureWave();
+}
+
+function ensureWave() {
+  if (pendWaveWorld && pendWave) return;
+  pendWaveWorld = new planck.World(V(0, -24));
+  const bobs = [];
+  let maxL = 0;
+  for (let i = 0; i < WAVE_COUNT; i++) {
+    const n = WAVE_N0 + i;
+    const len = waveLength(n);
+    maxL = Math.max(maxL, len);
+    const x = (i - (WAVE_COUNT - 1) / 2) * WAVE_GAP;
+    const pivot = pendWaveWorld.createBody({ position: V(x, 0) });
+    const bob = pendWaveWorld.createDynamicBody({
+      position: V(x, 0),
+      angle: WAVE_AMP,
+      linearDamping: 0,
+      angularDamping: 0,
+      allowSleep: false,
+    });
+    bob.createFixture(new planck.Circle(V(0, -len), WAVE_R), {
+      density: 4,
+      friction: 0,
+      restitution: 0,
+      filterCategoryBits: 0x0001,
+      filterMaskBits: 0,
+    });
+    pendWaveWorld.createJoint(new planck.RevoluteJoint({
+      bodyA: pivot,
+      bodyB: bob,
+      localAnchorA: V(0, 0),
+      localAnchorB: V(0, 0),
+      collideConnected: false,
+    }));
+    bobs.push({ n, len, x, body: bob });
+  }
+  const longest = bobs[0].len;
+  const shortest = bobs[bobs.length - 1].len;
+  pendWave = {
+    bobs,
+    frozen: false,
+    exploded: false,
+    halfW: (WAVE_COUNT - 1) / 2 * WAVE_GAP + longest * Math.sin(WAVE_AMP) + WAVE_R + 0.06,
+    depth: longest + WAVE_R + 0.08,
+    shortest,
+  };
+}
+
+function onWaveClick() {
+  resetWave();
+}
+
+function stepWave(dt) {
+  if (!pendWaveWorld || !pendWave || pendWave.frozen) return;
+  pendWaveWorld.step(dt, 10, 6);
+  for (let i = 0; i < pendWave.bobs.length; i++) {
+    const body = pendWave.bobs[i].body;
+    const p = body.getPosition();
+    const v = body.getLinearVelocity();
+    if (![p.x, p.y, v.x, v.y, body.getAngle()].every(Number.isFinite)) pendWave.exploded = true;
+  }
+}
+
+function waveLayout() {
+  ensureWave();
+  const frame = mapFrame();
+  const band = frame.cradle;
+  const head = mapDemoMetrics(band).head;
+  const scale = Math.max(8, Math.min((band.w - 16) / (pendWave.halfW * 2), (band.h - head - 10) / pendWave.depth));
+  return {
+    band,
+    scale,
+    originX: band.x + band.w / 2,
+    originY: band.y + head + 2,
+  };
+}
+
+function waveToScreen(x, y, lay) {
+  const box = lay || waveLayout();
+  return { x: box.originX + x * box.scale, y: box.originY - y * box.scale };
+}
+
+function drawWave() {
+  const lay = waveLayout();
+  const band = lay.band;
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.fillStyle = "rgba(255,252,240,0.55)";
+  ctx.fill();
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  label("Klick: neu anstoßen", band.x + 12, band.y + 3, 13, "#5c4632");
+  if (!pendWave) {
+    drawMapDemoToggle(band);
+    return;
+  }
+  ctx.save();
+  ctx.beginPath();
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.clip();
+  const first = pendWave.bobs[0];
+  const last = pendWave.bobs[pendWave.bobs.length - 1];
+  const a0 = waveToScreen(first.x, 0, lay);
+  const a1 = waveToScreen(last.x, 0, lay);
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(a0.x - 8, a0.y);
+  ctx.lineTo(a1.x + 8, a1.y);
+  ctx.stroke();
+  for (let i = 0; i < pendWave.bobs.length; i++) {
+    const rec = pendWave.bobs[i];
+    const bob = rec.body.getWorldPoint(V(0, -rec.len));
+    const anchor = waveToScreen(rec.x, 0, lay);
+    const s = waveToScreen(bob.x, bob.y, lay);
+    ctx.strokeStyle = "#8d5a34";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(anchor.x, anchor.y);
+    ctx.lineTo(s.x, s.y);
+    ctx.stroke();
+    paintSteelBall(s.x, s.y, Math.max(4, WAVE_R * lay.scale), rec.body.getAngle());
+  }
+  ctx.restore();
+  drawMapDemoToggle(band);
+}
+// Doppelpendel: zwei Stangen, zwei Kugeln, zwei Drehgelenke. Die Bahn der
+// unteren Kugel bleibt als Strich liegen. Ziehen fasst die getroffene Kugel.
+const DP_L1 = 1.05;
+const DP_L2 = 1.05;
+const DP_R = 0.16;
+const DP_A1 = 2.05;
+const DP_A2 = -1.65;
+const DP_TRAIL = 240;
+
+function resetDouble() {
+  endDoubleDrag();
+  doubleWorld = null;
+  doubleGround = null;
+  doublePend = null;
+  ensureDouble();
+}
+
+function dpFix() {
+  return {
+    density: 6.5,
+    friction: 0.2,
+    restitution: 0,
+    filterGroupIndex: -6,
+    filterCategoryBits: 0x0001,
+    filterMaskBits: 0,
+  };
+}
+
+function ensureDouble() {
+  if (doubleWorld && doublePend) return;
+  doubleWorld = new planck.World(V(0, -24));
+  doubleGround = doubleWorld.createBody({ position: V(0, 0) });
+  const upper = doubleWorld.createDynamicBody({
+    position: V(0, 0),
+    angle: DP_A1,
+    allowSleep: false,
+    linearDamping: 0.001,
+    angularDamping: 0.001,
+  });
+  upper.createFixture(new planck.Circle(V(0, -DP_L1), DP_R), dpFix());
+  doubleWorld.createJoint(new planck.RevoluteJoint({
+    bodyA: doubleGround,
+    bodyB: upper,
+    localAnchorA: V(0, 0),
+    localAnchorB: V(0, 0),
+    collideConnected: false,
+  }));
+  const hinge = upper.getWorldPoint(V(0, -DP_L1));
+  const lower = doubleWorld.createDynamicBody({
+    position: V(hinge.x, hinge.y),
+    angle: DP_A2,
+    allowSleep: false,
+    linearDamping: 0.001,
+    angularDamping: 0.001,
+  });
+  lower.createFixture(new planck.Circle(V(0, -DP_L2), DP_R), dpFix());
+  doubleWorld.createJoint(new planck.RevoluteJoint({
+    bodyA: upper,
+    bodyB: lower,
+    localAnchorA: V(0, -DP_L1),
+    localAnchorB: V(0, 0),
+    collideConnected: false,
+  }));
+  doublePend = {
+    upper,
+    lower,
+    trail: [],
+    frozen: false,
+    exploded: false,
+  };
+}
+
+function doubleBobPoint(which) {
+  if (!doublePend) return { x: 0, y: 0 };
+  if (which === "upper") return doublePend.upper.getWorldPoint(V(0, -DP_L1));
+  return doublePend.lower.getWorldPoint(V(0, -DP_L2));
+}
+
+function doubleEnergy() {
+  const g = 24;
+  let energy = 0;
+  const bodies = doublePend ? [doublePend.upper, doublePend.lower] : [];
+  for (let i = 0; i < bodies.length; i++) {
+    const body = bodies[i];
+    const mass = body.getMass();
+    const vel = body.getLinearVelocity();
+    const center = body.getWorldCenter();
+    energy += mass * g * center.y;
+    energy += 0.5 * mass * (vel.x * vel.x + vel.y * vel.y);
+    energy += 0.5 * body.getInertia() * body.getAngularVelocity() * body.getAngularVelocity();
+  }
+  return energy;
+}
+
+function doubleFinite() {
+  if (!doublePend) return false;
+  return [doublePend.upper, doublePend.lower].every((body) => {
+    const p = body.getPosition();
+    const v = body.getLinearVelocity();
+    return [p.x, p.y, v.x, v.y, body.getAngle(), body.getAngularVelocity()].every(Number.isFinite);
+  });
+}
+
+function poseDouble(a1, a2) {
+  if (!doublePend || !doublePend.upper || !doublePend.lower) return;
+  endDoubleDrag();
+  doublePend.upper.setTransform(V(0, 0), a1);
+  const hinge = doublePend.upper.getWorldPoint(V(0, -DP_L1));
+  doublePend.lower.setTransform(V(hinge.x, hinge.y), a2);
+  doublePend.upper.setLinearVelocity(V(0, 0));
+  doublePend.upper.setAngularVelocity(0);
+  doublePend.lower.setLinearVelocity(V(0, 0));
+  doublePend.lower.setAngularVelocity(0);
+  doublePend.upper.setAwake(true);
+  doublePend.lower.setAwake(true);
+  doublePend.trail = [];
+  doublePend.exploded = false;
+}
+
+function onDoubleClick() {
+  resetDouble();
+}
+
+function beginDoubleDrag(which) {
+  if (!doublePend || !doubleWorld || (doubleWorld.isLocked && doubleWorld.isLocked())) return false;
+  endDoubleDrag();
+  const body = which === "upper" ? doublePend.upper : doublePend.lower;
+  const local = which === "upper" ? V(0, -DP_L1) : V(0, -DP_L2);
+  const p = body.getWorldPoint(local);
+  const joint = doubleWorld.createJoint(new planck.MouseJoint({
+    bodyA: doubleGround,
+    bodyB: body,
+    target: V(p.x, p.y),
+    maxForce: Math.max(120, body.getMass() * 900),
+    frequencyHz: 7,
+    dampingRatio: 0.85,
+    collideConnected: false,
+  }));
+  doubleDrag = { which, joint, goal: { x: p.x, y: p.y } };
+  return true;
+}
+
+function endDoubleDrag() {
+  if (!doubleDrag) return;
+  const drag = doubleDrag;
+  doubleDrag = null;
+  if (!doubleWorld || !drag.joint) return;
+  if (doubleWorld.isLocked && doubleWorld.isLocked()) return;
+  doubleWorld.destroyJoint(drag.joint);
+  if (doublePend) {
+    doublePend.upper.setAwake(true);
+    doublePend.lower.setAwake(true);
+  }
+}
+
+function doubleBobAt(sx, sy) {
+  if (!doublePend) return null;
+  const lay = doubleLayout();
+  let best = null;
+  let bestD = 1e9;
+  for (const which of ["lower", "upper"]) {
+    const p = doubleBobPoint(which);
+    const s = doubleToScreen(p.x, p.y, lay);
+    const hit = Math.max(DP_R * lay.scale * 1.5, 18);
+    const d = Math.hypot(s.x - sx, s.y - sy);
+    if (d <= hit && d < bestD) {
+      best = which;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
+function stepDouble(dt) {
+  if (!doubleWorld || !doublePend || doublePend.frozen) return;
+  if (doubleDrag && doubleDrag.joint) {
+    doubleDrag.joint.setTarget(V(doubleDrag.goal.x, doubleDrag.goal.y));
+  }
+  const parts = dt > 1 / 90 ? 4 : 1;
+  const h = dt / parts;
+  for (let s = 0; s < parts; s++) doubleWorld.step(h, 16, 10);
+  if (!doubleFinite()) {
+    doublePend.exploded = true;
+    return;
+  }
+  const tip = doubleBobPoint("lower");
+  const trail = doublePend.trail;
+  const prev = trail.length ? trail[trail.length - 1] : null;
+  if (!prev || Math.hypot(tip.x - prev.x, tip.y - prev.y) > 0.03) {
+    trail.push({ x: tip.x, y: tip.y });
+    if (trail.length > DP_TRAIL) trail.shift();
+  }
+}
+
+function doubleLayout() {
+  ensureDouble();
+  const frame = mapFrame();
+  const band = frame.cradle;
+  const head = mapDemoMetrics(band).head;
+  const reach = DP_L1 + DP_L2 + DP_R + 0.12;
+  const scale = Math.max(8, Math.min((band.w - 16) / (reach * 2), (band.h - head - 12) / (reach + 0.08)));
+  return {
+    band,
+    scale,
+    originX: band.x + band.w / 2,
+    originY: band.y + head + 4,
+  };
+}
+
+function doubleToScreen(x, y, lay) {
+  const box = lay || doubleLayout();
+  return { x: box.originX + x * box.scale, y: box.originY - y * box.scale };
+}
+
+function screenToDouble(sx, sy) {
+  const lay = doubleLayout();
+  return {
+    x: (sx - lay.originX) / lay.scale,
+    y: (lay.originY - sy) / lay.scale,
+  };
+}
+
+function drawDouble() {
+  const lay = doubleLayout();
+  const band = lay.band;
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.fillStyle = "rgba(255,252,240,0.55)";
+  ctx.fill();
+  ctx.strokeStyle = "#5c4632";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  label("Zieh eine Kugel. Klick setzt neu.", band.x + 12, band.y + 3, 13, "#5c4632");
+  if (!doublePend) {
+    drawMapDemoToggle(band);
+    return;
+  }
+  ctx.save();
+  ctx.beginPath();
+  roundRect(band.x, band.y, band.w, band.h, 14);
+  ctx.clip();
+  const trail = doublePend.trail;
+  if (trail.length > 1) {
+    ctx.beginPath();
+    const s0 = doubleToScreen(trail[0].x, trail[0].y, lay);
+    ctx.moveTo(s0.x, s0.y);
+    for (let i = 1; i < trail.length; i++) {
+      const s = doubleToScreen(trail[i].x, trail[i].y, lay);
+      ctx.lineTo(s.x, s.y);
+    }
+    ctx.strokeStyle = "rgba(92,83,72,0.55)";
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+  }
+  const hinge = doublePend.upper.getWorldPoint(V(0, -DP_L1));
+  const tip = doublePend.lower.getWorldPoint(V(0, -DP_L2));
+  const pivot = doubleToScreen(0, 0, lay);
+  const hs = doubleToScreen(hinge.x, hinge.y, lay);
+  const ts = doubleToScreen(tip.x, tip.y, lay);
+  ctx.strokeStyle = "#8d5a34";
+  ctx.lineWidth = Math.max(3, 0.07 * lay.scale);
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(pivot.x, pivot.y);
+  ctx.lineTo(hs.x, hs.y);
+  ctx.lineTo(ts.x, ts.y);
+  ctx.stroke();
+  ctx.fillStyle = "#5c4632";
+  ctx.beginPath();
+  ctx.arc(pivot.x, pivot.y, Math.max(3, 0.06 * lay.scale), 0, Math.PI * 2);
+  ctx.fill();
+  paintSteelBall(hs.x, hs.y, Math.max(5, DP_R * lay.scale), doublePend.upper.getAngle());
+  paintSteelBall(ts.x, ts.y, Math.max(5, DP_R * lay.scale), doublePend.lower.getAngle());
+  ctx.restore();
+  drawMapDemoToggle(band);
+}
 function renderMap() {
   const frame = mapFrame();
   label("Crayon", frame.margin, frame.titleY, frame.titleSize);
@@ -8062,6 +8897,9 @@ function renderMap() {
   }
   label("Sterne " + starCount() + " / " + ORDER.length, frame.margin, frame.starY, 18, "#8a5a20");
   if (mapDemo === "trebuchet") drawTrebuchet();
+  else if (mapDemo === "onager") drawOnager();
+  else if (mapDemo === "wave") drawWave();
+  else if (mapDemo === "double") drawDouble();
   else drawCradle();
   const owned = starCount();
   ISLANDS.forEach((island, i) => {
@@ -8134,7 +8972,7 @@ function renderHelp() {
     "Ein kurzer Strich von unten nach oben, vom tragenden Gegenstand in den, der auf ihm liegt, macht beide zu einem Stück. Den unteren ziehst du erst, wenn nichts mehr auf ihm ruht. Vom Boden aus wird das Stück fest. Rechtsklick auf den Strich löst.",
     "Nägel werden nicht verschoben. Einen selbst gesetzten Nagel zieht man mit Rechtsklick oder einem schnellen Doppeltipp auf ihn heraus.",
     "Den Ball mit einem gerade gezogenen Gegenstand stoßen löst das Level, aber ohne Konfetti.",
-    "Auf der Karte hängt ein Kugelstoßpendel. Zieh eine äußere Kugel zur Seite und lass los.",
+    "Auf der Karte: Pendel, Tribok, Onager, Pendelwelle oder Doppelpendel. Der Name wechselt. Beim Pendel eine äußere Kugel ziehen.",
     "Klick auf die Spielkugel: kleiner Schubs. Rechtsklick radiert das Deine; ein Doppeltipp radiert nur Nägel und Seile.",
     "Rakete: etwas darauf fallen lassen. Sie fliegt in Blickrichtung und kommt wieder.",
     "Elegant: genau ein Gegenstand, ohne die Kugel anzuklicken. Nägel zählen nicht.",
@@ -8156,6 +8994,9 @@ function showMap() {
   confetti = [];
   ensureCradle();
   if (mapDemo === "trebuchet") ensureTrebuchet();
+  else if (mapDemo === "onager") ensureOnager();
+  else if (mapDemo === "wave") ensureWave();
+  else if (mapDemo === "double") ensureDouble();
 }
 
 function freshDoc() {
@@ -8377,16 +9218,42 @@ function onPointerDown(e) {
       pointer = { id: e.pointerId, ui: true };
       return;
     }
-    if (mapDemo === "trebuchet" && mapDemoBandHit(e.clientX, e.clientY)) {
-      onTrebuchetClick();
-      pointer = { id: e.pointerId, ui: true };
-      return;
+    if (mapDemoBandHit(e.clientX, e.clientY)) {
+      if (mapDemo === "trebuchet") {
+        onTrebuchetClick();
+        pointer = { id: e.pointerId, ui: true };
+        return;
+      }
+      if (mapDemo === "onager") {
+        onOnagerClick();
+        pointer = { id: e.pointerId, ui: true };
+        return;
+      }
+      if (mapDemo === "wave") {
+        onWaveClick();
+        pointer = { id: e.pointerId, ui: true };
+        return;
+      }
+      if (mapDemo === "double") {
+        const bob = doubleBobAt(e.clientX, e.clientY);
+        if (bob && beginDoubleDrag(bob)) {
+          doubleDrag.goal = screenToDouble(e.clientX, e.clientY);
+          pointer = { id: e.pointerId, double: true };
+          try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+          return;
+        }
+        onDoubleClick();
+        pointer = { id: e.pointerId, ui: true };
+        return;
+      }
     }
-    const rec = cradleBallAt(e.clientX, e.clientY);
-    if (rec && beginCradleDrag(rec)) {
-      cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
-      pointer = { id: e.pointerId, cradle: true };
-      canvas.setPointerCapture(e.pointerId);
+    if (mapDemo === "cradle") {
+      const rec = cradleBallAt(e.clientX, e.clientY);
+      if (rec && beginCradleDrag(rec)) {
+        cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
+        pointer = { id: e.pointerId, cradle: true };
+        canvas.setPointerCapture(e.pointerId);
+      }
     }
     return;
   }
@@ -8546,6 +9413,10 @@ function onPointerMove(e) {
     cradleDrag.goal = screenToCradle(e.clientX, e.clientY);
     return;
   }
+  if (pointer.double) {
+    doubleDrag.goal = screenToDouble(e.clientX, e.clientY);
+    return;
+  }
   const w = screenToWorld(e.clientX, e.clientY);
   pointer.wx = w.x;
   pointer.wy = w.y;
@@ -8598,6 +9469,10 @@ function onPointerUp(e) {
   }
   if (current.cradle) {
     endCradleDrag();
+    return;
+  }
+  if (current.double) {
+    endDoubleDrag();
     return;
   }
   if (current.pan || current.ui || current.tap) return;
@@ -9735,7 +10610,7 @@ function boot() {
         engageGrab(at);
       }
       if (mode === "play" && !scenePaused) advanceFixed(playClock, dt, step);
-      else if (mode === "map") advanceFixed(mapClock, dt, mapDemo === "trebuchet" ? stepTrebuchet : stepCradle);
+      else if (mode === "map") advanceFixed(mapClock, dt, stepMapDemo);
       render();
       requestAnimationFrame(frame);
     }
@@ -9923,6 +10798,26 @@ function boot() {
       showMap();
       setMapDemo("trebuchet");
       if (treb) treb.frozen = true;
+    } else if (id === "onager") {
+      showMap();
+      setMapDemo("onager");
+      if (onager) onager.frozen = true;
+    } else if (id === "onager-wurf") {
+      showMap();
+      setMapDemo("onager");
+      releaseOnager();
+      for (let i = 0; i < 70; i++) stepOnager(1 / 60);
+      if (onager) onager.frozen = true;
+    } else if (id === "pendelwelle") {
+      showMap();
+      setMapDemo("wave");
+      for (let i = 0; i < Math.round(WAVE_CYCLE * 0.28 * 60); i++) stepWave(1 / 60);
+      if (pendWave) pendWave.frozen = true;
+    } else if (id === "doppelpendel") {
+      showMap();
+      setMapDemo("double");
+      for (let i = 0; i < 90; i++) stepDouble(1 / 60);
+      if (doublePend) doublePend.frozen = true;
     } else if (LEVELS[id]) buildLevel(LEVELS[id]);
     else showMap();
   } else showMap();
@@ -10994,6 +11889,114 @@ function runTests() {
     check("trebuchet throws to the left", trebFly > 15 && sl.vx < 0);
     check("trebuchet sling stays within 102 percent of its length", trebLive <= 1.02);
     check("trebuchet does not explode", trebOk);
+
+    setMapDemo("onager");
+    for (let onaI = 0; onaI < 20; onaI++) stepOnager(1 / 60);
+    check("onager stays cocked with the ball in the cup", !!onager && !onager.released && onager.inCup && Math.abs(onager.arm.getAngle() - ONAGER_COCKED) < 0.08);
+    releaseOnager();
+    for (let onaI = 0; onaI < 180; onaI++) stepOnager(1 / 60);
+    const onaKick = onager && onager.kick ? onager.kick : { vx: 0, vy: 0, ang: 0 };
+    const onaFly = onager ? onager.startX - onager.minX : 0;
+    lines.push("INFO onager fly " + onaFly.toFixed(2)
+      + " kick " + onaKick.vx.toFixed(2) + "," + onaKick.vy.toFixed(2)
+      + " ang " + onaKick.ang.toFixed(2) + " w " + (onaKick.w || 0).toFixed(2)
+      + " left " + !!(onager && onager.left)
+      + " arm " + (onager ? onager.arm.getAngle().toFixed(2) : "0"));
+    check("onager arm hits the crossbeam", !!onager && onager.arm.getAngle() > ONAGER_STOP - 0.08);
+    check("onager ball leaves the cup at the kick", !!onager && onager.left);
+    check("onager throws left and up", onaKick.vx < -8 && onaKick.vy > 2);
+    check("onager ball travels", onaFly > 12);
+    check("onager does not explode", !!onager && !onager.exploded && onagerFinite(onager.ball));
+    onOnagerClick();
+    check("onager click recocks", !!onager && !onager.released && onager.inCup && Math.abs(onager.arm.getAngle() - ONAGER_COCKED) < 0.12);
+
+    setMapDemo("wave");
+    const wvS = Math.sin(WAVE_AMP / 2);
+    const wvK = wvS * wvS;
+    const wvFactor = 1 + wvK / 4 + (9 / 64) * wvK * wvK;
+    const wvSteps = Math.round(WAVE_CYCLE * wvFactor * 60);
+    const wvHalf = Math.round(wvSteps / 2);
+    let wvSpread = 0;
+    let wvBest = 1e9;
+    for (let wvI = 0; wvI < wvSteps + 18; wvI++) {
+      stepWave(1 / 60);
+      if (!pendWave) break;
+      let wvMin = 1e9;
+      let wvMax = -1e9;
+      let wvErr = 0;
+      for (let wvB = 0; wvB < pendWave.bobs.length; wvB++) {
+        const wvAng = pendWave.bobs[wvB].body.getAngle();
+        if (wvAng < wvMin) wvMin = wvAng;
+        if (wvAng > wvMax) wvMax = wvAng;
+        wvErr = Math.max(wvErr, Math.abs(wvAng - WAVE_AMP));
+      }
+      if (wvI === wvHalf) wvSpread = wvMax - wvMin;
+      if (wvI >= wvSteps - 12) wvBest = Math.min(wvBest, wvErr);
+    }
+    lines.push("INFO wave spread " + wvSpread.toFixed(3) + " revive " + wvBest.toFixed(3)
+      + " steps " + wvSteps
+      + " L " + (pendWave ? pendWave.bobs[0].len.toFixed(3) + ".." + pendWave.shortest.toFixed(3) : "?"));
+    check("pendulum wave opens into a wave", wvSpread > 0.45);
+    check("pendulum wave returns together", wvBest < 0.22);
+    check("pendulum wave does not explode", !!pendWave && !pendWave.exploded);
+    for (let wvI = 0; wvI < 45; wvI++) stepWave(1 / 60);
+    const wvMid = pendWave.bobs[0].body.getAngle();
+    onWaveClick();
+    check("pendulum wave click resets", !!pendWave
+      && Math.abs(pendWave.bobs[0].body.getAngle() - WAVE_AMP) < 0.02
+      && Math.abs(wvMid - WAVE_AMP) > 0.08);
+
+    setMapDemo("double");
+    const dpTip0 = doubleBobPoint("lower");
+    const dpE0 = doubleEnergy();
+    let dpMoved = 0;
+    let dpMaxA = 0;
+    for (let dpI = 0; dpI < 180; dpI++) {
+      stepDouble(1 / 60);
+      const dpTip = doubleBobPoint("lower");
+      dpMoved = Math.max(dpMoved, Math.hypot(dpTip.x - dpTip0.x, dpTip.y - dpTip0.y));
+      dpMaxA = Math.max(dpMaxA, Math.abs(doublePend.lower.getAngle()));
+    }
+    const dpE1 = doubleEnergy();
+    const dpVend = doublePend.lower.getLinearVelocity();
+    const dpSpeed = Math.hypot(dpVend.x, dpVend.y);
+    lines.push("INFO double move " + dpMoved.toFixed(2) + " E " + dpE0.toFixed(2) + " -> " + dpE1.toFixed(2)
+      + " v " + dpSpeed.toFixed(2) + " maxA " + dpMaxA.toFixed(2)
+      + " trail " + (doublePend ? doublePend.trail.length : 0));
+    check("double pendulum swings", dpMoved > 0.6 && dpMaxA > 2.2);
+    check("double pendulum keeps moving", dpSpeed > 0.8);
+    // Hänge-Ruhe liegt bei etwa -40 J. Der Löser verliert an dieser Kette einige Joule.
+    check("double pendulum energy stays bounded", dpE1 < dpE0 + 6 && dpE1 > dpE0 - 22);
+    check("double pendulum does not explode", doubleFinite() && !!doublePend && !doublePend.exploded);
+    check("double pendulum draws a trail", !!doublePend && doublePend.trail.length > 20);
+    resetDouble();
+    for (let dpI = 0; dpI < 300; dpI++) stepDouble(1 / 60);
+    const dpBase = doubleBobPoint("lower");
+    resetDouble();
+    poseDouble(DP_A1 + 0.012, DP_A2);
+    for (let dpI = 0; dpI < 300; dpI++) stepDouble(1 / 60);
+    const dpNear = doubleBobPoint("lower");
+    const dpSplit = Math.hypot(dpNear.x - dpBase.x, dpNear.y - dpBase.y);
+    resetDouble();
+    for (let dpI = 0; dpI < 300; dpI++) stepDouble(1 / 60);
+    const dpAgain = doubleBobPoint("lower");
+    const dpSame = Math.hypot(dpAgain.x - dpBase.x, dpAgain.y - dpBase.y);
+    lines.push("INFO double split " + dpSplit.toFixed(3) + " same " + dpSame.toFixed(5));
+    check("double pendulum is chaotic", dpSplit > 0.2);
+    check("double pendulum repeats from the same start", dpSame < 0.02);
+    resetDouble();
+    check("double drag grabs the lower ball", beginDoubleDrag("lower"));
+    const dpFrom = doubleBobPoint("lower");
+    for (let dpI = 0; dpI < 40; dpI++) {
+      doubleDrag.goal = { x: dpFrom.x + 0.6, y: dpFrom.y + 0.2 };
+      stepDouble(1 / 60);
+    }
+    const dpPulled = doubleBobPoint("lower");
+    endDoubleDrag();
+    lines.push("INFO double drag " + Math.hypot(dpPulled.x - dpFrom.x, dpPulled.y - dpFrom.y).toFixed(3));
+    check("double drag moves the lower ball", Math.hypot(dpPulled.x - dpFrom.x, dpPulled.y - dpFrom.y) > 0.15);
+    check("double drag stays finite", doubleFinite());
+    setMapDemo("cradle");
 
     {
       // Verankern: kurzer gerader Zug von unten nach oben, Boden oder Auflage.
