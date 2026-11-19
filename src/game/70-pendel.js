@@ -115,13 +115,14 @@ function cradleLayout() {
   const span = cradleBalls[cradleBalls.length - 1].anchorX - cradleBalls[0].anchorX;
   const worldW = span + (r + len * 0.92) * 2;
   const worldH = len + r * 2 + 0.18;
-  const scale = Math.max(8, Math.min((band.w - 12) / worldW, (band.h - 28) / worldH));
+  const head = 36;
+  const scale = Math.max(8, Math.min((band.w - 12) / worldW, (band.h - head - 10) / worldH));
   return {
     frame,
     band,
     scale,
     originX: band.x + band.w / 2,
-    originY: band.y + 22,
+    originY: band.y + head,
   };
 }
 
@@ -255,7 +256,6 @@ function drawCradle() {
   ctx.lineWidth = 2;
   ctx.stroke();
   label("Zieh eine äußere Kugel zur Seite", band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
-  drawMapDemoToggle(band);
   const first = cradleBalls[0];
   const last = cradleBalls[cradleBalls.length - 1];
   const a0 = cradleToScreen(first.anchorX, first.anchorY, lay);
@@ -292,6 +292,7 @@ function drawCradle() {
     fillSteelHighlight(s.x - rad * 0.32, s.y - rad * 0.35, rad);
     ctx.restore();
   }
+  drawMapDemoToggle(band);
 }
 
 

@@ -729,8 +729,10 @@ function drawTrebuchet() {
   ctx.stroke();
   const hint = !treb || !treb.released ? "Klick: Haltepin lösen" : "Klick: neu spannen";
   label(hint, band.x + 12, band.y + 6, band.w < 280 ? 13 : 15, "#5c4632");
-  drawMapDemoToggle(band);
-  if (!treb) return;
+  if (!treb) {
+    drawMapDemoToggle(band);
+    return;
+  }
   ctx.save();
   ctx.beginPath();
   roundRect(band.x, band.y, band.w, band.h, 14);
@@ -829,5 +831,6 @@ function drawTrebuchet() {
   ctx.arc(pivot.x, pivot.y, Math.max(3, 0.1 * lay.scale), 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+  drawMapDemoToggle(band);
 }
 
