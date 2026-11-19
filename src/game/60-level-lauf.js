@@ -179,7 +179,10 @@ function attachPlayContacts(targetWorld) {
     const mb = bodyMeta.get(contact.getFixtureB().getBody());
     const roundA = ma && (ma.kind === "ball" || ma.round);
     const roundB = mb && (mb.kind === "ball" || mb.round);
-    if (roundA && roundB) contact.setRestitution(0.98);
+    const ropeHit = (ma && ma.kind === "rope") || (mb && mb.kind === "rope");
+    // Hanf gibt nicht nach: eine Kugel auf dem Seil soll liegen bleiben.
+    if (ropeHit) contact.setRestitution(0);
+    else if (roundA && roundB) contact.setRestitution(0.98);
     else if ((roundA || roundB) && !isWireMeta(ma) && !isWireMeta(mb)) {
       contact.setRestitution(BALL_RESTITUTION);
     }
@@ -272,7 +275,10 @@ function step(dt) {
   }
   const ropeLive = drawings.some((d) => d.kind === "rope" && d.bodies && d.bodies.length);
   world.step(dt, ropeLive ? 20 : 10, ropeLive ? 16 : 8);
-  if (ropeLive) tightenRopes();
+  if (ropeLive) {
+    tightenRopes();
+    settlePulleyRiders();
+  }
   snapDrag(dt);
   updateDragGhost();
   handleContacts();

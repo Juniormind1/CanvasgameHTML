@@ -172,7 +172,11 @@ function commitStrokeApply(drawnPts, rawInk) {
 function destroyDrawing(draw) {
   if (!draw || !world) return;
   if (draw.kind === "rope") {
-    if (draw.pulley) dissolvePulley(draw.pulley);
+    // Eine Hälfte einer Umlenkung ist kein eigenes Seil: Radieren löscht beide.
+    if (draw.pulley && !draw.pulley.dead) {
+      destroyPulleyRope(draw.pulley);
+      return;
+    }
     dropRopeChord(draw);
     for (const body of draw.bodies) {
       bodyMeta.delete(body);

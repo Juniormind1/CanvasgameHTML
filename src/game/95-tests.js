@@ -3824,6 +3824,184 @@ function runTests() {
     }
 
     {
+      // Seil von Turm zu Turm über die Umlenkrolle auf dem mittleren Turm.
+      // Beide Enden sind fest. Das Seil darf nicht auf dem Turm liegen.
+      buildLevel(LEVELS["ein-klotz"]);
+      const twPost = (x) => {
+        const body = makeBox({ x, y: 6.5, hw: 1.15, hh: 5.05 });
+        body.setStatic();
+        return body;
+      };
+      const twL = twPost(8);
+      const twM = twPost(12.4);
+      const twR = twPost(19);
+      const twPL = rememberPin(8, 11.2, twL, true);
+      const twPM = rememberPin(12.4, 11.3, twM, true);
+      twPM.isMotor = true;
+      twPM.motor = 0;
+      const twPR = rememberPin(19, 11.4, twR, true);
+      const twInk = [];
+      for (let k = 0; k <= 24; k++) {
+        const t = k / 24;
+        twInk.push({ x: 8 + 11 * t, y: 11.2 + 0.2 * t });
+      }
+      const twRope = spawnRopeVia(twPL, twPR, twInk);
+      const twPul = twRope && twRope.pulley;
+      check("a rope between two fixed towers runs over the middle pulley", !!twPul && twPul.pin === twPM && !twRope.chordJoint);
+      for (let i = 0; i < 90; i++) step(i % 2 ? 1 / 50 : 1 / 70);
+      let twTouch = 0;
+      let twOn = 0;
+      let twInside = false;
+      const twSides = twPul ? [twPul.sideA, twPul.sideB] : [];
+      for (const side of twSides) {
+        for (const bead of side.bodies || []) {
+          const p = bead.getPosition();
+          if (p.x > 11.3 && p.x < 13.5 && p.y < 11.45) twInside = true;
+        }
+      }
+      for (let c = world.getContactList(); c; c = c.getNext()) {
+        if (!c.isTouching()) continue;
+        const ba = c.getFixtureA().getBody();
+        const bb = c.getFixtureB().getBody();
+        const ma = bodyMeta.get(ba);
+        const mb = bodyMeta.get(bb);
+        const ropeBody = ma && ma.kind === "rope" ? ba : (mb && mb.kind === "rope" ? bb : null);
+        const other = ropeBody === ba ? bb : ba;
+        if (!ropeBody || other !== twM) continue;
+        twTouch += 1;
+        if (c.isEnabled()) twOn += 1;
+      }
+      check("the rope falls through the middle tower and stays on the pulley", twInside && twTouch > 0 && twOn === 0 && pins.indexOf(twPM) >= 0);
+    }
+
+    {
+      // Feste Enden: ein Gewicht auf einer Seite zieht die andere stramm.
+      // Radieren einer Hälfte löscht das ganze Seil.
+      const psPost = (x) => {
+        const body = makeBox({ x, y: 5.9, hw: 0.3, hh: 4.5 });
+        body.setStatic();
+        return body;
+      };
+      const psBuild = (motor) => {
+        buildLevel(LEVELS["ein-klotz"]);
+        if (ball) {
+          world.destroyBody(ball);
+          ball = null;
+        }
+        const left = psPost(12);
+        const mid = psPost(18);
+        const right = psPost(24);
+        const pinL = rememberPin(12, 10, left, true);
+        const pinM = rememberPin(18, 10, mid, true);
+        pinM.isMotor = !!motor;
+        pinM.motor = 0;
+        const pinR = rememberPin(24, 10, right, true);
+        const ink = [
+          { x: 12, y: 10 },
+          { x: 15, y: 6.2 },
+          { x: 18, y: 10 },
+          { x: 21, y: 6.2 },
+          { x: 24, y: 10 },
+        ];
+        const rope = spawnRopeVia(pinL, pinR, ink);
+        const pul = rope && rope.pulley;
+        const weight = makeBox({ x: 15, y: 7.35, hw: 0.55, hh: 0.4, density: 10 });
+        return { pul, weight, pinM };
+      };
+      const psStep = (n) => {
+        for (let i = 0; i < n; i++) step(i % 2 ? 1 / 50 : 1 / 70);
+      };
+      const psFree = psBuild(true);
+      const psPul = psFree.pul;
+      const psA0 = psPul ? psPul.sideA.restLength : 0;
+      const psB0 = psPul ? psPul.sideB.restLength : 0;
+      const psL0 = psPul ? psPul.L : 0;
+      check("a slack rope over a fixed motor nail is one pulley", !!psPul && psPul.pin === psFree.pinM && !psPul.sideA.chordJoint && !psPul.sideB.chordJoint);
+      psStep(150);
+      const psF = psPul && psPul.joint ? pulleyFrame(psPul.joint, false) : { lA: 0, lB: 0 };
+      const psA1 = psPul ? psPul.sideA.restLength : 0;
+      const psB1 = psPul ? psPul.sideB.restLength : 0;
+      lines.push("INFO fixed pulley load A " + (psPul ? psPul.loadA : 0).toFixed(1) + " B " + (psPul ? psPul.loadB : 0).toFixed(1)
+        + " len " + psA0.toFixed(2) + "+" + psB0.toFixed(2) + " -> " + psA1.toFixed(2) + "+" + psB1.toFixed(2)
+        + " straight " + psF.lB.toFixed(2) + " box " + psFree.weight.getPosition().y.toFixed(2)
+        + " wrap " + ((psPul && psPul.wrap) || 0).toFixed(2));
+      check("a weight on the left span pulls the right span taut",
+        psB1 < psF.lB + 0.55 && psA1 > psA0 + 1.5 && Math.abs(psA1 + psB1 - psL0) < 0.35 && psFree.weight.getPosition().y > 2);
+      const psBead = psPul && psPul.sideB.bodies[Math.floor(psPul.sideB.bodies.length / 2)];
+      const psAt = psBead ? psBead.getPosition() : { x: 0, y: 0 };
+      const psRopesBefore = drawings.filter((d) => d.kind === "rope").length;
+      eraseAt(psAt.x, psAt.y);
+      check("erasing one span of a pulley rope removes the whole rope",
+        psRopesBefore >= 2 && drawings.filter((d) => d.kind === "rope").length === 0 && pulleyList().length === 0
+        && drawings.some((d) => d.body === psFree.weight));
+
+      const psNail = psBuild(false);
+      const psN0 = psNail.pul ? psNail.pul.sideB.restLength : 0;
+      psStep(120);
+      const psNf = psNail.pul && psNail.pul.joint ? pulleyFrame(psNail.pul.joint, false) : { lB: 0 };
+      const psN1 = psNail.pul ? psNail.pul.sideB.restLength : 0;
+      const psNa = psNail.pul ? psNail.pul.sideA.restLength : 0;
+      lines.push("INFO plain-nail pulley len B " + psN0.toFixed(2) + " -> " + psN1.toFixed(2) + " straight " + psNf.lB.toFixed(2)
+        + " load " + (psNail.pul ? psNail.pul.loadA : 0).toFixed(1) + "/" + (psNail.pul ? psNail.pul.loadB : 0).toFixed(1));
+      check("a weight on one span of a plain nail still pulls the other span taut",
+        !!psNail.pul && !psNail.pinM.isMotor && psN1 < psNf.lB + 0.55 && psNa > psN0 + 1.5 && Math.abs(psNa + psN1 - psNail.pul.L) < 0.35);
+    }
+
+    {
+      // Kugelwaage: zwei ungleiche Kugeln auf einer festen Umlenkrolle
+      // kommen zur Ruhe. Die schwerere Seite wird länger, beide behalten
+      // Durchhang, die Summe der Ruhelängen bleibt die gezeichnete Länge.
+      buildLevel(LEVELS.sandbox);
+      if (ball) {
+        world.destroyBody(ball);
+        ball = null;
+      }
+      stars = [];
+      const kwPost = (x) => {
+        const body = makeBox({ x, y: 6, hw: 0.35, hh: 4 });
+        body.setStatic();
+        return body;
+      };
+      const kwL = kwPost(8);
+      const kwM = kwPost(16);
+      const kwR = kwPost(24);
+      const kwPL = rememberPin(8, 10.2, kwL, true);
+      const kwPM = rememberPin(16, 10.2, kwM, true);
+      kwPM.isMotor = true;
+      kwPM.motor = 0;
+      const kwPR = rememberPin(24, 10.2, kwR, true);
+      const kwRope = spawnRopeVia(kwPL, kwPR, [
+        { x: 8, y: 10.2 }, { x: 12, y: 7 }, { x: 16, y: 10.2 }, { x: 20, y: 7 }, { x: 24, y: 10.2 },
+      ]);
+      const kwPul = kwRope && kwRope.pulley;
+      const kwHeavy = spawnRoller(12, 9.2, 0.7);
+      const kwLight = spawnRoller(20, 9.2, 0.45);
+      const kwL0 = kwPul ? kwPul.L : 0;
+      const kwA0 = kwPul ? kwPul.sideA.restLength : 0;
+      const kwB0 = kwPul ? kwPul.sideB.restLength : 0;
+      for (let i = 0; i < 360; i++) step(i % 2 ? 1 / 50 : 1 / 70);
+      const kwF = kwPul && kwPul.joint ? pulleyFrame(kwPul.joint, false) : { lA: 0, lB: 0 };
+      const kwA1 = kwPul ? kwPul.sideA.restLength : 0;
+      const kwB1 = kwPul ? kwPul.sideB.restLength : 0;
+      const kwHv = kwHeavy.body.getLinearVelocity();
+      const kwLv = kwLight.body.getLinearVelocity();
+      const kwHs = Math.hypot(kwHv.x, kwHv.y);
+      const kwLs = Math.hypot(kwLv.x, kwLv.y);
+      lines.push("INFO kugelwaage len " + kwA0.toFixed(2) + "+" + kwB0.toFixed(2)
+        + " -> " + kwA1.toFixed(2) + "+" + kwB1.toFixed(2)
+        + " str " + kwF.lA.toFixed(2) + "+" + kwF.lB.toFixed(2)
+        + " y " + kwHeavy.body.getPosition().y.toFixed(2) + "/" + kwLight.body.getPosition().y.toFixed(2)
+        + " v " + kwHs.toFixed(2) + "/" + kwLs.toFixed(2));
+      check("two unequal balls on a pulley come to rest",
+        !!kwPul && kwPM.isMotor && !kwPM.motor
+        && kwHs < 0.5 && kwLs < 0.5
+        && kwA1 > kwB1 + 0.15
+        && kwA1 > kwF.lA + 0.4 && kwB1 > kwF.lB + 0.4
+        && Math.abs(kwA1 + kwB1 - kwL0) < 0.35
+        && kwHeavy.body.getPosition().y < kwLight.body.getPosition().y - 0.05);
+    }
+
+    {
       // Drei Kringel-Kugeln in einem durchhängenden Seil. Ohne Bullet
       // wachsen sie ineinander (gemessen etwa 0,5 m): die Perlen sind
       // Bullets, der Durchschuss-Löser schaltet den Kontakt ab.

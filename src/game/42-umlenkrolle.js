@@ -1,10 +1,11 @@
 // ---------------------------------------------------------------------------
 // Umlenkrolle: Ein Seil, das von Nagel A über einen Nagel P zu Nagel B
 // gezeichnet wird, läuft über P. P muss fest sitzen (Boden, statischer oder
-// verankerter Körper). Das Seil besteht dann aus zwei Perlenketten (A–P und
-// P–B, nur fürs Bild und für Stöße) und einem eigenen Joint zwischen den
-// beiden Lastkörpern: lA + lB <= L (L = gezeichnete Seillänge), das Seil kann
-// also über P von einer Seite auf die andere rutschen.
+// verankerter Körper). Das Seil besteht aus zwei Perlenketten (A–P und P–B).
+// Hängt an einem Ende eine bewegliche Last, trägt ein Joint zwischen den
+// Lastkörpern: lA + lB <= L. Hängen beide Enden fest, bleibt die Summe der
+// Ruhelängen L. Eine einzelne Last zieht die leere Seite stramm. Zwei Lasten
+// gleichen den Durchhang an und kommen zur Ruhe.
 //
 // Reibung nach der Seilreibungsformel (Euler-Eytelwein): Rutschen beginnt erst,
 // wenn T_hoch / T_tief > e^(mu·Umschlingungswinkel).
@@ -14,7 +15,10 @@
 // - Laufender Motornagel: Treibscheibe. Das Seil läuft mit Windentempo von der
 //   einen auf die andere Seite (beide Seiten sind dann eigene Seile mit
 //   Länge s bzw. L - s); zu viel Zugunterschied bringt sie zum Stehen.
-const PULLEY_MARGIN = 0.04;   // m, Perlenketten etwas länger als die Seilstrecke
+const PULLEY_MARGIN = 0.04;    // m, Perlenketten etwas länger als die Seilstrecke
+const PULLEY_LOAD_N = 8;       // N, darunter ist eine Seite unbelastet
+const PULLEY_SLIDE_V = 2.2;    // m/s, leere Seite wird stramm gezogen
+const PULLEY_BALANCE_V = 0.45; // m/s, zwei Lasten gleichen sich langsam an
 
 function pulleyMu(pin) {
   if (pin && pin.isMotor) return 0;
@@ -34,7 +38,8 @@ function pulleyList() {
 function ropePulleyPin(ink, a, b) {
   if (!ink || ink.length < 5 || !a || !b) return null;
   if (a.body === b.body) return null;
-  if (!a.body.isDynamic() && !b.body.isDynamic()) return null;
+  // Auch zwei feste Enden (Türme): das Seil läuft über P und fällt durch
+  // dessen Körper, statt auf dem Turm liegen zu bleiben.
   const cum = [0];
   for (let i = 1; i < ink.length; i++) cum.push(cum[i - 1] + dist(ink[i - 1], ink[i]));
   const total = cum[cum.length - 1];
@@ -338,6 +343,253 @@ function spawnRopeVia(a, b, ink) {
   return spawnRope(a, b, ink);
 }
 
+// Beide Endnägel fest (Türme, Boden): der Joint zwischen ihnen bewegt nichts.
+function pulleyEndsFixed(pul) {
+  const a = pul && pul.pinA && pul.pinA.body;
+  const b = pul && pul.pinB && pul.pinB.body;
+  if (!a || !b || typeof a.isDynamic !== "function") return false;
+  return !a.isDynamic() && !b.isDynamic();
+}
+
+// Richtung, in der die Kette den Umlenknagel verlässt ("A" oder "B" an der Rolle).
+function pulleyDeparture(side, atPulley) {
+  const bodies = side && side.bodies;
+  if (!bodies || bodies.length < 2) return null;
+  const atB = atPulley === "B";
+  const pinBead = bodies[atB ? bodies.length - 1 : 0];
+  const next = bodies[atB ? bodies.length - 2 : 1];
+  if (!pinBead || !next || typeof pinBead.getPosition !== "function") return null;
+  const a = pinBead.getPosition();
+  const b = next.getPosition();
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const d = Math.hypot(dx, dy);
+  if (d < 0.02) return null;
+  return { x: dx / d, y: dy / d };
+}
+
+// Umschlingung aus den Ketten, nicht aus der geraden Nagelverbindung: ein
+// durchhängendes Seil liegt am Nagel um, auch wenn die Endnägel auf einer Höhe sind.
+function pulleyHangWrap(pul, f) {
+  const da = pulleyDeparture(pul.sideA, "B");
+  const db = pulleyDeparture(pul.sideB, "A");
+  if (da && db) {
+    const cos = Math.max(-1, Math.min(1, da.x * db.x + da.y * db.y));
+    return Math.PI - Math.acos(cos);
+  }
+  const cosAB = Math.max(-1, Math.min(1, f.uAx * f.uBx + f.uAy * f.uBy));
+  return Math.PI - Math.acos(cosAB);
+}
+
+// Gewicht der Körper, die auf dieser Seite liegen, in N. Boden, Pfosten und
+// die Perlen selbst zählen nicht: ein leeres Seil soll sich nicht selbst ziehen.
+function pulleySideWeight(side) {
+  if (!side || !side.bodies || !world) return 0;
+  const g = world.getGravity ? world.getGravity() : null;
+  const grav = g ? Math.abs(g.y) : 0;
+  if (!(grav > 0)) return 0;
+  const beads = side.bodies;
+  let weight = 0;
+  const seen = [];
+  for (let c = world.getContactList(); c; c = c.getNext()) {
+    if (!c.isTouching()) continue;
+    const ba = c.getFixtureA().getBody();
+    const bb = c.getFixtureB().getBody();
+    let other = null;
+    if (beads.indexOf(ba) >= 0) other = bb;
+    else if (beads.indexOf(bb) >= 0) other = ba;
+    if (!other || typeof other.isDynamic !== "function" || !other.isDynamic()) continue;
+    if (seen.indexOf(other) >= 0) continue;
+    const meta = bodyMeta.get(other);
+    if (meta && (meta.kind === "rope" || meta.kind === "level" || meta.kind === "rocket")) continue;
+    seen.push(other);
+    weight += other.getMass() * grav;
+  }
+  return weight;
+}
+
+// Zug aus Gewicht und Durchhang. Ein tiefer Bauch trägt die Last mit wenig Zug,
+// ein fast gerades Seil mit viel Zug. Die Gelenkkraft am Rollenende taugt nicht:
+// sie bleibt bei den leichten Perlen hängen und sieht die Kugel nicht.
+function pulleyHangTension(side, weight) {
+  const bodies = side && side.bodies;
+  if (!bodies || bodies.length < 2 || !(weight > 0)) return 0;
+  let low = null;
+  for (let i = 0; i < bodies.length; i++) {
+    const p = bodies[i].getPosition();
+    if (!low || p.y < low.y) low = p;
+  }
+  const ends = [bodies[0].getPosition(), bodies[bodies.length - 1].getPosition()];
+  let sines = 0;
+  for (let i = 0; i < ends.length; i++) {
+    const e = ends[i];
+    const dx = e.x - low.x;
+    const dy = e.y - low.y;
+    const d = Math.hypot(dx, dy) || 1;
+    sines += Math.max(0, dy / d);
+  }
+  return weight / Math.max(0.18, sines);
+}
+
+// Länge von der Geberseite auf die Nehmerseite schieben. Geberende ist der
+// Nagel an der Rolle, damit das Seil dort über die Rolle läuft.
+function pulleyShiftLength(from, fromEnd, to, toEnd, amount) {
+  if (!(amount > 1e-5) || !from || !to) return 0;
+  if (!from.bodies || from.bodies.length < 2 || !to.bodies || to.bodies.length < 2) return 0;
+  const delta = reelRopeEnd(from, fromEnd, -amount);
+  const moved = -delta;
+  if (moved > 1e-5) reelRopeEnd(to, toEnd, moved);
+  return moved > 0 ? moved : 0;
+}
+
+// Feste Enden. Eine einzelne Last zieht die leere Seite stramm. Zwei Lasten
+// schieben Länge nur, solange der Durchhang den Zug nicht ausgleicht, und
+// lassen auf beiden Seiten Seil übrig. Ohne Last bleibt die gezeichnete Verteilung.
+function pulleySlideFixed(pul, dt, f) {
+  const sideA = pul.sideA;
+  const sideB = pul.sideB;
+  if (!sideA || !sideB) return;
+  const rawA = pulleySideWeight(sideA);
+  const rawB = pulleySideWeight(sideB);
+  const blend = Math.min(1, Math.max(0, dt) * 4);
+  pul.wA = pul.wA == null ? rawA : pul.wA + (rawA - pul.wA) * blend;
+  pul.wB = pul.wB == null ? rawB : pul.wB + (rawB - pul.wB) * blend;
+  const wA = pul.wA;
+  const wB = pul.wB;
+  pul.loadA = wA;
+  pul.loadB = wB;
+  const wrap = pulleyHangWrap(pul, f);
+  pul.wrap = wrap;
+  if (wA < PULLEY_LOAD_N && wB < PULLEY_LOAD_N) return;
+  const minA = Math.max(0.2, f.lA);
+  const minB = Math.max(0.2, f.lB);
+  const slackA = sideA.restLength - minA;
+  const slackB = sideB.restLength - minB;
+  const one = (wA >= PULLEY_LOAD_N) !== (wB >= PULLEY_LOAD_N);
+  let moved = 0;
+  if (one) {
+    if (wA >= PULLEY_LOAD_N && slackB > 0.08) {
+      const give = Math.min(slackB - 0.04, PULLEY_SLIDE_V * dt);
+      moved = pulleyShiftLength(sideB, "A", sideA, "B", give);
+    } else if (wB >= PULLEY_LOAD_N && slackA > 0.08) {
+      const give = Math.min(slackA - 0.04, PULLEY_SLIDE_V * dt);
+      moved = pulleyShiftLength(sideA, "B", sideB, "A", give);
+    }
+  } else {
+    const tA = pulleyHangTension(sideA, wA);
+    const tB = pulleyHangTension(sideB, wB);
+    pul.tenA = tA;
+    pul.tenB = tB;
+    const E = Math.exp(Math.max(0, pul.mu || 0) * wrap);
+    const band = Math.max(40, 0.2 * Math.max(tA, tB));
+    if (tA > tB * E + band && slackB > 0.25) {
+      const v = Math.min(PULLEY_BALANCE_V, (tA - tB * E) * 0.0015);
+      const give = Math.min(slackB - 0.2, Math.max(0, v) * dt);
+      moved = pulleyShiftLength(sideB, "A", sideA, "B", give);
+    } else if (tB > tA * E + band && slackA > 0.25) {
+      const v = Math.min(PULLEY_BALANCE_V, (tB - tA * E) * 0.0015);
+      const give = Math.min(slackA - 0.2, Math.max(0, v) * dt);
+      moved = pulleyShiftLength(sideA, "B", sideB, "A", give);
+    }
+  }
+  if (moved) pul.s = sideA.restLength;
+}
+
+// Eine Last auf einem Seil zwischen festen Nägeln soll liegen bleiben.
+// Die Perlen sind viel leichter als die Kugel; der Löser und die Längenkorrektur
+// stoßen sie sonst jeden Schritt neu an. Hier wird sie aus den Perlen geschoben
+// und ihre Geschwindigkeit in das Seil hinein weggenommen.
+function settlePulleyRiders() {
+  if (!world) return;
+  const beadSet = new Set();
+  for (const pul of pulleyList()) {
+    if (!pulleyEndsFixed(pul) || pul.drive) continue;
+    for (const side of [pul.sideA, pul.sideB]) {
+      const bodies = side && side.bodies;
+      if (!bodies) continue;
+      for (let i = 0; i < bodies.length; i++) beadSet.add(bodies[i]);
+    }
+  }
+  if (!beadSet.size) return;
+  const riders = new Map();
+  for (let c = world.getContactList(); c; c = c.getNext()) {
+    if (!c.isTouching()) continue;
+    const ba = c.getFixtureA().getBody();
+    const bb = c.getFixtureB().getBody();
+    let bead = null;
+    let rider = null;
+    let beadIsA = false;
+    if (beadSet.has(ba)) { bead = ba; rider = bb; beadIsA = true; }
+    else if (beadSet.has(bb)) { bead = bb; rider = ba; }
+    else continue;
+    if (!rider.isDynamic() || dragBodyHot(rider)) continue;
+    const meta = bodyMeta.get(rider);
+    if (meta && (meta.kind === "rope" || meta.kind === "level" || meta.kind === "rocket")) continue;
+    const wm = c.getWorldManifold && c.getWorldManifold();
+    let nx = 0;
+    let ny = 1;
+    let push = 0;
+    if (wm && wm.normal) {
+      nx = wm.normal.x;
+      ny = wm.normal.y;
+      if (!beadIsA) { nx = -nx; ny = -ny; }
+      const seps = wm.separations || [];
+      const n = wm.pointCount || 0;
+      for (let i = 0; i < n; i++) {
+        const s = seps[i] || 0;
+        if (s < push) push = s;
+      }
+    }
+    const prev = riders.get(rider);
+    if (!prev) riders.set(rider, { nx, ny, push });
+    else {
+      prev.nx += nx;
+      prev.ny += ny;
+      if (push < prev.push) prev.push = push;
+    }
+    bead.setLinearVelocity(V(0, 0));
+    bead.setAngularVelocity(0);
+  }
+  riders.forEach((info, rider) => {
+    const len = Math.hypot(info.nx, info.ny) || 1;
+    const nx = info.nx / len;
+    const ny = info.ny / len;
+    if (info.push < -1e-4) {
+      const p = rider.getPosition();
+      const out = Math.min(0.04, -info.push);
+      rider.setTransform(V(p.x + nx * out, p.y + ny * out), rider.getAngle());
+    }
+    const v = rider.getLinearVelocity();
+    const vn = v.x * nx + v.y * ny;
+    let vx = v.x;
+    let vy = v.y;
+    if (vn < 0) { vx -= vn * nx; vy -= vn * ny; }
+    vx *= 0.5;
+    vy *= 0.5;
+    if (Math.hypot(vx, vy) < 0.85) { vx = 0; vy = 0; }
+    rider.setLinearVelocity(V(vx, vy));
+    const spin = rider.getAngularVelocity();
+    rider.setAngularVelocity(Math.abs(spin) < 0.8 ? 0 : spin * 0.5);
+  });
+}
+
+// Radieren einer Hälfte löscht das ganze Seil. Schneiden und Nagelziehen
+// laufen weiter über dissolvePulley und lassen die andere Seite als Seil stehen.
+function destroyPulleyRope(pul) {
+  if (!pul || pul.dead) return;
+  pul.dead = true;
+  if (pul.joint && world && jointAlive(world, pul.joint)) world.destroyJoint(pul.joint);
+  pul.joint = null;
+  const sides = [pul.sideA, pul.sideB];
+  for (const side of sides) {
+    if (side && side.pulley === pul) side.pulley = null;
+  }
+  for (const side of sides) {
+    if (!side || drawings.indexOf(side) < 0) continue;
+    destroyDrawing(side);
+  }
+}
+
 // Umlenkung auflösen (Seil geschnitten, Nagel gezogen, Körper gelöscht): die
 // Seiten werden gewöhnliche Seile mit eigener Sehne.
 function dissolvePulley(pul) {
@@ -396,6 +648,12 @@ function pulleyPreStep(dt) {
       if (pul.state !== "drive") sdot = 0;
       pul.sdot = sdot;
       pul.s += sdot * dt;
+    } else if (pulleyEndsFixed(pul)) {
+      // Die Ketten sind das Seil. Länge wandert nur, wenn eine Seite Last trägt.
+      pul.drive = false;
+      pul.sdot = 0;
+      pul.state = "slide";
+      pulleySlideFixed(pul, dt, f);
     } else {
       pul.drive = false;
       pul.sdot = 0;
@@ -405,7 +663,9 @@ function pulleyPreStep(dt) {
     }
     // Rad der Umlenkrolle dreht mit dem Seil (Bildradius 0,16 m).
     pul.pin.rollAngle = (pul.pin.rollAngle || 0) + (pul.s - sPrev) * side / 0.16;
-    // Perlenketten nur so lang, dass sie den Lastkörper nie halten.
+    // Bewegliche Lasten: Perlenketten nur so lang, dass sie den Lastkörper nie halten.
+    // Feste Enden: die Kettenlänge ist die Seillänge und bleibt, außer sie rutscht.
+    if (pulleyEndsFixed(pul) && !pul.drive) continue;
     const va = pul.pinA.body.isDynamic() ? velocityAt(pul.pinA.body, f.gA.px, f.gA.py) : { x: 0, y: 0 };
     const vb = pul.pinB.body.isDynamic() ? velocityAt(pul.pinB.body, f.gB.px, f.gB.py) : { x: 0, y: 0 };
     const m = PULLEY_MARGIN + 3 * dt * Math.max(Math.hypot(va.x, va.y), Math.hypot(vb.x, vb.y));
