@@ -7214,6 +7214,10 @@ function drawCradle() {
 }
 
 
+// Dieselbe Armlänge und dieselbe Gegengewichtskiste wie zuvor.
+// Die Kiste hängt an TREB_HANGER unter dem kurzen Armende, damit sie
+// beim Wurf nachschwingt statt starr mitzurotieren. Die Schlinge ist so
+// lang, dass sie sich in der Verlängerung des Arms öffnet.
 const TREB_PIVOT_Y = 6.7;
 const TREB_ARM_SHORT = 1.35;
 const TREB_ARM_LONG = 4.7;
@@ -7221,10 +7225,11 @@ const TREB_ARM_THICK = 0.14;
 const TREB_COCKED = -1.05;
 const TREB_HOLD_DELAY = 0.7;
 const TREB_BALL_R = 0.28;
-const TREB_SLING_LEN = 1.42;
+const TREB_SLING_LEN = 1.55;
 const TREB_SLING_RELEASE = 0;
 const TREB_SLING_WOUND = -0.8;
 const TREB_ARM_SAFETY = 1.35;
+const TREB_HANGER = 0.7;
 const TREB_VIEW_W = 36;
 const TREB_VIEW_H = 16;
 const TREB_VIEW_RIGHT = 4.5;
@@ -7560,11 +7565,13 @@ function ensureTrebuchet() {
     friction: 0.7,
     restitution: 0.05,
   }));
+  const hanger = Math.max(0, TREB_HANGER);
+  weight.setPosition(V(tipS.x, tipS.y - wh - hanger));
   trebWorld.createJoint(new planck.RevoluteJoint({
     bodyA: arm,
     bodyB: weight,
     localAnchorA: V(-TREB_ARM_SHORT, 0),
-    localAnchorB: V(0, wh + 0.06),
+    localAnchorB: V(0, wh + hanger),
     collideConnected: false,
   }));
 
@@ -7710,6 +7717,7 @@ function ensureTrebuchet() {
     halfLen,
     ww,
     wh,
+    hanger,
     exploded: false,
     maxBallX: ball.getPosition().x,
     minBallX: ball.getPosition().x,
@@ -7956,6 +7964,26 @@ function drawTrebuchet() {
   fillTrebPoly(trebBoxPts(treb.frame, 0.14, 3.15, -1.2, 2.6, 0.48), lay, MAT.wood, "#5c4632");
   fillTrebPoly(trebBoxPts(treb.frame, 0.14, 3.15, 1.2, 2.6, -0.48), lay, MAT.wood, "#5c4632");
   fillTrebPoly(trebBoxPts(treb.arm, treb.halfLen, TREB_ARM_THICK, treb.armOff, 0, 0), lay, MAT.wood, "#5c4632", 2);
+  if (treb.hanger > 0.12 && treb.weight) {
+    const pin = treb.arm.getWorldPoint(V(-TREB_ARM_SHORT, 0));
+    const top = treb.weight.getWorldPoint(V(0, treb.wh));
+    const dx = top.x - pin.x;
+    const dy = top.y - pin.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len * 0.05;
+    const ny = dx / len * 0.05;
+    ctx.strokeStyle = MAT.hemp;
+    ctx.lineWidth = Math.max(2, 0.07 * lay.scale);
+    ctx.lineCap = "round";
+    for (const sign of [-1, 1]) {
+      const a = trebToScreen(pin.x + nx * sign, pin.y + ny * sign, lay);
+      const b = trebToScreen(top.x + nx * sign, top.y + ny * sign, lay);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+  }
   fillTrebPoly(trebBoxPts(treb.weight, treb.ww, treb.wh, 0, 0, 0), lay, MAT.wood, "#5c4632", 2);
   if (treb.arm && treb.hookLocal) {
     const hookBase = treb.arm.getWorldPoint(V(TREB_ARM_LONG, 0));
