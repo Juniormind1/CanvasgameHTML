@@ -741,6 +741,11 @@ function straightenOpen(pts) {
 const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an krakeligen Kreisen und 1:2-Ovalen
 const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
 const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
+// Rechtsherum (Uhrzeigersinn) wird ein krakeliger Kringel eher zur Kugel.
+// Linksherum gelten die Grenzen oben, also eher ein Felsen. Klar innerhalb
+// oder klar außerhalb entscheidet die Form allein, in beiden Richtungen.
+const CIRCLE_CW_CV_SCALE = 1.5;               // 12 % → 18 %
+const CIRCLE_CW_CORNER_SCALE = 1.2;           // 45° → 54°, ein Sechseck (60°) bleibt Felsen
 const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
 // Vereinfachen, Kanten-Bauchung und Eckenabstand sind unter SHAPE_TOL_SPAN
 // ein Anteil der Zuggröße, darüber die festen Zentimeter. Sonst wird ein

@@ -1403,6 +1403,11 @@ function straightenOpen(pts) {
 const CIRCLE_MAX_CV = 0.12;                   // std(r)/mean(r), kalibriert an krakeligen Kreisen und 1:2-Ovalen
 const CIRCLE_SAMPLES = 64;                    // Abtastpunkte entlang der Umrandung
 const CIRCLE_MAX_CORNER = 45 * Math.PI / 180; // rad, scharfe Ecke ohne Geodreieck
+// Rechtsherum (Uhrzeigersinn) wird ein krakeliger Kringel eher zur Kugel.
+// Linksherum gelten die Grenzen oben, also eher ein Felsen. Klar innerhalb
+// oder klar außerhalb entscheidet die Form allein, in beiden Richtungen.
+const CIRCLE_CW_CV_SCALE = 1.5;               // 12 % → 18 %
+const CIRCLE_CW_CORNER_SCALE = 1.2;           // 45° → 54°, ein Sechseck (60°) bleibt Felsen
 const CIRCLE_TURN_WIN = 0.25;                 // Fensterlänge als Vielfaches von r
 // Vereinfachen, Kanten-Bauchung und Eckenabstand sind unter SHAPE_TOL_SPAN
 // ein Anteil der Zuggröße, darüber die festen Zentimeter. Sonst wird ein
@@ -1884,13 +1889,25 @@ function hasRightAngle(pts, tol) {
   return false;
 }
 
+// Fläche > 0 ist linksherum (gegen den Uhrzeigersinn). Rechtsherum darf der
+// Kringel etwas weiter von der Kreisform abweichen.
+function circleTurnLimits(ring) {
+  const cv = tuneCode("maxCv", CIRCLE_MAX_CV);
+  const corner = tuneCode("maxCorner", CIRCLE_MAX_CORNER);
+  if (signedArea(ring) < 0) {
+    return { cv: cv * CIRCLE_CW_CV_SCALE, corner: corner * CIRCLE_CW_CORNER_SCALE };
+  }
+  return { cv, corner };
+}
+
 function circleFit(pts) {
   const ring = closedRing(pts);
   if (!ring || ring.length < tuneCode("minPts", CIRCLE_MIN_PTS)) return null;
   const fit = circleFromPoints(ring);
   if (!fit) return null;
-  if (fit.cv >= tuneCode("maxCv", CIRCLE_MAX_CV)) return null;
-  if (maxNetTurn(ring, fit.r * tuneCode("turnWin", CIRCLE_TURN_WIN)) > tuneCode("maxCorner", CIRCLE_MAX_CORNER)) return null;
+  const lim = circleTurnLimits(ring);
+  if (fit.cv >= lim.cv) return null;
+  if (maxNetTurn(ring, fit.r * tuneCode("turnWin", CIRCLE_TURN_WIN)) > lim.corner) return null;
   return fit;
 }
 
@@ -11422,6 +11439,60 @@ function runTests() {
     commitStroke(circLongPts, "#7a4fbf");
     const circLong = drawings.find((d) => d.kind === "solid" && !d.preset);
     check("two-to-one ellipse stays a polygon", !!circLong && circLong.kind === "solid" && !drawings.some((d) => d.kind === "roller" || d.kind === "ellipse"));
+
+    {
+      // Rechtsherum wird ein krakeliger Kringel eher eine Kugel, linksherum
+      // eher ein Felsen. Sauber innerhalb oder klar außerhalb der alten
+      // Grenzen entscheidet die Form in beiden Richtungen gleich.
+      const cdMirror = (pts) => {
+        let mx = 0;
+        for (const p of pts) mx += p.x;
+        mx /= pts.length;
+        return pts.map((p) => ({ x: mx * 2 - p.x, y: p.y }));
+      };
+      const cdRing = (dir, wob) => {
+        const pts = [];
+        const n = 36;
+        for (let i = 0; i <= n; i++) {
+          const a = dir * (i / n) * Math.PI * 2;
+          const wobble = 1 + wob * Math.sin(Math.abs(a) * 3) + wob * 0.4 * Math.sin(Math.abs(a) * 5 + 0.4);
+          pts.push({ x: 14 + Math.cos(a) * 1.2 * wobble, y: 7 + Math.sin(a) * 1.15 * wobble });
+        }
+        return pts;
+      };
+      const cdKind = (pts) => {
+        buildLevel(LEVELS["ein-klotz"]);
+        commitStroke(pts, "#3c7fd6");
+        const draw = drawings.find((d) => !d.preset && (d.kind === "roller" || d.kind === "solid" || d.kind === "ellipse"));
+        return draw ? draw.kind : "none";
+      };
+      const cdRock = [
+        { x: 10, y: 5 }, { x: 11.2, y: 4.6 }, { x: 12.5, y: 5.1 }, { x: 12.8, y: 6.3 },
+        { x: 11.9, y: 7.4 }, { x: 10.4, y: 7.1 }, { x: 9.6, y: 6.0 }, { x: 10, y: 5 },
+      ];
+      const cdElong = [
+        { x: 8, y: 3 }, { x: 10.5, y: 3.2 }, { x: 11.8, y: 3.8 }, { x: 12.0, y: 4.6 },
+        { x: 10.8, y: 5.3 }, { x: 9.2, y: 5.5 }, { x: 7.6, y: 4.9 }, { x: 7.4, y: 3.8 }, { x: 8, y: 3 },
+      ];
+      const cdHex = [];
+      for (let i = 0; i <= 6; i++) {
+        const a = -(i / 6) * Math.PI * 2;
+        cdHex.push({ x: 14 + Math.cos(a) * 1.5, y: 7 + Math.sin(a) * 1.5 });
+      }
+      check("a clockwise wobble becomes a ball", cdKind(cdRing(-1, 0.18)) === "roller");
+      check("the same wobble counter-clockwise stays a rock", cdKind(cdRing(1, 0.18)) === "solid");
+      check("a milder wobble is a ball either direction", cdKind(cdRing(1, 0.16)) === "roller" && cdKind(cdRing(-1, 0.16)) === "roller");
+      check("a clean clockwise circle stays a ball", cdKind(cdRing(-1, 0)) === "roller");
+      check("a roundish rock drawn clockwise becomes a ball", cdKind(cdMirror(cdRock)) === "roller");
+      check("a clearly jagged rock stays a rock clockwise", cdKind(cdMirror(cdElong)) === "solid");
+      check("a clockwise hexagon stays a polygon", cdKind(cdHex) === "solid");
+      const cdOval = [];
+      for (let i = 0; i <= 32; i++) {
+        const a = -(i / 32) * Math.PI * 2;
+        cdOval.push({ x: 16 + Math.cos(a) * 2, y: 7 + Math.sin(a) * 1 });
+      }
+      check("a clockwise flat oval stays a polygon", cdKind(cdOval) === "solid");
+    }
 
     function ellipseStroke(cx, cy, ra, rb, rot, n) {
       const pts = [];

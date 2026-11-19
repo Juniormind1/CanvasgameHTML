@@ -126,13 +126,25 @@ function hasRightAngle(pts, tol) {
   return false;
 }
 
+// Fläche > 0 ist linksherum (gegen den Uhrzeigersinn). Rechtsherum darf der
+// Kringel etwas weiter von der Kreisform abweichen.
+function circleTurnLimits(ring) {
+  const cv = tuneCode("maxCv", CIRCLE_MAX_CV);
+  const corner = tuneCode("maxCorner", CIRCLE_MAX_CORNER);
+  if (signedArea(ring) < 0) {
+    return { cv: cv * CIRCLE_CW_CV_SCALE, corner: corner * CIRCLE_CW_CORNER_SCALE };
+  }
+  return { cv, corner };
+}
+
 function circleFit(pts) {
   const ring = closedRing(pts);
   if (!ring || ring.length < tuneCode("minPts", CIRCLE_MIN_PTS)) return null;
   const fit = circleFromPoints(ring);
   if (!fit) return null;
-  if (fit.cv >= tuneCode("maxCv", CIRCLE_MAX_CV)) return null;
-  if (maxNetTurn(ring, fit.r * tuneCode("turnWin", CIRCLE_TURN_WIN)) > tuneCode("maxCorner", CIRCLE_MAX_CORNER)) return null;
+  const lim = circleTurnLimits(ring);
+  if (fit.cv >= lim.cv) return null;
+  if (maxNetTurn(ring, fit.r * tuneCode("turnWin", CIRCLE_TURN_WIN)) > lim.corner) return null;
   return fit;
 }
 
